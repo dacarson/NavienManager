@@ -1,0 +1,32 @@
+{
+    "configurations": [
+        {
+            "name": "Mac",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "/Users/dacarson/Documents/Arduino/NavienManager",
+                "/Users/dacarson/Documents/Arduino/libraries/**",
+                "/Users/dacarson/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.3-489d7a2b-v1/esp32/include/**",
+                "/Users/dacarson/Library/Arduino15/packages/esp32/hardware/esp32/3.1.3/**",
+                "/Users/dacarson/Library/Arduino15/packages/esp32/hardware/esp32/3.1.3/cores/esp32",
+                "/Users/dacarson/Documents/Arduino/libraries/HomeSpan/src",
+                "/Users/dacarson/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.3-489d7a2b-v1/esp32/include/freertos/FreeRTOS-Kernel/include",
+                "/Users/dacarson/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.3-489d7a2b-v1/esp32/include/freertos/config/include/freertos",
+                "/Users/dacarson/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.3-489d7a2b-v1/esp32/dio_qspi/include",
+                "/Users/dacarson/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.3-489d7a2b-v1/esp32/include/freertos/config/xtensa/include",
+                "/Users/dacarson/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.3-489d7a2b-v1/esp32/include/xtensa/include",
+                "/Users/dacarson/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.3-489d7a2b-v1/esp32/include/xtensa/esp32/include",
+                "/Users/dacarson/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.3-489d7a2b-v1/esp32/include/newlib/platform_include"
+            ],
+            "defines": [],
+            "macFrameworkPath": [
+                "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks"
+            ],
+            "compilerPath": "/usr/bin/clang",
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "macos-clang-arm64"
+        }
+    ],
+    "version": 4
+}
