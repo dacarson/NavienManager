@@ -238,8 +238,10 @@ void onAnnouncePacket(Navien::NAVIEN_STATE *state) {
 /* Report any errors that occurred */
 
 void onError(const char *function, const char *errorMessage) {
-  telnet.print("Error ");
-  telnet.printf("%s %s\n", function, errorMessage);
+  telnet.print(F("Error "));
+  telnet.print(function);
+  telnet.print(F(" "));
+  telnet.println(errorMessage);
 }
 
 void setupNavienCallbacks() {

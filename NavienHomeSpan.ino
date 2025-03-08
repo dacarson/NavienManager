@@ -22,9 +22,6 @@ SOFTWARE.
 
 #include "HomeSpan.h"
 #include "FakeGatoScheduler.h"
-
-//#define TEST 1
-
 extern Navien navienSerial;
 
 CUSTOM_CHAR(ValvePosition, E863F12E-079E-48FF-8F27-9C2605A29F52, PR+EV, UINT8, 0, 0, 100, true); 

@@ -32,12 +32,13 @@ SOFTWARE.
 
 bool wifiConnected = false;
 
-ESPTelnet telnet;
-extern void setupTelnetCommands();   // TelnetCommands.ino
-
 Navien navienSerial(2);
 #define RXD2 16
 #define TXD2 17
+
+ESPTelnet telnet;
+extern void setupTelnetCommands();   // TelnetCommands.ino
+
 extern void setupNavienCallbacks();  // NavienBroadcaster.ino
 
 extern void setupOTA();              // OTASupport.ino

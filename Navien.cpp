@@ -90,7 +90,7 @@ void Navien::parse_status_packet() {
       break;
     default:
       if (on_error_cb)
-        on_error_cb(__func__, "Unknown status packet type received.");
+        on_error_cb(__func__, F("Unknown status packet type received."));
       Navien::print_buffer(recv_buffer.raw_data, recv_buffer.hdr.len + HDR_SIZE, on_error_cb);
       break;
   }

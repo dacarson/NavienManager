@@ -24,7 +24,7 @@
 #include "esp_netif_sntp.h"
 #include <WiFi.h>
 
-#define NTP_SERVER "pool.ntp.org"
+#define NTP_SERVER F("pool.ntp.org")
 
 SchedulerBase::SchedulerBase()
 : sntpSyncDone(false), currentState(Unknown),
@@ -54,20 +54,22 @@ bool SchedulerBase::saveScheduleToStorage() {
   size_t len = sizeof(weekScheduleEEPROM);
   esp_err_t status = nvs_get_blob(nvsStorageHandle, "weekSchedule", &weekScheduleEEPROM, &len);
   if (status) {
-    Serial.printf("Not critical, failed to load existing schedule for save comparison: %s.\n", esp_err_to_name(status));
+    Serial.print(F("Not critical, failed to load existing schedule for save comparison: "));
+    Serial.println(esp_err_to_name(status));
   }
   
   if (!status && memcmp(weekSchedule, weekScheduleEEPROM, sizeof(weekSchedule)) == 0) {
-    Serial.println("Schedule unchanged, not saving to NVS");
+    Serial.println(F("Schedule unchanged, not saving to NVS"));
     return true;
   }
   
   status = nvs_set_blob(nvsStorageHandle, "weekSchedule", &weekSchedule, sizeof(weekSchedule));
   if (status) {
-    Serial.printf("Failed to save schedule to NVS %s.\n", esp_err_to_name(status));
+    Serial.print(F("Failed to save schedule to NVS "));
+    Serial.println(esp_err_to_name(status));
     return false;
   }
-  Serial.println("Schedule updated to NVS.");
+  Serial.println(F("Schedule updated to NVS."));
   nvs_commit(nvsStorageHandle);
   return true;
 }
@@ -76,7 +78,8 @@ bool SchedulerBase::loadScheduleFromStorage() {
   size_t len = sizeof(weekSchedule);
   esp_err_t status = nvs_get_blob(nvsStorageHandle, "weekSchedule", &weekSchedule, &len);
   if (status) {
-    Serial.printf("Failed to load schedule from NVS: %s.\n", esp_err_to_name(status));
+    Serial.print(F("Opening NVS "));
+    Serial.println(esp_err_to_name(status));
     return false;
   }
   
@@ -84,19 +87,19 @@ bool SchedulerBase::loadScheduleFromStorage() {
   for (int i = 0; i < 7; i++) {
     for (int x = 0; x < 4; x++) {
       if (weekSchedule[i].slots[x].startHour != 0xFF && (weekSchedule[i].slots[x].startHour < 0 || weekSchedule[i].slots[x].startHour > 23)) {
-        Serial.println("Schedule corrupt in NVS.");
+        Serial.println(F("Schedule corrupt in NVS."));
         return false;
       }
       if (weekSchedule[i].slots[x].startMinute != 0xFF && (weekSchedule[i].slots[x].startMinute < 0 || weekSchedule[i].slots[x].startMinute > 59)) {
-        Serial.println("Schedule corrupt in NVS.");
+        Serial.println(F("Schedule corrupt in NVS."));
         return false;
       }
       if (weekSchedule[i].slots[x].endHour != 0xFF && (weekSchedule[i].slots[x].endHour < 0 || weekSchedule[i].slots[x].endHour > 23)) {
-        Serial.println("Schedule corrupt in NVS.");
+        Serial.println(F("Schedule corrupt in NVS."));
         return false;
       }
       if (weekSchedule[i].slots[x].endMinute != 0xFF && (weekSchedule[i].slots[x].endMinute < 0 || weekSchedule[i].slots[x].endMinute > 59)) {
-        Serial.println("Schedule corrupt in NVS.");
+        Serial.println(F("Schedule corrupt in NVS."));
         return false;
       }
     }
