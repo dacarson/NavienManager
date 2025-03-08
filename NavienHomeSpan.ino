@@ -24,6 +24,40 @@ SOFTWARE.
 #include "FakeGatoScheduler.h"
 extern Navien navienSerial;
 
+// Global so that Telnet can dump history state.
+EveHistoryService *historyService;
+
+void commandHistory(const String& params) {
+  if (!historyService) {
+    telnet.println(F("Error: History service not available"));
+    return;
+  }
+  // Parse length parameter (default to all entries if not specified)
+  int length = historyService->store.usedMemory;
+  if (params.length() > 0) {
+    length = min((int)params.toInt(), (int)historyService->store.usedMemory);
+  }
+  telnet.println(F("Time,CurrentTemp,TargetTemp,ValvePercent,ThermoTarget,OpenWindow"));
+  
+  // Calculate starting entry based on length
+  int firstEntry = historyService->store.firstEntry;
+  int lastEntry = historyService->store.lastEntry;
+  int startEntry = max(lastEntry - length, firstEntry);
+  
+  // Output entries in CSV format
+  for (int i = startEntry; i < lastEntry; i++) {
+    auto entry = historyService->store.history[i % historyService->store.historySize];
+    telnet.printf("%u,%.2f,%.2f,%d,%d,%d\n",
+      entry.time,
+      entry.currentTemp / 100.0,
+      entry.targetTemp / 100.0,
+      entry.valvePercent,
+      entry.thermoTarget,
+      entry.openWindow
+    );
+  }
+}
+
 CUSTOM_CHAR(ValvePosition, E863F12E-079E-48FF-8F27-9C2605A29F52, PR+EV, UINT8, 0, 0, 100, true); 
 
 Characteristic::SerialNumber *serialNumber;
@@ -62,7 +96,6 @@ struct DEV_Navien : Service::Thermostat {
   Characteristic::ProgramData *programData;
   Characteristic::ValvePosition *valvePosition;
 
-  EveHistoryService *historyService;
   FakeGatoScheduler *scheduler;
 
   bool serialNumberSet = false;
