@@ -97,23 +97,29 @@ void commandPing(const String& params) {
 
 void commandWiFi(const String& params) {
   telnet.println(F("Wi-Fi Details:"));
-  telnet.println("  SSID: " + WiFi.SSID());
-  telnet.println("  IP Address: " + WiFi.localIP().toString());
-  telnet.println("  Signal Strength: " + String(WiFi.RSSI()) + " dBm");
+  telnet.print(F("  SSID: "));
+  telnet.println(WiFi.SSID());
+  telnet.print(F("  IP Address: "));
+  telnet.println(WiFi.localIP().toString());
+  telnet.print(F("  Signal Strength: "));
+  telnet.print(WiFi.RSSI());
+  telnet.println(F(" dBm"));
 }
 
 void commandTrace(const String& params) {
-  if (params == "gas" || params == "water" || params == "command" || params == "announce") {
+  if (params == F("gas") || params == F("water") || params == F("command") || params == F("announce")) {
     trace = params;
-    telnet.printf("Tracing only %s interactions.\n", params.c_str());
+    telnet.print(F("Tracing only "));
+    telnet.print(params);
+    telnet.println(F(" interactions."));
   } else {
-    trace = "all";
+    trace = F("all");
     telnet.println(F("Tracing all interactions."));
   }
 }
 
 void commandStop(const String& params) {
-  trace = "";
+  trace = F("");
   telnet.println(F("Tracing stopped."));
 }
 
@@ -129,7 +135,7 @@ void commandControl(const String& params) {
   if (navienSerial.controlAvailable()) {
     telnet.println(F("Commands can be sent."));
   } else {
-    telnet.println(F("Commands can not be sent."));
+    telnet.println(F("Commands cannot be sent."));  // Also fixed typo in message
   }
 }
 

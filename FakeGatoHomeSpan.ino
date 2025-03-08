@@ -110,8 +110,8 @@ struct EveHistoryService : Service::EveHistoryData {
   
   EveHistoryService() : Service::EveHistoryData{} {
     
-    Serial.println("Configuring Eve History Service");
-    Serial.print("\n");
+    Serial.println(F("Configuring Eve History Service"));
+    Serial.print(F("\n"));
 
         // Initialize HistroyStatusStructure
     memset(&historyStatusData, 0, sizeof (HistoryStatusData));
@@ -260,19 +260,19 @@ struct EveHistoryService : Service::EveHistoryData {
     uint32_t first = store.usedMemory < store.historySize ? store.firstEntry : store.firstEntry + 1;
     memcpy(&historyStatusData.raw_data[27], &first, sizeof(uint32_t));
     
-    Serial.printf("Updating History Status store.usedMemory %d store.lastEntry %d\n", store.usedMemory, store.lastEntry);
+    Serial.printf(F("Updating History Status store.usedMemory %d store.lastEntry %d\n"), store.usedMemory, store.lastEntry);
     //printData(historyStatusData.raw_data, sizeof(historyStatusData.raw_data));
     
     historyStatus.setData(historyStatusData.raw_data, sizeof(historyStatusData.raw_data));
   }
   
   void printData(uint8_t *data, int len) {
-    Serial.printf("Data %d ", len);
+    Serial.printf(F("Data %d "), len);
     for (int i = 0; i < len; i++) {
       if (data[i] < 0x10)
-          Serial.printf("0%x ", data[i]);
+          Serial.printf(F("0%x "), data[i]);
       else
-        Serial.printf("%x ", data[i]);
+        Serial.printf(F("%x "), data[i]);
     }
     Serial.println("");
   }
@@ -290,9 +290,9 @@ struct EveHistoryService : Service::EveHistoryData {
       
       // Build up the history send buffer
       for (int i = 0; i < 11; i++) {
-        Serial.printf("MemoryAddress %d\n", memoryAddress);
+        Serial.printf(F("MemoryAddress %d\n"), memoryAddress);
         if ((store.history[memoryAddress].time == 0) || (sendTime) || currentEntry == store.firstEntry + 1) { // Its a store.refTime entry or we need to set the time
-          Serial.println("Sending special Ref Time history entry");
+          Serial.println(F("Sending special Ref Time history entry"));
           uint8_t refEntry[21];
           memset(refEntry, 0, 21);
           refEntry[0] = 21; // entry length
@@ -328,11 +328,11 @@ struct EveHistoryService : Service::EveHistoryData {
         if (currentEntry > store.lastEntry)
             break;
       }
-      Serial.println("Sending History");
+      Serial.println(F("Sending History"));
       printData(historySendBuffer, sendBufferLen);
       historyEntries.setData(historySendBuffer, sendBufferLen);
     } else {
-      Serial.println("No History To Send");
+      Serial.println(F("No History To Send"));
       historyEntries.setData(0, 0);
     }
   }
@@ -345,7 +345,7 @@ struct EveHistoryService : Service::EveHistoryData {
       historyRequest.getNewData(data, len);
       uint32_t address = *(uint32_t*)&data[2];
       
-      Serial.printf("History Request %d\n", address);
+      Serial.printf(F("History Request %d\n"), address);
       sendHistory(address);
       delete data;
     }
@@ -354,27 +354,28 @@ struct EveHistoryService : Service::EveHistoryData {
       int len = setTime.getNewData(0, 0);
       uint8_t *data = (uint8_t *)malloc(sizeof(uint8_t) * len);
       setTime.getNewData(data, len);
-      Serial.print("Set Time ");
+      Serial.print(F("Set Time "));
       uint32_t eveTimestamp = *(uint32_t*)data;
       
       time_t currentTime = eveTimestamp + EPOCH_OFFSET;  // Convert to Unix timestamp (since 1970)
+      
       struct tm *timeInfo = localtime(&currentTime);          // Convert to time structure
-      Serial.printf("%02d:%02d %02d/%02d/%04d\n",
+      Serial.printf(F("%02d:%02d %02d/%02d/%04d\n"),
               timeInfo->tm_hour, timeInfo->tm_min,
               timeInfo->tm_mon + 1, timeInfo->tm_mday,  // tm_mon is 0-based
               timeInfo->tm_year + 1900);               // tm_year is years since 1900
       
       uint32_t before = time(nullptr);
 
-      Serial.print("Checking the clock. Before: ");
+      Serial.print(F("Checking the clock. Before: "));
       Serial.print(before);
-      Serial.print(", After: ");
+      Serial.print(F(", After: "));
       Serial.print(currentTime);
-      Serial.print(", Elapsed: ");
+      Serial.print(F(", Elapsed: "));
       Serial.println(currentTime - before);
       
       if (currentTime - before > 5) {
-        Serial.println("Updating local clock");
+        Serial.println(F("Updating local clock"));
         
         // set the clock
         struct timeval tv;
@@ -385,13 +386,13 @@ struct EveHistoryService : Service::EveHistoryData {
         // Check to see if the reference time was set, but the clock had not been set yet.
         // If so, then we need to correct it
         if (store.refTime != 0 && store.refTime > currentTime ) {
-          Serial.printf("Fixing refTime %u to %u\n", store.refTime, eveTimestamp);
+          Serial.printf(F("Fixing refTime %u to %u\n"), store.refTime, eveTimestamp);
           store.refTime = eveTimestamp - (store.refTime + EPOCH_OFFSET);
-          Serial.printf("Fixed refTime %u\n", store.refTime);
+          Serial.printf(F("Fixed refTime %u\n"), store.refTime);
 
           // Fix up the History Status Data and republish.
           historyStatusData.status.timeSinceLastUpdate = (currentTime - EPOCH_OFFSET) - store.refTime;
-          Serial.printf("Correcting timeSincceLastUpdate %u\n", historyStatusData.status.timeSinceLastUpdate);
+          Serial.printf(F("Correcting timeSincceLastUpdate %u\n"), historyStatusData.status.timeSinceLastUpdate);
           historyStatusData.status.refTime = store.refTime;
           historyStatus.setData(historyStatusData.raw_data, sizeof(historyStatusData.raw_data));
 
