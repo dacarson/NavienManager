@@ -22,10 +22,8 @@ SOFTWARE.
 
 #include <WiFi.h>
 #include <ESPTelnet.h>
-#include <ArduinoOTA.h>
 #include <nvs_flash.h>
 #include "HomeSpan.h"
-
 
 #include "Navien.h"
 #include "FakeGatoScheduler.h"
@@ -41,11 +39,7 @@ extern void setupTelnetCommands();   // TelnetCommands.ino
 
 extern void setupNavienCallbacks();  // NavienBroadcaster.ino
 
-extern void setupOTA();              // OTASupport.ino
-
 extern FakeGatoScheduler* setupHomeSpanAccessories();
-extern void setupHomeSpanHistory();
-
 FakeGatoScheduler* scheduler;
 
 String getNextTransitionTime() {
@@ -138,7 +132,7 @@ void navienStatus(String &html) {
     "<h3>Device Time: <span id='deviceTime'>" + getFormattedTime() + "</span></h3>"
     + "<div class='status-container'>"
     + statusCard("Scheduler Enabled", String(scheduler->enabled() ? "Yes" : "No"), scheduler->enabled() ? "status-ok" : "status-warning")
-    + statusCard("Current State", getSchedulerState(scheduler->getCurrentState()), "status-ok")
+    + statusCard("Current State", FakeGatoScheduler::getSchedulerState(scheduler->getCurrentState()), "status-ok")
     + statusCard("Next Transition", getNextTransitionTime(), scheduler->enabled() ? "status-ok" : "status-warning")
     + statusCard("Next State", getNextTransitionState(), scheduler->enabled() ? "status-ok" : "status-warning")
     + "</div>";
@@ -182,11 +176,6 @@ void onWifiConnected(int connection) {
   telnet.begin(23);
   Serial.println(F("Telnet server started"));
 
-  // Setup OTA
-  setupOTA();
-  ArduinoOTA.begin();
-  Serial.println(F("OTA Started"));
-
   wifiConnected = true;
 } 
 
@@ -199,10 +188,11 @@ void setup() {
 
   // setup HomeSpan. It needs to own WiFi setup so
   // that it can do the pairing.
-  homeSpan.setWifiCredentials(ssid, password);
+  //homeSpan.setWifiCredentials(ssid, password);
   homeSpan.setWifiBegin(myWiFiBegin);
   homeSpan.setConnectionCallback(onWifiConnected);
   homeSpan.begin(Category::Thermostats,"Navien");
+  homeSpan.enableOTA();
   homeSpan.enableWebLog(50);
   homeSpan.setWebLogCallback(navienStatus);
   String cssStyle = 
@@ -219,6 +209,7 @@ void setup() {
   "}"
   ".footer{margin-top:20px;font-size:14px;opacity:.7}";
   homeSpan.setWebLogCSS(cssStyle.c_str());
+
   scheduler = setupHomeSpanAccessories();
   Serial.println(F("HomeSpan Started"));
 }
