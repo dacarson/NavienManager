@@ -44,7 +44,7 @@ public:
 
   bool enabled() { return scheduleActive; }
 
-  static String getSchedulerState(int state) const; // Return the state as a string
+  static String getSchedulerState(int state); // Return the state as a string
   
   
 protected:

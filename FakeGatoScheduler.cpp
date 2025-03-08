@@ -65,7 +65,7 @@ FakeGatoScheduler::FakeGatoScheduler(Characteristic::ProgramCommand *prgCommand,
   refreshProgramData = true;
 }
 
-String FakeGatoScheduler::getSchedulerState(int state) const {
+String FakeGatoScheduler::getSchedulerState(int state) {
     switch (state) {
         case 0: return "Unknown";
         case 1: return "Active";
