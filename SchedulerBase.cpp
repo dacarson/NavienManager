@@ -24,7 +24,7 @@
 #include "esp_netif_sntp.h"
 #include <WiFi.h>
 
-#define NTP_SERVER F("pool.ntp.org")
+#define NTP_SERVER "pool.ntp.org"
 
 SchedulerBase::SchedulerBase()
 : sntpSyncDone(false), currentState(Unknown),
