@@ -172,6 +172,7 @@ void onWifiConnected(int connection) {
   Serial.println(F("UDP Broadcast started"));
 
   // Start Telnet server on port 23
+  telnet.stop(); // Stop it if it is already running
   setupTelnetCommands();
   telnet.begin(23);
   Serial.println(F("Telnet server started"));
@@ -192,7 +193,7 @@ void setup() {
   homeSpan.setWifiBegin(myWiFiBegin);
   homeSpan.setConnectionCallback(onWifiConnected);
   homeSpan.begin(Category::Thermostats,"Navien");
-  homeSpan.enableOTA();
+  homeSpan.enableOTA(false);
   homeSpan.enableWebLog(50);
   homeSpan.setWebLogCallback(navienStatus);
   String cssStyle = 
