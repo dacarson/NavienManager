@@ -299,7 +299,10 @@ int Navien::send_cmd() {
   // +1 to include the crc value
   int len = HDR_SIZE + send_buffer.hdr.len + 1;
 
-  Navien::print_buffer(send_buffer.raw_data, len, on_error_cb);
+  if (on_error_cb) {
+    on_error_cb(__func__, "Attempting to send the command:");
+    Navien::print_buffer(send_buffer.raw_data, len, on_error_cb);
+  }
 
   int sent_len = -1;
   if (!navilink_present)
