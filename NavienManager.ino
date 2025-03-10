@@ -193,7 +193,7 @@ void setup() {
   homeSpan.setWifiBegin(myWiFiBegin);
   homeSpan.setConnectionCallback(onWifiConnected);
   homeSpan.begin(Category::Thermostats,"Navien");
-  homeSpan.enableOTA(false);
+  homeSpan.enableOTA(false, false);
   homeSpan.enableWebLog(50);
   homeSpan.setWebLogCallback(navienStatus);
   String cssStyle = 
@@ -217,7 +217,6 @@ void setup() {
 
 void loop() {
   if (wifiConnected) {
-  ArduinoOTA.handle();
   telnet.loop();
   }
 
