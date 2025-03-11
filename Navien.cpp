@@ -178,7 +178,7 @@ void Navien::parse_packet() {
     case Navien::PACKET_DIRECTION_CONTROL:
       crc_c = Navien::checksum(recv_buffer.raw_data, HDR_SIZE + recv_buffer.hdr.len, CHECKSUM_SEED_62);
       if (crc_c != crc_r) {
-        sprintf(errBuffer, "Status Packet checksum error: 0x%02X (calc) != 0x%02X (recv)", crc_c, crc_r);
+        sprintf(errBuffer, "Control Packet checksum error: 0x%02X (calc) != 0x%02X (recv)", crc_c, crc_r);
         if (on_error_cb)
           on_error_cb(__func__, errBuffer);
         break;
@@ -292,6 +292,7 @@ void Navien::print_buffer(const uint8_t *data, size_t length, ErrorCallbackFunct
 
 // Send what ever is in the send buffer
 // then clear it.
+// Return the number of bytes sent.
 int Navien::send_cmd() {
 
   if (!send_buffer.hdr.len) return -1;  // Nothing to send.
