@@ -417,6 +417,7 @@ void FakeGatoScheduler::loop() {
     updateCurrentScheduleIfNeeded(false);
     addMilliseconds(&prog_send_data.currentTime, millis() - clockOffset);
     clockOffset = millis();
+    // Don't announce when there is new program data, Eve app will fetch it when it wants it.
     programData->setData((const uint8_t *)&prog_send_data, sizeof(PROG_DATA_FULL_DATA), false);
     refreshProgramData = false;
   }
