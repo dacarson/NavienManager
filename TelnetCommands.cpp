@@ -60,6 +60,7 @@ void onTelnetConnect(String ip) {
   telnet.print(F("\nWelcome "));
   telnet.println(telnet.getIP());
   telnet.println(F("(Use bye to disconnect.)"));
+  telnet.print(F("> "));
 }
 
 void onTelnetDisconnect(String ip) {
@@ -89,6 +90,7 @@ void onTelnetInput(String input) {
   } else {
     telnet.println(F("Unknown command. Type 'help' to see available commands."));
   }
+  telnet.print(F("> "));
 }
 
 // Example command callbacks
@@ -144,7 +146,7 @@ void commandSetTemp(const String& params) {
   float temp;
   if (params.isEmpty()) {
     temp = navienSerial.currentState()->gas.set_temp;
-    telnet.printf("Current set temperature: %0.1f°F\n", temp);
+    telnet.printf("Current set temperature: %0.1f°C\n", temp);
   } else {
     temp = params.toFloat();
     int success = -1;
@@ -152,9 +154,9 @@ void commandSetTemp(const String& params) {
       success = navienSerial.setTemp(temp);
     }
     if (success < 0) {
-      telnet.printf("Failed setting temperature to: %0.1f°F\n", temp);
+      telnet.printf("Failed setting temperature to: %0.1f°C Return code: %d\n", temp, success);
     } else {
-      telnet.printf("%d Set temperature to: %0.1f°F\n", success, temp);
+      telnet.printf("Set temperature to: %0.1f°C Return code: %d\n", temp, success);
     }
   }
 }
@@ -328,7 +330,7 @@ void setupTelnetCommands() {
   registerCommand(F("recirc"), F("Set or get recirculation state (on/off)"), commandRecirc);
   registerCommand(F("hotButton"), F("Send hot button command"), commandHotButton);
   registerCommand(F("timezone"), F("Set or get current timezone"), commandTimezone);
-  registerCommand(F("eraseEve"), F("Erase Eve Program State"), commandEraseEve);
+  registerCommand(F("erasePgm"), F("Erase all Program State"), commandEraseEve);
   registerCommand(F("history"), F("Print history entries in CSV format (optional: number of entries)"), commandHistory);
   registerCommand(F("reboot"), F("Reboot ESP32"), commandReboot);
   registerCommand(F("bye"), F("Disconnect"), commandBye);
