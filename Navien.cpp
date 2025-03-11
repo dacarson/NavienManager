@@ -71,11 +71,18 @@ void Navien::parse_gas() {
   sprintf(buffer, "%d.%d", recv_buffer.gas.panel_version_hi, recv_buffer.gas.panel_version_lo);
   state.gas.panel_version = atof(buffer);
 
-  state.gas.accumulated_gas_usage = 0.1 * (recv_buffer.gas.cumulative_gas_hi << 8 | recv_buffer.gas.cumulative_gas_lo);
+  // Safely compute accumulated gas usage with overflow protection
+  uint32_t raw_gas = (recv_buffer.gas.cumulative_gas_hi << 8 | recv_buffer.gas.cumulative_gas_lo);
+  state.gas.accumulated_gas_usage = 0.1f * raw_gas;  // Using float multiplication for better precision
   state.gas.current_gas_usage = recv_buffer.gas.current_gas_hi << 8 | recv_buffer.gas.current_gas_lo;
 
-  state.gas.total_operating_time = 60 * (recv_buffer.gas.total_operating_time_hi << 8 | recv_buffer.gas.total_operating_time_lo);
-  state.gas.accumulated_domestic_usage_cnt = 10 * (recv_buffer.gas.cumulative_domestic_usage_cnt_hi << 8 | recv_buffer.gas.cumulative_domestic_usage_cnt_lo);
+  // Convert total operating time to seconds using 32-bit arithmetic
+  uint32_t raw_time = (recv_buffer.gas.total_operating_time_hi << 8 | recv_buffer.gas.total_operating_time_lo);
+  state.gas.total_operating_time = 60 * raw_time;  // Safe with uint32_t
+
+  // Convert domestic usage count using 32-bit arithmetic
+  uint32_t raw_usage = (recv_buffer.gas.cumulative_domestic_usage_cnt_hi << 8 | recv_buffer.gas.cumulative_domestic_usage_cnt_lo);
+  state.gas.accumulated_domestic_usage_cnt = 10 * raw_usage;  // Safe with uint32_t
 
   if (on_gas_packet_cb) on_gas_packet_cb(&(state));
 }

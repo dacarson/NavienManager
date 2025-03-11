@@ -306,8 +306,8 @@ enum CommandActionHotButton {
       float panel_version;
       float accumulated_gas_usage;    // m^3 (ccf = m^3 / 2.832, Therms = m^3 / 2.832 * 1.02845 )
       uint16_t current_gas_usage;     // kcal (btu == kcal * 3.965667)
-      uint16_t total_operating_time;  // seconds
-      int accumulated_domestic_usage_cnt; 
+      uint32_t total_operating_time;  // seconds - expanded to handle large values
+      uint32_t accumulated_domestic_usage_cnt;  // Counter for domestic usage, multiplied by 10
     } gas;
 
     struct {
