@@ -27,6 +27,16 @@ extern Navien navienSerial;
 // Global so that Telnet can dump history state.
 EveHistoryService *historyService;
 
+String getFormattedTimeForValue(time_t value) {    
+  time_t now = value;      
+    struct tm *timeinfo = localtime(&now); 
+
+    char timeString[64];
+    strftime(timeString, sizeof(timeString), "%A, %Y-%m-%d %H:%M", timeinfo); // 24hr format, no seconds, includes weekday
+
+    return String(timeString);
+}
+
 void commandHistory(const String& params) {
   if (!historyService) {
     telnet.println(F("Error: History service not available"));
@@ -47,8 +57,8 @@ void commandHistory(const String& params) {
   // Output entries in CSV format
   for (int i = startEntry; i < lastEntry; i++) {
     auto entry = historyService->store.history[i % historyService->store.historySize];
-    telnet.printf("%u,%.2f,%.2f,%d,%d,%d\n",
-      entry.time,
+    telnet.printf("%s, %.2f,%.2f,%d,%d,%d\n",
+      getFormattedTimeForValue(entry.time).c_str(),
       entry.currentTemp / 100.0,
       entry.targetTemp / 100.0,
       entry.valvePercent,
