@@ -244,7 +244,7 @@ void onError(const char *function, const char *errorMessage) {
   telnet.println(errorMessage);
 }
 
-void setupNavienCallbacks() {
+void setupNavienBroadcaster() {
   navienSerial.onGasPacket(onGasPacket);
   navienSerial.onWaterPacket(onWaterPacket);
   navienSerial.onCommandPacket(onCommandPacket);
