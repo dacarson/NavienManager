@@ -246,6 +246,8 @@ struct EveHistoryService : Service::EveHistoryData {
     store.history[store.lastEntry % store.historySize].valvePercent = valvePercent;
     store.history[store.lastEntry % store.historySize].thermoTarget = thermoTarget;
     store.history[store.lastEntry % store.historySize].openWindow = openWindow;
+
+    saveHistory();
     
   }
   
