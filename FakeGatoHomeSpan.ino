@@ -26,6 +26,7 @@
  */
 
 #include "HomeSpan.h"  // Corrected include syntax
+#include <LittleFS.h>
 
 #define EPOCH_OFFSET 978307200  // Seconds from 1970-01-01 to 2001-01-01
 #define MEMORY_SIZE 3024  // Log entry buffer size, 3 weeks at a record per 10 mins
@@ -111,7 +112,6 @@ struct EveHistoryService : Service::EveHistoryData {
   EveHistoryService() : Service::EveHistoryData{} {
     
     Serial.println(F("Configuring Eve History Service"));
-    Serial.print(F("\n"));
 
         // Initialize HistroyStatusStructure
     memset(&historyStatusData, 0, sizeof (HistoryStatusData));
@@ -123,7 +123,13 @@ struct EveHistoryService : Service::EveHistoryData {
     historyStatusData.raw_data[35] = 0x01;
     historyStatusData.raw_data[36] = 0x01;
 
-    
+    // load the history back into memory
+    if (loadHistory()) {
+      WEBLOG("Restored History from file");
+    } else {
+      WEBLOG("Failed to restore History from file, using empty history.");
+    }
+
     updateAndSetHistoryStatus();
     historyEntries.setData(0,0);
     
@@ -146,20 +152,20 @@ struct EveHistoryService : Service::EveHistoryData {
       // **Log accumulated data before switching to high-frequency mode**
       if (keyValueChanged && logInterval == LOG_ENTRY_FREQ_TEN_MIN) {
           if (avgLog.count > 0) {  // Ensure we have accumulated data
-            WEBLOG("Writing low freq averaged data entry");
+            //WEBLOG("Writing low freq averaged data entry");
             generateTimedHistoryEntry();
           }
           logInterval = LOG_ENTRY_FREQ_ONE_MIN;
-          WEBLOG("Switching to high freq logging. TargetTemp new %d old %d ThermoTarget new %d old %d Valve %d",
+          /*WEBLOG("Switching to high freq logging. TargetTemp new %d old %d ThermoTarget new %d old %d Valve %d",
                 (uint16_t)(targetTemp * 100), store.history[store.lastEntry % store.historySize].targetTemp,
-                thermoTarget, store.history[store.lastEntry % store.historySize].thermoTarget, valvePercent);
+                thermoTarget, store.history[store.lastEntry % store.historySize].thermoTarget, valvePercent); */
       } else if (valvePercent == 0 && logInterval == LOG_ENTRY_FREQ_ONE_MIN) {
           if (avgLog.count > 0) {  // Ensure we have accumulated data
-            WEBLOG("Writing high freq averaged data entry");
+            //WEBLOG("Writing high freq averaged data entry");
             generateTimedHistoryEntry();
           }
         logInterval = LOG_ENTRY_FREQ_TEN_MIN;
-        WEBLOG("Switching to low freq logging");
+        //WEBLOG("Switching to low freq logging");
       }
     } else {
       // We have no entries, so create the first one
@@ -242,6 +248,34 @@ struct EveHistoryService : Service::EveHistoryData {
     store.history[store.lastEntry % store.historySize].openWindow = openWindow;
     
   }
+  
+  #define HISTORY_FILE "/history.bin"
+
+  bool saveHistory() {
+    File file = LittleFS.open(HISTORY_FILE, "w");
+    if (!file) {
+        Serial.println("Failed to save history to file");
+        return false;
+    }
+    
+    size_t written = file.write((uint8_t*)&store, sizeof(PersistHistoryData));
+    file.close();
+    
+    return written == sizeof(PersistHistoryData);
+  }
+
+  bool loadHistory() {
+    File file = LittleFS.open(HISTORY_FILE, "r");
+    if (!file) {
+        Serial.println("Failed to open history file");
+        return false;
+    }
+
+    size_t readBytes = file.read((uint8_t*)&store, sizeof(PersistHistoryData));
+    file.close();
+
+    return readBytes == sizeof(PersistHistoryData);
+  }
 
   void updateAndSetHistoryStatus() {
     historyStatusData.status.timeSinceLastUpdate = (time(nullptr) - EPOCH_OFFSET) - store.refTime;
@@ -277,7 +311,7 @@ struct EveHistoryService : Service::EveHistoryData {
     uint8_t historySendBuffer[960];  // Max HomeKit response size
     int sendBufferLen = 0;
     
-    WEBLOG("Send History currentEntry %d store.lastEntry %d\n", currentEntry, store.lastEntry);
+    //WEBLOG("Send History currentEntry %d store.lastEntry %d\n", currentEntry, store.lastEntry);
     if (currentEntry <= store.lastEntry) {
       uint32_t memoryAddress = currentEntry % store.historySize;
       
