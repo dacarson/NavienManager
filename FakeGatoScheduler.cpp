@@ -157,10 +157,6 @@ void FakeGatoScheduler::addMilliseconds(PROG_CMD_CURRENT_TIME *timeStruct, uint3
 
 void FakeGatoScheduler::guessTimeZone(PROG_CMD_CURRENT_TIME *eveLocalTime) {
 
-  if (getenv("TZ")) {
-    return; // TZ already set.
-  }
-
     struct tm eveTimeInfo = {0};  // Initialize to zero
 
     eveTimeInfo.tm_year = eveLocalTime->year + 100;  // tm_year is years since 1900
@@ -172,6 +168,13 @@ void FakeGatoScheduler::guessTimeZone(PROG_CMD_CURRENT_TIME *eveLocalTime) {
 
     time_t localTime =  mktime(&eveTimeInfo);  // Convert to time_t (Unix timestamp)
     time_t currentTime = time(nullptr);  // Get the current system time
+    struct tm *deviceLocalTime = localtime(&currentTime); // Convert to local time struct
+
+    // Make sure the timezone is set AND the hours are the same
+    // If hours are different, then we need to update the TZ
+    if (getenv("TZ") && eveTimeInfo.tm_hour == deviceLocalTime->tm_hour) {
+      return; // TZ already set.
+    }
 
     double timeDiffSeconds = difftime(currentTime, localTime);
     int timeDiffHours = std::round(timeDiffSeconds / 3600.0);
