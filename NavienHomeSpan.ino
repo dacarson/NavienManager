@@ -179,7 +179,7 @@ struct DEV_Navien : Service::Thermostat {
     bool createHistoryEntry = false;
 
     float outletTemp = navienSerial.currentState()->gas.outlet_temp;
-    if (currentTemp->timeVal() > 5000 && fabs(currentTemp->getVal<float>() - outletTemp) > 0.25) {  // if it's been more than 5 seconds since last update, and temperature has changed
+    if (currentTemp->timeVal() > 5000 && fabs(currentTemp->getVal<float>() - outletTemp) > 0.50) {  // if it's been more than 5 seconds since last update, and temperature has changed
       currentTemp->setVal(outletTemp);
       Serial.printf("Navien current Temperature is %s.\n", temp2String(currentTemp->getNewVal<float>()).c_str());
       createHistoryEntry = true;
@@ -187,7 +187,7 @@ struct DEV_Navien : Service::Thermostat {
 
     float setTemp = navienSerial.currentState()->gas.set_temp;
   #if defined (TEST)
-    setTemp = 46.1;
+    setTemp = 46.0;
   #endif
     if ((targetTemp->getVal<float>() != setTemp) && (setTemp >= TARGET_TEMP_MIN) && (setTemp <= TARGET_TEMP_MAX)) {
       targetTemp->setVal(setTemp);
