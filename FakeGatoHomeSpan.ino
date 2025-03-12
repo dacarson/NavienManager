@@ -137,12 +137,6 @@ struct EveHistoryService : Service::EveHistoryData {
       return;
     }
 
-    WEBLOG("History index: %d, lastEntry: %d", store.lastEntry % store.historySize, store.lastEntry);
-    int historyIndex = store.lastEntry % store.historySize;
-    if (historyIndex < 0 || historyIndex >= store.historySize) {
-        WEBLOG("⚠️ History index out of bounds! index=%d historySize=%d", historyIndex, store.historySize);
-    }
-
     if (store.lastEntry && store.history[store.lastEntry % store.historySize].time != 0) { // make sure we have a valid previous entry
       // Check if a key value changed (triggers high-frequency logging)
       bool keyValueChanged = ((uint16_t)(targetTemp * 100) != store.history[store.lastEntry % store.historySize].targetTemp ||
@@ -195,8 +189,9 @@ struct EveHistoryService : Service::EveHistoryData {
       addHistoryEntry(avgTemp, avgTargetTemp, avgValvePos, avgLog.lastThermoTarget, avgLog.lastOpenWindow);  // Send the averaged entry
     } else {
       if (store.lastEntry && store.history[store.lastEntry % store.historySize].time != 0) { // make sure we have a valid previous entry, if so copy it to a new entry
-        float avgTemp = store.history[store.lastEntry % store.historySize].currentTemp;
-        float avgTargetTemp = store.history[store.lastEntry % store.historySize].targetTemp;
+      // Values in history are stored multiplied by 100, need to divide when reading back
+        float avgTemp = store.history[store.lastEntry % store.historySize].currentTemp / 100;
+        float avgTargetTemp = store.history[store.lastEntry % store.historySize].targetTemp / 100;
         uint8_t avgValvePos = store.history[store.lastEntry % store.historySize].valvePercent;
         uint8_t thermoTarget = store.history[store.lastEntry % store.historySize].thermoTarget;
         uint8_t openWindow = store.history[store.lastEntry % store.historySize].openWindow;
@@ -238,9 +233,6 @@ struct EveHistoryService : Service::EveHistoryData {
       store.lastEntry++;
       store.usedMemory++;
     }
-    if ((currentTemp < 0) || (currentTemp > 100)) {
-      WEBLOG("Bad History entry %f target %f", currentTemp, targetTemp);
-    }
     
     store.history[store.lastEntry % store.historySize].time = time(nullptr);
     store.history[store.lastEntry % store.historySize].currentTemp = (uint16_t)(currentTemp * 100);
@@ -263,7 +255,8 @@ struct EveHistoryService : Service::EveHistoryData {
     Serial.printf(F("Updating History Status store.usedMemory %d store.lastEntry %d\n"), store.usedMemory, store.lastEntry);
     //printData(historyStatusData.raw_data, sizeof(historyStatusData.raw_data));
     
-    historyStatus.setData(historyStatusData.raw_data, sizeof(historyStatusData.raw_data));
+    // Don't notify everytime history is updated, causes un-neccesary noise. Eve app will fetch it when it wants it.
+    historyStatus.setData(historyStatusData.raw_data, sizeof(historyStatusData.raw_data), false);
   }
   
   void printData(uint8_t *data, int len) {
