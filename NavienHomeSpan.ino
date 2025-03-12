@@ -26,7 +26,14 @@ extern Navien navienSerial;
 
 // Global so that Telnet can dump history state.
 EveHistoryService *historyService;
+FakeGatoScheduler *scheduler;
 
+#define TEST 1
+
+// This is very ugly positioning of the code, but it works
+// Allow for a Telnet command to dump the current 
+// FakeGato history data. This is very useful for
+// debugging.
 String getFormattedTimeForValue(time_t value) {    
   time_t now = value;      
     struct tm *timeinfo = localtime(&now); 
@@ -68,6 +75,8 @@ void commandHistory(const String& params) {
   }
 }
 
+// End Of Ugly.
+
 CUSTOM_CHAR(ValvePosition, E863F12E-079E-48FF-8F27-9C2605A29F52, PR+EV, UINT8, 0, 0, 100, true); 
 
 Characteristic::SerialNumber *serialNumber;
@@ -93,7 +102,7 @@ struct DEV_Navien : Service::Thermostat {
   };  // Current States
 
   int TARGET_TEMP_MIN = 15;
-  int TARGET_TEMP_MAX = 60;
+  int TARGET_TEMP_MAX = 100;
 
   // Create characteristics, set initial values, and set storage in NVS to true
   Characteristic::CurrentHeatingCoolingState *currentState;
@@ -105,8 +114,6 @@ struct DEV_Navien : Service::Thermostat {
   Characteristic::ProgramCommand *programCommand;
   Characteristic::ProgramData *programData;
   Characteristic::ValvePosition *valvePosition;
-
-  FakeGatoScheduler *scheduler;
 
   bool serialNumberSet = false;
 
@@ -264,7 +271,7 @@ struct DEV_Navien : Service::Thermostat {
   }
 };
 
-FakeGatoScheduler* setupHomeSpanAccessories() {
+void setupHomeSpanAccessories() {
 
   new SpanAccessory();
   new Service::AccessoryInformation();
@@ -277,7 +284,5 @@ FakeGatoScheduler* setupHomeSpanAccessories() {
   serialNumber = new Characteristic::SerialNumber("1.0");
 #endif
 
-  DEV_Navien* dev_navien = new DEV_Navien();
-
-  return dev_navien->scheduler;
+  new DEV_Navien();
 }
