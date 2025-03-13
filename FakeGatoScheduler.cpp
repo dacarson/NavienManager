@@ -31,6 +31,29 @@
 
 extern Navien navienSerial;
 
+// Unfortunately, ESP32 doesn't have the timegm() function, so implement one here
+time_t timegm(struct tm *tm) {
+    // Save current TZ
+    char *oldTZ = getenv("TZ");
+    
+    // Temporarily set TZ to UTC
+    setenv("TZ", "UTC0", 1);
+    tzset();
+
+    // Convert to time_t (interpreted as UTC)
+    time_t utcTime = mktime(tm);
+
+    // Restore previous TZ
+    if (oldTZ) {
+        setenv("TZ", oldTZ, 1);
+    } else {
+        unsetenv("TZ");  // Reset if there was no previous TZ
+    }
+    tzset();
+
+    return utcTime;
+}
+
 FakeGatoScheduler::FakeGatoScheduler(Characteristic::ProgramCommand *prgCommand,
                                      Characteristic::ProgramData *prgData)
 : SchedulerBase(), programCommand(prgCommand), programData(prgData) {
@@ -166,13 +189,15 @@ void FakeGatoScheduler::guessTimeZone(PROG_CMD_CURRENT_TIME *eveLocalTime) {
     eveTimeInfo.tm_min  = eveLocalTime->minutes;
     eveTimeInfo.tm_sec  = 0;  // Assuming seconds are zero
 
-    time_t localTime =  mktime(&eveTimeInfo);  // Convert to time_t (Unix timestamp)
+    time_t localTime =  timegm(&eveTimeInfo);  // Convert to time_t (Unix timestamp) *IGNORING TIMEZONE*
     time_t currentTime = time(nullptr);  // Get the current system time
     struct tm *deviceLocalTime = localtime(&currentTime); // Convert to local time struct
 
     // Make sure the timezone is set AND the hours are the same
     // If hours are different, then we need to update the TZ
     if (getenv("TZ") && eveTimeInfo.tm_hour == deviceLocalTime->tm_hour) {
+      Serial.print("Timezone is correct. ");
+      Serial.println(getenv("TZ"));
       return; // TZ already set.
     }
 
