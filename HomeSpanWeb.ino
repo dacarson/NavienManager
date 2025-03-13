@@ -130,10 +130,10 @@ void navienStatus(String &html) {
     html += "<h2>Scheduler Status</h2>"
     "<h3>Device Time: <span id='deviceTime'>" + getFormattedTime() + "</span></h3>"
     + "<div class='status-container'>"
-    + statusCard("Scheduler Enabled", scheduler->enabled() ? "status-ok" : "status-warning", scheduler->enabled() ? "Yes" : "No")
-    + statusCard("Current State", "status-ok", FakeGatoScheduler::getSchedulerState(scheduler->getCurrentState()))
-    + statusCard("Next Transition", scheduler->enabled() ? "status-ok" : "status-warning", getNextTransitionTime())
-    + statusCard("Next State", scheduler->enabled() ? "status-ok" : "status-warning", getNextTransitionState())
+    + statusCard("Scheduler Enabled", scheduler->enabled() ? "status-warning" : "status-ok", scheduler->enabled() ? "Yes" : "No")
+    + statusCard("Current State", scheduler->getCurrentState() == FakeGatoScheduler::Active ? "status-warning" : "status-ok", FakeGatoScheduler::getSchedulerState(scheduler->getCurrentState()))
+    + statusCard("Next Transition", scheduler->enabled() ? "status-warning" : "status-ok", getNextTransitionTime())
+    + statusCard("Next State", "status-ok", getNextTransitionState())
     + "</div>";
 
     html += "<h2>System Log</h2>"
