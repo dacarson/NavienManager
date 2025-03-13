@@ -75,6 +75,16 @@ void commandHistory(const String& params) {
   }
 }
 
+void commandEraseHistory(const String& params) {
+    if (!historyService) {
+    telnet.println(F("Error: History service not available"));
+    return;
+  }
+
+  historyService->eraseHistory();
+  telnet.println(F("History erased"));
+}
+
 // End Of Ugly.
 
 CUSTOM_CHAR(ValvePosition, E863F12E-079E-48FF-8F27-9C2605A29F52, PR+EV, UINT8, 0, 0, 100, true); 

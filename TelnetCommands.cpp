@@ -34,6 +34,8 @@ String trace;
 extern void dumpGasStatus();
 extern void dumpWaterStatus();
 extern void commandHistory(const String& params);
+extern void commandEraseHistory(const String& params);
+
 
 // Define the type for the command callback as a function pointer
 typedef void (*CommandCallback)(const String&);
@@ -332,6 +334,8 @@ void setupTelnetCommands() {
   registerCommand(F("timezone"), F("Set or get current timezone"), commandTimezone);
   registerCommand(F("erasePgm"), F("Erase all Program State"), commandEraseEve);
   registerCommand(F("history"), F("Print history entries in CSV format (optional: number of entries)"), commandHistory);
+  registerCommand(F("eraseHistory"), F("Erase all history entries"), commandEraseHistory);
+  
   registerCommand(F("reboot"), F("Reboot ESP32"), commandReboot);
   registerCommand(F("bye"), F("Disconnect"), commandBye);
 

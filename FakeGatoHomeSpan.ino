@@ -279,6 +279,12 @@ struct EveHistoryService : Service::EveHistoryData {
     return readBytes == sizeof(PersistHistoryData);
   }
 
+  void eraseHistory() {
+      memset((uint8_t*)&store, 0, sizeof(PersistHistoryData));
+      saveHistory();
+      Serial.println("History data erased");
+  }
+
   void updateAndSetHistoryStatus() {
     historyStatusData.status.timeSinceLastUpdate = (time(nullptr) - EPOCH_OFFSET) - store.refTime;
     historyStatusData.status.refTime = time(nullptr) < EPOCH_OFFSET ? 0 : store.refTime;
