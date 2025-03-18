@@ -22,72 +22,18 @@ SOFTWARE.
 
 #include "HomeSpan.h"
 #include "FakeGatoScheduler.h"
+#include "FakeGatoHistoryService.h"
 extern Navien navienSerial;
 
 // Global so that Telnet can dump history state.
-EveHistoryService *historyService;
+FakeGatoHistoryService *historyService;
 FakeGatoScheduler *scheduler;
 
-#define TEST 1
+//#define TEST 1
 
-// This is very ugly positioning of the code, but it works
-// Allow for a Telnet command to dump the current 
-// FakeGato history data. This is very useful for
-// debugging.
-String getFormattedTimeForValue(time_t value) {    
-  time_t now = value;      
-    struct tm *timeinfo = localtime(&now); 
 
-    char timeString[64];
-    strftime(timeString, sizeof(timeString), "%A, %Y-%m-%d %H:%M", timeinfo); // 24hr format, no seconds, includes weekday
-
-    return String(timeString);
-}
-
-void commandHistory(const String& params) {
-  if (!historyService) {
-    telnet.println(F("Error: History service not available"));
-    return;
-  }
-  // Parse length parameter (default to all entries if not specified)
-  int length = historyService->store.usedMemory;
-  if (params.length() > 0) {
-    length = min((int)params.toInt(), (int)historyService->store.usedMemory);
-  }
-  telnet.println(F("Time,CurrentTemp,TargetTemp,ValvePercent,ThermoTarget,OpenWindow"));
-  
-  // Calculate starting entry based on length
-  int firstEntry = historyService->store.firstEntry;
-  int lastEntry = historyService->store.lastEntry;
-  int startEntry = max(lastEntry - length, firstEntry);
-  
-  // Output entries in CSV format
-  for (int i = startEntry; i < lastEntry; i++) {
-    auto entry = historyService->store.history[i % historyService->store.historySize];
-    telnet.printf("%s, %.2f,%.2f,%d,%d,%d\n",
-      getFormattedTimeForValue(entry.time).c_str(),
-      entry.currentTemp / 100.0,
-      entry.targetTemp / 100.0,
-      entry.valvePercent,
-      entry.thermoTarget,
-      entry.openWindow
-    );
-  }
-}
-
-void commandEraseHistory(const String& params) {
-    if (!historyService) {
-    telnet.println(F("Error: History service not available"));
-    return;
-  }
-
-  historyService->eraseHistory();
-  telnet.println(F("History erased"));
-}
-
-// End Of Ugly.
-
-CUSTOM_CHAR(ValvePosition, E863F12E-079E-48FF-8F27-9C2605A29F52, PR+EV, UINT8, 0, 0, 100, true); 
+CUSTOM_CHAR(ValvePosition, E863F12E-079E-48FF-8F27-9C2605A29F52, PR+EV, UINT8, 0, 0, 100, true);
+CUSTOM_CHAR_DATA(ProgramCommand, E863F12C-079E-48FF-8F27-9C2605A29F52, PW + EV);
 
 Characteristic::SerialNumber *serialNumber;
 
@@ -122,7 +68,6 @@ struct DEV_Navien : Service::Thermostat {
   Characteristic::TemperatureDisplayUnits displayUnits{ 0, true };
 
   Characteristic::ProgramCommand *programCommand;
-  Characteristic::ProgramData *programData;
   Characteristic::ValvePosition *valvePosition;
 
   bool serialNumberSet = false;
@@ -151,11 +96,10 @@ struct DEV_Navien : Service::Thermostat {
     valvePosition->setUnit("percentage");
 
     programCommand = new Characteristic::ProgramCommand();
-    programData = new Characteristic::ProgramData();
-    scheduler = new FakeGatoScheduler(programCommand, programData);
+    scheduler = new FakeGatoScheduler();
     scheduler->begin();
 
-    historyService = new EveHistoryService();
+    historyService = new FakeGatoHistoryService();
       
   }
 
@@ -185,7 +129,13 @@ struct DEV_Navien : Service::Thermostat {
       WEBLOG("Temperature target changed to %s: %s\n", temp2String(targetTemp->getNewVal<float>()).c_str(), ret==0 ? "Success" : "Failed");
     }
     
-    scheduler->update();
+  if (programCommand->updated()) {
+    int len = programCommand->getNewData(0, 0);
+    uint8_t *data = (uint8_t *)malloc(sizeof(uint8_t) * len);
+    programCommand->getNewData(data, len);
+    scheduler->parseProgramData(data, len);
+    delete data;
+  }
 
     return (true);
   }
