@@ -26,25 +26,23 @@
 #include "HomeSpan.h"
 
   // Custom Characteristics.
-CUSTOM_CHAR_DATA(ProgramCommand, E863F12C-079E-48FF-8F27-9C2605A29F52, PW + EV);
 CUSTOM_CHAR_DATA(ProgramData, E863F12F-079E-48FF-8F27-9C2605A29F52, PR + EV);
 
 class FakeGatoScheduler : public SchedulerBase {
 public:
-  FakeGatoScheduler(Characteristic::ProgramCommand *prgCommand,
-                    Characteristic::ProgramData *prgData);
+  FakeGatoScheduler();
   virtual ~FakeGatoScheduler() {}
   
   virtual int begin();
   virtual void loop();
-  
-    // HomeSpan update function, check to see if ProgramCommand
-    // has been changed.
-  void update();
 
   bool enabled() { return scheduleActive; }
 
   static String getSchedulerState(int state); // Return the state as a string
+
+  // When the Service recieves Eve Program Data,
+  // this function is called to process it.
+  void parseProgramData(uint8_t *data, int len);
   
   
 protected:
@@ -96,7 +94,6 @@ protected:
   void addMilliseconds(PROG_CMD_CURRENT_TIME *timeStruct, uint32_t milliseconds);
   void updateSchedulerWeekSchedule();
   void updateCurrentScheduleIfNeeded(bool force = false);
-  void parseProgramData(uint8_t *data, int len);
 
   void guessTimeZone(PROG_CMD_CURRENT_TIME *currentTime);
   
@@ -104,7 +101,6 @@ protected:
   static void printData(uint8_t *data, int len);
   static void printDaySchedule(CMD_DAY_SCHEDULE *daySchedule);
   
-  Characteristic::ProgramCommand *programCommand;
   Characteristic::ProgramData *programData;
   
   nvs_handle savedData;

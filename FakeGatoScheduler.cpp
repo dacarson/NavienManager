@@ -20,10 +20,6 @@
  SOFTWARE.
  */
 
-/*
- FakeGatoScheduler
- 
- */
 
 #define CUSTOM_CHAR_HEADER
 #include "FakeGatoScheduler.h"
@@ -54,9 +50,10 @@ time_t timegm(struct tm *tm) {
     return utcTime;
 }
 
-FakeGatoScheduler::FakeGatoScheduler(Characteristic::ProgramCommand *prgCommand,
-                                     Characteristic::ProgramData *prgData)
-: SchedulerBase(), programCommand(prgCommand), programData(prgData) {
+FakeGatoScheduler::FakeGatoScheduler()
+: SchedulerBase() {
+
+  programData = new Characteristic::ProgramData();
   
   size_t len;
   nvs_open("SAVED_DATA",NVS_READWRITE,&savedData);       // open a new namespace called SAVED_DATA in the NVS
@@ -451,15 +448,6 @@ void FakeGatoScheduler::loop() {
   }
 }
 
-void FakeGatoScheduler::update() {
-  if (programCommand->updated()) {
-    int len = programCommand->getNewData(0, 0);
-    uint8_t *data = (uint8_t *)malloc(sizeof(uint8_t) * len);
-    programCommand->getNewData(data, len);
-    parseProgramData(data, len);
-    delete data;
-  }
-}
 
 void FakeGatoScheduler::printData(uint8_t *data, int len) {
   Serial.printf("Data %d ", len);
