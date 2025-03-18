@@ -271,6 +271,22 @@ void SchedulerBase::setTz(String timezone) {
   }
 }
 
+void SchedulerBase::eraseTz() {
+    esp_err_t status = nvs_erase_key(nvsStorageHandle, "TZ");
+    if (status == ESP_OK) {
+        Serial.println("Time zone erased from NVS.");
+    } else if (status == ESP_ERR_NVS_NOT_FOUND) {
+        Serial.println("No stored time zone found.");
+    } else {
+        Serial.printf("Failed to erase key: %s\n", esp_err_to_name(status));
+    }
+    nvs_commit(nvsStorageHandle);  
+
+    unsetenv("TZ");
+    tzset();
+    tz = String();
+}
+
 bool SchedulerBase::isActive() {
   return currentState == State::Active;
 }

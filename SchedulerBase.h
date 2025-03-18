@@ -35,7 +35,10 @@ class SchedulerBase {
     virtual void loop();
     bool isReady() { return isInitialized; }
 
+    // Timezone management
     void setTz(String timezone);
+    String getTz() { return tz; }
+    void eraseTz();
 
     bool isActive();
     bool vacationActive();
