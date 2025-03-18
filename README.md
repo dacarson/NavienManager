@@ -12,6 +12,6 @@
 
 ### Software
 
-
+Eve app, Hot Water. Valve position is hidden by default.
 ## License
 This library is licensed under [MIT License](https://opensource.org/license/mit/)
