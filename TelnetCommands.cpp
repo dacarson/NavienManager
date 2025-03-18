@@ -21,20 +21,22 @@ SOFTWARE.
 */
 
 
-
+#define CUSTOM_CHAR_HEADER
 #include <map>  // For command map
 #include <vector>
 #include <ESPTelnet.h>
 #include "Navien.h"
 #include "nvs.h"
+#include "FakeGatoHistoryService.h"
+#include "FakeGatoScheduler.h"
 
 extern ESPTelnet telnet;
 extern Navien navienSerial;
+extern FakeGatoHistoryService *historyService;
+extern FakeGatoScheduler *scheduler;
 String trace;
 extern void dumpGasStatus();
 extern void dumpWaterStatus();
-extern void commandHistory(const String& params);
-extern void commandEraseHistory(const String& params);
 
 
 // Define the type for the command callback as a function pointer
@@ -278,34 +280,73 @@ void eraseStoredTimezone() {
 void commandTimezone(const String& params) {
     nvs_handle_t nvsStorageHandle;  
     if (params.equalsIgnoreCase("clear")) {
-        eraseStoredTimezone();
+        scheduler->eraseTz();
+        telnet.println(F("Time Zone erased"));
     } else if (params.length() == 0) {
-        // ✅ Print current time zone
-        char* tz = getenv("TZ");
-        if (tz) {
-            telnet.printf("✅ Current Time Zone: %s\n", tz);
+        // Print current time zone
+        String tz = scheduler->getTz();
+        if (tz && !tz.isEmpty()) {
+            telnet.printf("Current Time Zone: %s\n", tz.c_str());
         } else {
-            telnet.println("⚠️ No Time Zone is set!");
+            telnet.println("No Time Zone is set!");
         }
     } else {
-        // ✅ Set new time zone
-        setenv("TZ", params.c_str(), 1);
-        tzset();  // Apply new timezone
-
-        telnet.printf("✅ Time Zone set to: %s\n", params.c_str());
-
-        // ✅ Store in NVS
-        esp_err_t status = nvs_open("SCHEDULER", NVS_READWRITE, &nvsStorageHandle);
-        if (status == ESP_OK) {
-            status = nvs_set_str(nvsStorageHandle, "TZ", params.c_str());
-            nvs_commit(nvsStorageHandle);
-            nvs_close(nvsStorageHandle);
-            telnet.println("✅ Time zone saved to NVS.");
-        } else {
-            telnet.printf("❌ Failed to open NVS for saving: %s\n", esp_err_to_name(status));
-        }
+        scheduler->setTz(params);
+        telnet.printf("Time Zone set to: %s\n", params.c_str());
     }
 }
+
+String getFormattedTimeForValue(time_t value) {    
+  time_t now = value;      
+    struct tm *timeinfo = localtime(&now); 
+
+    char timeString[64];
+    strftime(timeString, sizeof(timeString), "%A, %Y-%m-%d %H:%M", timeinfo); // 24hr format, no seconds, includes weekday
+
+    return String(timeString);
+}
+
+void commandHistory(const String& params) {
+  if (!historyService) {
+    telnet.println(F("Error: History service not available"));
+    return;
+  }
+  // Parse length parameter (default to all entries if not specified)
+  int length = historyService->store.usedMemory;
+  if (params.length() > 0) {
+    length = min((int)params.toInt(), (int)historyService->store.usedMemory);
+  }
+  telnet.println(F("Time,CurrentTemp,TargetTemp,ValvePercent,ThermoTarget,OpenWindow"));
+  
+  // Calculate starting entry based on length
+  int firstEntry = historyService->store.firstEntry;
+  int lastEntry = historyService->store.lastEntry;
+  int startEntry = max(lastEntry - length, firstEntry);
+  
+  // Output entries in CSV format
+  for (int i = startEntry; i < lastEntry; i++) {
+    auto entry = historyService->store.history[i % historyService->store.historySize];
+    telnet.printf("%s, %.2f,%.2f,%d,%d,%d\n",
+      getFormattedTimeForValue(entry.time).c_str(),
+      entry.currentTemp / 100.0,
+      entry.targetTemp / 100.0,
+      entry.valvePercent,
+      entry.thermoTarget,
+      entry.openWindow
+    );
+  }
+}
+
+void commandEraseHistory(const String& params) {
+    if (!historyService) {
+    telnet.println(F("Error: History service not available"));
+    return;
+  }
+
+  historyService->eraseHistory();
+  telnet.println(F("History erased"));
+}
+
 
 void commandReboot(const String& params) {
   telnet.println(F("Rebooting system..."));
