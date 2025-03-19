@@ -51,6 +51,33 @@ FakeGatoHistoryService::FakeGatoHistoryService()
 
     if (loadHistory()) {
         Serial.println("Restored History from file");
+        // Validate the refTime and correct if necessary
+        time_t currentRefTime = store.refTime + EPOCH_OFFSET;
+        struct tm *gmtTime = gmtime(&currentRefTime);
+        //Serial.printf("refTime %s\n", asctime(gmtTime));
+        if (gmtTime->tm_year+1900 < 2025) {
+          Serial.printf("Bad refTime, attempting repair %s", asctime(gmtTime));
+
+          // Calculate starting entry based on length
+          int firstEntry = store.firstEntry;
+          int lastEntry = store.lastEntry;
+          int startEntry = max(lastEntry, firstEntry);
+  
+          // Find the oldest valid timestamp, and use that for refTime
+          for (int i = startEntry; i <= lastEntry; i++) { 
+            auto entry = store.history[i % store.historySize];
+            time_t val = entry.time;
+            struct tm *timeinfo = gmtime(&val);
+            if (timeinfo->tm_year + 1900 >= 2025) {
+              store.refTime = entry.time - EPOCH_OFFSET;
+
+              currentRefTime = store.refTime + EPOCH_OFFSET;
+              gmtTime = gmtime(&currentRefTime);
+              Serial.printf("Set refTime to (GMT) %s", asctime(gmtTime));
+            }
+          }
+        }
+
     } else {
         Serial.println("Failed to restore History from file, using empty history.");
     }
@@ -238,6 +265,9 @@ void FakeGatoHistoryService::eraseHistory() {
           uint32_t refOffset = 0;
           if ((store.history[memoryAddress].time - EPOCH_OFFSET) >=  store.refTime) {
             refOffset = (store.history[memoryAddress].time - EPOCH_OFFSET) - store.refTime;
+            time_t currentRefTime = store.refTime + EPOCH_OFFSET;
+            struct tm *gmtTime = gmtime(&currentRefTime);
+            Serial.printf("Bad - negative history data Offset %u refTime %u %s\n", (store.history[memoryAddress].time - EPOCH_OFFSET), store.refTime, asctime(gmtTime));
           }
           memcpy(&dataEntry[5], &refOffset, sizeof(uint32_t));
           dataEntry[9] = 0x1f;
@@ -303,7 +333,7 @@ boolean FakeGatoHistoryService::update() {
       int len = setTime.getNewData(0, 0);
       uint8_t *data = (uint8_t *)malloc(sizeof(uint8_t) * len);
       setTime.getNewData(data, len);
-      Serial.print(F("History Service Set Time "));
+      Serial.print(F("History Service Set Time (LocalTime) "));
       uint32_t eveTimestamp = *(uint32_t*)data;
       delete data;
       
