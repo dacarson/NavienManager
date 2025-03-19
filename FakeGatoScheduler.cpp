@@ -31,6 +31,7 @@ extern Navien navienSerial;
 time_t timegm(struct tm *tm) {
     // Save current TZ
     char *oldTZ = getenv("TZ");
+    char *oldTZCopy = oldTZ ? strdup(oldTZ) : nullptr;  // Make a copy
     
     // Temporarily set TZ to UTC
     setenv("TZ", "UTC0", 1);
@@ -40,8 +41,9 @@ time_t timegm(struct tm *tm) {
     time_t utcTime = mktime(tm);
 
     // Restore previous TZ
-    if (oldTZ) {
-        setenv("TZ", oldTZ, 1);
+    if (oldTZCopy) {
+        setenv("TZ", oldTZCopy, 1);
+        free(oldTZCopy);
     } else {
         unsetenv("TZ");  // Reset if there was no previous TZ
     }
