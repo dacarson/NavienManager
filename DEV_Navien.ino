@@ -130,14 +130,14 @@ struct DEV_Navien : Service::Thermostat {
       ret = navienSerial.setTemp(targetTemp->getNewVal<float>());
       WEBLOG("Temperature target changed to %s: %s\n", temp2String(targetTemp->getNewVal<float>()).c_str(), ret==0 ? "Success" : "Failed");
     }
-    
-  if (programCommand->updated()) {
-    int len = programCommand->getNewData(0, 0);
-    uint8_t *data = (uint8_t *)malloc(sizeof(uint8_t) * len);
-    programCommand->getNewData(data, len);
-    scheduler->parseProgramData(data, len);
-    delete data;
-  }
+
+    if (programCommand->updated()) {
+      int len = programCommand->getNewData(0, 0);
+      uint8_t *data = (uint8_t *)malloc(sizeof(uint8_t) * len);
+      programCommand->getNewData(data, len);
+      scheduler->parseProgramData(data, len);
+      delete data;
+    }
 
     return (true);
   }
@@ -173,12 +173,12 @@ struct DEV_Navien : Service::Thermostat {
     }
 
     // Try updating the version number
-  if (serialNumber && !serialNumberSet) {
-    char serial[30];
-    sprintf(serial, "%0.2f - %0.2f", navienSerial.currentState()->gas.panel_version, navienSerial.currentState()->gas.controller_version);
-    serialNumber->setString(serial);
-    serialNumberSet = true;
-  }
+    if (serialNumber && !serialNumberSet) {
+      char serial[30];
+      sprintf(serial, "%0.2f - %0.2f", navienSerial.currentState()->gas.panel_version, navienSerial.currentState()->gas.controller_version);
+      serialNumber->setString(serial);
+      serialNumberSet = true;
+    }
 
     int operatingCap = (int)roundf(navienSerial.currentState()->water.operating_capacity);
     if (operatingCap != valvePosition->getVal()) {
@@ -193,8 +193,8 @@ struct DEV_Navien : Service::Thermostat {
     heating_state = targetState->getVal() == HEAT ? HEATING : IDLE;
   #endif
     if (currentState->getVal() != heating_state) {
-        Serial.printf("Updating heat state %d\n", heating_state);
-        currentState->setVal(heating_state);
+      Serial.printf("Updating heat state %d\n", heating_state);
+      currentState->setVal(heating_state);
     }
     
     if (navienSerial.currentState()->water.recirculation_active) {
