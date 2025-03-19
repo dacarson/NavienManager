@@ -329,20 +329,20 @@ boolean FakeGatoHistoryService::update() {
         tv.tv_sec = currentTime;
         tv.tv_usec = 0;
         settimeofday(&tv, NULL);
-      }
 
-      // Check to see if the reference time was set, but the clock had not been set yet.
-      // If so, then we need to correct it
-      if (store.refTime != 0 && store.refTime > currentTime ) {
-        Serial.printf(F("Fixing refTime %u to %u\n"), store.refTime, eveTimestamp);
-        store.refTime = eveTimestamp - (store.refTime + EPOCH_OFFSET);
-        Serial.printf(F("Fixed refTime %u\n"), store.refTime);
+        // Check to see if the reference time was set, but the clock had not been set yet.
+        // If so, then we need to correct it
+        if (store.refTime != 0 && store.refTime > currentTime ) {
+          Serial.printf(F("Fixing refTime %u to %u\n"), store.refTime, eveTimestamp);
+          store.refTime = eveTimestamp - (store.refTime + EPOCH_OFFSET);
+          Serial.printf(F("Fixed refTime %u\n"), store.refTime);
 
-        // Fix up history entries
-        for (int i = 1; i <= store.lastEntry; i++) {
-          if (store.history[i].time != 0) { // Skip store.refTime 0x81 history entries
-            //Serial.printf("Fixing history entry %d from %u to %u\n", i, store.history[i].time, store.history[i].time + currentTime - before);
-            store.history[i].time += (currentTime - before);
+          // Fix up history entries
+          for (int i = 1; i <= store.lastEntry; i++) {
+            if (store.history[i].time != 0) { // Skip store.refTime 0x81 history entries
+              //Serial.printf("Fixing history entry %d from %u to %u\n", i, store.history[i].time, store.history[i].time + currentTime - before);
+              store.history[i].time += (currentTime - before);
+            }
           }
         }
       }
