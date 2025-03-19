@@ -36,10 +36,18 @@ FakeGatoHistoryService::FakeGatoHistoryService()
   : Service::FakeGatoHistoryData() {
     Serial.println(F("Configuring Eve History Service"));
 
+    if (!LittleFS.begin(true)) {
+      Serial.println("LittleFS Mount Failed");
+    }
+
     memset(&historyStatusData, 0, sizeof(HistoryStatusData));
     historyStatusData.status.paramCount = 0x5;
     uint8_t tempSignature[10] = {0x01, 0x02, 0x11, 0x02, 0x10, 0x01, 0x12, 0x01, 0x1D, 0x01};
     memcpy(historyStatusData.status.signature, tempSignature, sizeof(tempSignature));
+    uint16_t memSize = store.historySize;
+    memcpy(&historyStatusData.raw_data[25], &memSize, sizeof(uint16_t));
+    historyStatusData.raw_data[35] = 0x01;
+    historyStatusData.raw_data[36] = 0x01;
 
     if (loadHistory()) {
         Serial.println("Restored History from file");
@@ -52,49 +60,105 @@ FakeGatoHistoryService::FakeGatoHistoryService()
 }
 
 void FakeGatoHistoryService::accumulateLogEntry(float currentTemp, float targetTemp, uint8_t valvePercent, uint8_t thermoTarget, uint8_t openWindow) {
-    if (!currentTemp || !targetTemp) return;
-
-    bool keyValueChanged = ((uint16_t)(targetTemp * 100) != store.history[store.lastEntry % store.historySize].targetTemp ||
-                            thermoTarget != store.history[store.lastEntry % store.historySize].thermoTarget ||
-                            valvePercent > 0);
-
-    if (keyValueChanged && logInterval == LOG_ENTRY_FREQ_TEN_MIN) {
-        if (avgLog.count > 0) generateTimedHistoryEntry();
-        logInterval = LOG_ENTRY_FREQ_ONE_MIN;
-    } else if (valvePercent == 0 && logInterval == LOG_ENTRY_FREQ_ONE_MIN) {
-        if (avgLog.count > 0) generateTimedHistoryEntry();
-        logInterval = LOG_ENTRY_FREQ_TEN_MIN;
+// Ignore zero entries.
+    if (!currentTemp || !targetTemp) {
+      WEBLOG("Ignoring zero value Log entries");
+      return;
     }
 
+    if (store.lastEntry && store.history[store.lastEntry % store.historySize].time != 0) { // make sure we have a valid previous entry
+      // Check if a key value changed (triggers high-frequency logging)
+      bool keyValueChanged = ((uint16_t)(targetTemp * 100) != store.history[store.lastEntry % store.historySize].targetTemp ||
+                              thermoTarget != store.history[store.lastEntry % store.historySize].thermoTarget ||
+                              valvePercent > 0);
+
+      // **Log accumulated data before switching to high-frequency mode**
+      if (keyValueChanged && logInterval == LOG_ENTRY_FREQ_TEN_MIN) {
+          if (avgLog.count > 0) {  // Ensure we have accumulated data
+            //WEBLOG("Writing low freq averaged data entry");
+            generateTimedHistoryEntry();
+          }
+          logInterval = LOG_ENTRY_FREQ_ONE_MIN;
+          /*WEBLOG("Switching to high freq logging. TargetTemp new %d old %d ThermoTarget new %d old %d Valve %d",
+                (uint16_t)(targetTemp * 100), store.history[store.lastEntry % store.historySize].targetTemp,
+                thermoTarget, store.history[store.lastEntry % store.historySize].thermoTarget, valvePercent); */
+      } else if (valvePercent == 0 && logInterval == LOG_ENTRY_FREQ_ONE_MIN) {
+          if (avgLog.count > 0) {  // Ensure we have accumulated data
+            //WEBLOG("Writing high freq averaged data entry");
+            generateTimedHistoryEntry();
+          }
+        logInterval = LOG_ENTRY_FREQ_TEN_MIN;
+        //WEBLOG("Switching to low freq logging");
+      }
+    } else {
+      // We have no entries, so create the first one
+      addHistoryEntry(currentTemp, targetTemp, valvePercent, thermoTarget, openWindow);
+      return;
+    }
+
+      // Accumulate data for the current interval
     avgLog.totalTemp += currentTemp;
     avgLog.totalTargetTemp += targetTemp;
     avgLog.totalValvePos += valvePercent;
+    // Store the last value, don't average these values
     avgLog.lastThermoTarget = thermoTarget;
     avgLog.lastOpenWindow = openWindow;
+
     avgLog.count++;
 }
 
 void FakeGatoHistoryService::generateTimedHistoryEntry() {
     if (avgLog.count > 0) {
-        float avgTemp = avgLog.totalTemp / avgLog.count;
-        float avgTargetTemp = avgLog.totalTargetTemp / avgLog.count;
-        uint8_t avgValvePos = avgLog.totalValvePos / avgLog.count;
-        addHistoryEntry(avgTemp, avgTargetTemp, avgValvePos, avgLog.lastThermoTarget, avgLog.lastOpenWindow);
+      float avgTemp = avgLog.totalTemp / avgLog.count;
+      float avgTargetTemp = avgLog.totalTargetTemp / avgLog.count;
+      uint8_t avgValvePos = avgLog.totalValvePos / avgLog.count;
+      addHistoryEntry(avgTemp, avgTargetTemp, avgValvePos, avgLog.lastThermoTarget, avgLog.lastOpenWindow);  // Send the averaged entry
+    } else {
+      if (store.lastEntry && store.history[store.lastEntry % store.historySize].time != 0) { // make sure we have a valid previous entry, if so copy it to a new entry
+      // Values in history are stored multiplied by 100, need to divide when reading back
+        float avgTemp = store.history[store.lastEntry % store.historySize].currentTemp / 100;
+        float avgTargetTemp = store.history[store.lastEntry % store.historySize].targetTemp / 100;
+        uint8_t avgValvePos = store.history[store.lastEntry % store.historySize].valvePercent;
+        uint8_t thermoTarget = store.history[store.lastEntry % store.historySize].thermoTarget;
+        uint8_t openWindow = store.history[store.lastEntry % store.historySize].openWindow;
+        addHistoryEntry(avgTemp, avgTargetTemp, avgValvePos, thermoTarget, openWindow);  // Send the averaged entry
+      }
     }
-    avgLog = {0};
+    
+      // Reset for the next interval
+    avgLog.totalTemp = 0;
+    avgLog.totalTargetTemp = 0;
+    avgLog.totalValvePos = 0;
+    avgLog.lastThermoTarget = 0;
+    avgLog.lastOpenWindow = 0;
+    avgLog.count = 0;
+
     updateAndSetHistoryStatus();
 }
 
 void FakeGatoHistoryService::addHistoryEntry(float currentTemp, float targetTemp, uint8_t valvePercent, uint8_t thermoTarget, uint8_t openWindow) {
     if (store.usedMemory < store.historySize) {
-        store.usedMemory++;
-        store.firstEntry = 0;
-        store.lastEntry = store.usedMemory;
+      store.usedMemory++;
+      store.firstEntry = 0;
+      store.lastEntry = store.usedMemory;
     } else {
+      store.firstEntry++;
+      store.lastEntry = store.firstEntry + store.usedMemory;
+      if (restarted) {
+        store.history[store.lastEntry % store.historySize].time = 0; // send a store.refTime 0x81 history entry
         store.firstEntry++;
         store.lastEntry = store.firstEntry + store.usedMemory;
+        restarted = false;
+      }
     }
-
+    
+    if (store.refTime == 0) {
+      store.refTime =  time(nullptr) - EPOCH_OFFSET;
+      store.history[store.lastEntry % store.historySize].time = 0; // send a store.refTime 0x81 history entry
+      store.lastEntry++;
+      store.usedMemory++;
+    }
+    
     store.history[store.lastEntry % store.historySize].time = time(nullptr);
     store.history[store.lastEntry % store.historySize].currentTemp = (uint16_t)(currentTemp * 100);
     store.history[store.lastEntry % store.historySize].targetTemp = (uint16_t)(targetTemp * 100);
@@ -103,6 +167,7 @@ void FakeGatoHistoryService::addHistoryEntry(float currentTemp, float targetTemp
     store.history[store.lastEntry % store.historySize].openWindow = openWindow;
 
     saveHistory();
+    
 }
 
 void FakeGatoHistoryService::printData(uint8_t *data, int len) {
@@ -200,7 +265,17 @@ void FakeGatoHistoryService::eraseHistory() {
 
 void FakeGatoHistoryService::updateAndSetHistoryStatus() {
     historyStatusData.status.timeSinceLastUpdate = (time(nullptr) - EPOCH_OFFSET) - store.refTime;
-    historyStatusData.status.refTime = store.refTime;
+    historyStatusData.status.refTime = time(nullptr) < EPOCH_OFFSET ? 0 : store.refTime;
+    
+    uint16_t uMem = store.usedMemory < store.historySize ? store.usedMemory + 1 : store.usedMemory;
+    memcpy(&historyStatusData.raw_data[23], &uMem, sizeof(uint16_t));
+    uint32_t first = store.usedMemory < store.historySize ? store.firstEntry : store.firstEntry + 1;
+    memcpy(&historyStatusData.raw_data[27], &first, sizeof(uint32_t));
+    
+    Serial.printf(F("Updating History Status store.usedMemory %d store.lastEntry %d\n"), store.usedMemory, store.lastEntry);
+    //printData(historyStatusData.raw_data, sizeof(historyStatusData.raw_data));
+    
+    // Don't notify everytime history is updated, causes un-neccesary noise. Eve app will fetch it when it wants it.
     historyStatus.setData(historyStatusData.raw_data, sizeof(historyStatusData.raw_data), false);
 }
 
@@ -216,7 +291,7 @@ boolean FakeGatoHistoryService::update() {
       historyRequest.getNewData(data, len);
       uint32_t address = *(uint32_t*)&data[2];
       
-      Serial.printf(F("History Request %d\n"), address);
+      Serial.printf(F("History Service Request %d\n"), address);
       sendHistory(address);
       delete data;
     }
@@ -225,8 +300,9 @@ boolean FakeGatoHistoryService::update() {
       int len = setTime.getNewData(0, 0);
       uint8_t *data = (uint8_t *)malloc(sizeof(uint8_t) * len);
       setTime.getNewData(data, len);
-      Serial.print(F("Set Time "));
+      Serial.print(F("History Service Set Time "));
       uint32_t eveTimestamp = *(uint32_t*)data;
+      delete data;
       
       time_t currentTime = eveTimestamp + EPOCH_OFFSET;  // Convert to Unix timestamp (since 1970)
       
@@ -244,7 +320,7 @@ boolean FakeGatoHistoryService::update() {
       Serial.print(currentTime);
       Serial.print(F(", Elapsed: "));
       Serial.println(currentTime - before);
-      
+
       if (currentTime - before > 5) {
         Serial.println(F("Updating local clock"));
         
@@ -253,31 +329,24 @@ boolean FakeGatoHistoryService::update() {
         tv.tv_sec = currentTime;
         tv.tv_usec = 0;
         settimeofday(&tv, NULL);
+      }
 
-        // Check to see if the reference time was set, but the clock had not been set yet.
-        // If so, then we need to correct it
-        if (store.refTime != 0 && store.refTime > currentTime ) {
-          Serial.printf(F("Fixing refTime %u to %u\n"), store.refTime, eveTimestamp);
-          store.refTime = eveTimestamp - (store.refTime + EPOCH_OFFSET);
-          Serial.printf(F("Fixed refTime %u\n"), store.refTime);
+      // Check to see if the reference time was set, but the clock had not been set yet.
+      // If so, then we need to correct it
+      if (store.refTime != 0 && store.refTime > currentTime ) {
+        Serial.printf(F("Fixing refTime %u to %u\n"), store.refTime, eveTimestamp);
+        store.refTime = eveTimestamp - (store.refTime + EPOCH_OFFSET);
+        Serial.printf(F("Fixed refTime %u\n"), store.refTime);
 
-          // Fix up the History Status Data and republish.
-          historyStatusData.status.timeSinceLastUpdate = (currentTime - EPOCH_OFFSET) - store.refTime;
-          Serial.printf(F("Correcting timeSincceLastUpdate %u\n"), historyStatusData.status.timeSinceLastUpdate);
-          historyStatusData.status.refTime = store.refTime;
-          historyStatus.setData(historyStatusData.raw_data, sizeof(historyStatusData.raw_data));
-
-          // Fix up history entries
-          for (int i = 1; i <= store.lastEntry; i++) {
-            if (store.history[i].time != 0) { // Skip store.refTime 0x81 history entries
-              //Serial.printf("Fixing history entry %d from %u to %u\n", i, store.history[i].time, store.history[i].time + currentTime - before);
-              store.history[i].time += (currentTime - before);
-            }
+        // Fix up history entries
+        for (int i = 1; i <= store.lastEntry; i++) {
+          if (store.history[i].time != 0) { // Skip store.refTime 0x81 history entries
+            //Serial.printf("Fixing history entry %d from %u to %u\n", i, store.history[i].time, store.history[i].time + currentTime - before);
+            store.history[i].time += (currentTime - before);
           }
         }
       }
-      
-      delete data;
+      updateAndSetHistoryStatus();
     }
     
     return true;
