@@ -324,7 +324,7 @@ void commandHistory(const String& params) {
   int startEntry = max(lastEntry - length, firstEntry);
   
   // Output entries in CSV format
-  for (int i = startEntry; i < lastEntry; i++) {
+  for (int i = startEntry; i <= lastEntry; i++) {
     auto entry = historyService->store.history[i % historyService->store.historySize];
     telnet.printf("%s, %.2f,%.2f,%d,%d,%d\n",
       getFormattedTimeForValue(entry.time).c_str(),
