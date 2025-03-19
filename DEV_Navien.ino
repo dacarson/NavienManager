@@ -60,18 +60,18 @@ struct DEV_Navien : Service::Thermostat {
   int TARGET_TEMP_MIN = 15;
   int TARGET_TEMP_MAX = 100;
 
-  // Create characteristics, set initial values, and set storage in NVS to true
+  // Declare the Themo characteristics
   Characteristic::CurrentHeatingCoolingState *currentState;
   Characteristic::TargetHeatingCoolingState *targetState;
   Characteristic::CurrentTemperature *currentTemp;
   Characteristic::TargetTemperature *targetTemp;
   Characteristic::TemperatureDisplayUnits displayUnits{ 0, true };
 
+  // Declare the Custom characteristics
   Characteristic::ProgramCommand *programCommand;
   Characteristic::ValvePosition *valvePosition;
 
   bool serialNumberSet = false;
-
 
   DEV_Navien()
     : Service::Thermostat() {
@@ -96,11 +96,13 @@ struct DEV_Navien : Service::Thermostat {
     valvePosition->setUnit("percentage");
 
     programCommand = new Characteristic::ProgramCommand();
+    // Create the scheduler class that will handle schedule management
+    // and operations.
     scheduler = new FakeGatoScheduler();
     scheduler->begin();
 
+    // Create a history service
     historyService = new FakeGatoHistoryService();
-      
   }
 
   boolean update() override {
