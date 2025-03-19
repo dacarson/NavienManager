@@ -34,7 +34,7 @@ Navien navienSerial(2);
 #define RXD2 16
 #define TXD2 17
 
-ESPTelnet telnet;
+extern ESPTelnet telnet;
 extern void setupTelnetCommands();   // TelnetCommands.ino
 extern void setupNavienBroadcaster();  // NavienBroadcaster.ino
 extern void setupHomeSpanWeb(); // HomeSpanWeb.ino
@@ -49,28 +49,11 @@ void myWiFiBegin(const char *s, const char *p) {
 void onWifiConnected(int connection) {
   // Setup callbacks for UDP broadcast
   setupNavienBroadcaster();
-  Serial.println(F("UDP Broadcast started"));
 
   // Start Telnet server on port 23
-  telnet.stop(); // Stop it if it is already running
   setupTelnetCommands();
-  telnet.begin(23);
-  Serial.println(F("Telnet server started"));
 
   wifiConnected = true;
-}
-
-void printLittleFSInfo() {
-  //if (LITTLEFS.)
-    size_t totalBytes = LittleFS.totalBytes();
-    size_t usedBytes = LittleFS.usedBytes();
-
-    size_t freeBytes = totalBytes - usedBytes;
-
-    Serial.printf("LittleFS Partition Info:\n");
-    Serial.printf("Total Size: %u bytes\n", totalBytes);
-    Serial.printf("Used Size: %u bytes\n", usedBytes);
-    Serial.printf("Free Space: %u bytes\n", freeBytes);
 }
 
 void setup() {
@@ -79,11 +62,6 @@ void setup() {
   // Start Serial 2 for Navien
   navienSerial.begin(RXD2, TXD2);
   Serial.println(F("Navien Serial Started"));
-
-  if (!LittleFS.begin(true)) {
-    Serial.println("LittleFS Mount Failed");
-  }
-  printLittleFSInfo();
 
   // setup HomeSpan. It needs to own WiFi setup so
   // that it can do the pairing.

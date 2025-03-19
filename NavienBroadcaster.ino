@@ -250,4 +250,6 @@ void setupNavienBroadcaster() {
   navienSerial.onCommandPacket(onCommandPacket);
   navienSerial.onAnnouncePacket(onAnnouncePacket);
   navienSerial.onError(onError);
+
+  Serial.println(F("UDP Broadcast started"));
 }

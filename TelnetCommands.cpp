@@ -30,7 +30,7 @@ SOFTWARE.
 #include "FakeGatoHistoryService.h"
 #include "FakeGatoScheduler.h"
 
-extern ESPTelnet telnet;
+ESPTelnet telnet;
 extern Navien navienSerial;
 extern FakeGatoHistoryService *historyService;
 extern FakeGatoScheduler *scheduler;
@@ -347,6 +347,27 @@ void commandEraseHistory(const String& params) {
   telnet.println(F("History erased"));
 }
 
+void commandTime(const String& params) {
+  time_t now = time(nullptr);
+
+    struct tm *localTime = localtime(&now);
+    telnet.printf("Local Time: %s", asctime(localTime));
+
+    struct tm *gmtTime = gmtime(&now);
+    telnet.printf("GMT/UTC Time: %s", asctime(gmtTime));
+}
+
+void commandfsStat(const String& params) {
+  size_t totalBytes = LittleFS.totalBytes();
+  size_t usedBytes = LittleFS.usedBytes();
+
+  size_t freeBytes = totalBytes - usedBytes;
+
+  telnet.printf("LittleFS Partition Info:\n");
+  telnet.printf("Total Size: %u bytes\n", totalBytes);
+  telnet.printf("Used Size: %u bytes\n", usedBytes);
+  telnet.printf("Free Space: %u bytes\n", freeBytes);
+}
 
 void commandReboot(const String& params) {
   telnet.println(F("Rebooting system..."));
@@ -361,21 +382,30 @@ void commandBye(const String& params) {
 
 // Register all commands in setup
 void setupTelnetCommands() {
+  telnet.stop(); // Stop it if it is already running
+
   registerCommand(F("ping"), F("Test if telnet commands are working"), commandPing);
   registerCommand(F("wifi"), F("Print WiFi status"), commandWiFi);
+
   registerCommand(F("trace"), F("Dump interactions (options: gas/water/command/announce)"), commandTrace);
   registerCommand(F("stop"), F("Stop tracing"), commandStop);
+
   registerCommand(F("gas"), F("Print current gas state as JSON"), commandGas);
   registerCommand(F("water"), F("Print current water state as JSON"), commandWater);
   registerCommand(F("control"), F("Check if control commands are available"), commandControl);
+
   registerCommand(F("setTemp"), F("Set or get set point temperature"), commandSetTemp);
   registerCommand(F("power"), F("Set or get power state (on/off)"), commandPower);
   registerCommand(F("recirc"), F("Set or get recirculation state (on/off)"), commandRecirc);
   registerCommand(F("hotButton"), F("Send hot button command"), commandHotButton);
+
   registerCommand(F("timezone"), F("Set or get current timezone"), commandTimezone);
+  registerCommand(F("time"), F("Print local and gmt time"), commandTime);
   registerCommand(F("erasePgm"), F("Erase all Program State"), commandEraseEve);
+
   registerCommand(F("history"), F("Print history entries in CSV format (optional: number of entries)"), commandHistory);
   registerCommand(F("eraseHistory"), F("Erase all history entries"), commandEraseHistory);
+  registerCommand(F("fsStat"), F("File system status"), commandfsStat);
   
   registerCommand(F("reboot"), F("Reboot ESP32"), commandReboot);
   registerCommand(F("bye"), F("Disconnect"), commandBye);
@@ -384,4 +414,8 @@ void setupTelnetCommands() {
   telnet.onConnect(onTelnetConnect);
   telnet.onDisconnect(onTelnetDisconnect);
   telnet.onInputReceived(onTelnetInput);  // Register Telnet input callback
+
+  telnet.begin(23);
+  Serial.println(F("Telnet server started"));
+
 }
