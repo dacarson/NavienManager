@@ -33,7 +33,7 @@
 #define HISTORY_FILE "/history.bin"
 
 FakeGatoHistoryService::FakeGatoHistoryService() 
-  : Service::FakeGatoHistoryData() {
+  : Service::FakeGatoHistoryData(), logInterval(LOG_ENTRY_FREQ_TEN_MIN) {
     Serial.println(F("Configuring Eve History Service"));
 
     if (!LittleFS.begin(true)) {
@@ -280,7 +280,10 @@ void FakeGatoHistoryService::updateAndSetHistoryStatus() {
 }
 
 void FakeGatoHistoryService::loop() {
-    if (historyStatus.timeVal() >= logInterval) generateTimedHistoryEntry();
+    if (historyStatus.timeVal() >= logInterval) {
+      Serial.printf("Triggering HistoryEntry creation timeVal:%u\n", historyStatus.timeVal());
+      generateTimedHistoryEntry();
+    }
 }
 
 boolean FakeGatoHistoryService::update() {
