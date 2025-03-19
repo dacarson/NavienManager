@@ -36,7 +36,7 @@ class SchedulerBase {
     bool isReady() { return isInitialized; }
 
     // Timezone management
-    void setTz(String timezone);
+    bool setTz(String timezone);
     String getTz() { return tz; }
     void eraseTz();
 

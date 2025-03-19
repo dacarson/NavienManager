@@ -241,7 +241,7 @@ bool SchedulerBase::isTimeWithinSlot(int currentHour, int currentMinute, TimeSlo
   return currentTimeInMinutes >= slotStartInMinutes && currentTimeInMinutes <= slotEndInMinutes;
 }
 
-void SchedulerBase::setTz(String timezone) {
+bool SchedulerBase::setTz(String timezone) {
   // Reload the current timezone as it may have been updated elsewhere.
   size_t len = 64;
   char tzStr[64];
@@ -255,6 +255,7 @@ void SchedulerBase::setTz(String timezone) {
   if (tz == timezone) {
     Serial.print(timezone);
     Serial.println(" Timezones are the same, not updating.");
+    return true;
   } else {
     Serial.print("Updating timezone to ");
     Serial.println(timezone);
@@ -266,8 +267,10 @@ void SchedulerBase::setTz(String timezone) {
     status = nvs_set_str(nvsStorageHandle, "TZ", tz.c_str());
     if (status) {
       Serial.printf("Failed to write TZ from NVS: %s.\n", esp_err_to_name(status));
+      return false;
     }
     nvs_commit(nvsStorageHandle);
+    return true;
   }
 }
 
