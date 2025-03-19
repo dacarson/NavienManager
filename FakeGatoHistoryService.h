@@ -36,8 +36,8 @@
 CUSTOM_SERV(FakeGatoHistoryData, E863F007-079E-48FF-8F27-9C2605A29F52);
 CUSTOM_CHAR_DATA(EveHistoryStatus, E863F116-079E-48FF-8F27-9C2605A29F52, PR+EV+HD);
 CUSTOM_CHAR_DATA(EveHistoryEntries, E863F117-079E-48FF-8F27-9C2605A29F52, PR+EV+HD);
-CUSTOM_CHAR_DATA(EveHistoryRequest, E863F11C-079E-48FF-8F27-9C2605A29F52, PW+EV+HD);
-CUSTOM_CHAR_DATA(EveSetTime, E863F121-079E-48FF-8F27-9C2605A29F52, PW+EV+HD);
+CUSTOM_CHAR_DATA(EveHistoryRequest, E863F11C-079E-48FF-8F27-9C2605A29F52, PW+HD);
+CUSTOM_CHAR_DATA(EveSetTime, E863F121-079E-48FF-8F27-9C2605A29F52, PW+HD);
 
 struct LogEntry {
     uint32_t time;
@@ -48,6 +48,7 @@ struct LogEntry {
     uint8_t openWindow;
 };
 
+// e1f50500 41dd0500 09c5ef1f 05 0102 1102 1001 1201 1d01 9202 de0f 00000000 00000000 0101
 union HistoryStatusData {
     struct {
         uint32_t timeSinceLastUpdate;
@@ -55,6 +56,14 @@ union HistoryStatusData {
         uint32_t refTime;
         uint8_t paramCount;
         uint8_t signature[10];
+      /*
+       Because of byte alignment, can't use variables.
+       uint16_t store.usedMemory;  // this will end up equal to maxEntries
+       uint16_t memorySize;
+       uint32_t store.firstEntry; // Is zero until entries are rolled over
+       uint32_t unknown; // Always zero
+       uint8_t end[2];
+       */
     } status;
     uint8_t raw_data[38];
 };
