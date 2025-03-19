@@ -203,9 +203,12 @@ void FakeGatoScheduler::guessTimeZone(PROG_CMD_CURRENT_TIME *eveLocalTime) {
     
     char tzString[10];
     snprintf(tzString, sizeof(tzString), "UTC%+d", timeDiffHours);
-    WEBLOG("Estimating TZ to be: %s\n", tzString);
 
-    setTz(String(tzString));
+    if (setTz(String(tzString))) {
+      WEBLOG("Set estimated TZ %s\n", tzString);
+    } else {
+      WEBLOG("Failed to set new TZ %s\n", tzString);
+    }
 }
 
 void FakeGatoScheduler::updateSchedulerWeekSchedule() {
