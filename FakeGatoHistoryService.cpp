@@ -265,6 +265,7 @@ void FakeGatoHistoryService::eraseHistory() {
           uint32_t refOffset = 0;
           if ((store.history[memoryAddress].time - EPOCH_OFFSET) >=  store.refTime) {
             refOffset = (store.history[memoryAddress].time - EPOCH_OFFSET) - store.refTime;
+          } else {
             time_t currentRefTime = store.refTime + EPOCH_OFFSET;
             struct tm *gmtTime = gmtime(&currentRefTime);
             Serial.printf("Bad - negative history data Offset %u refTime %u %s\n", (store.history[memoryAddress].time - EPOCH_OFFSET), store.refTime, asctime(gmtTime));
