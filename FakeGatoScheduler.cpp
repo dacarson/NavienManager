@@ -108,7 +108,9 @@ void FakeGatoScheduler::stateChange(State newState){
               tm_struct->tm_year + 1900);               // tm_year is years since 1900
 
   
-  if (!scheduleActive) {
+  // Track Override states even if the scheduler is not active
+  if (!scheduleActive && 
+    (newState != State::Override || currentState != State::Override)) {
     WEBLOG("Ignoring state change, scheduler not active.");
     return;
   }

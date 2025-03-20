@@ -5,7 +5,12 @@
 
 
 ## Description
+1. Allows for vacation mode
+2. Allows for hot water now
 
+When the user sets the thermostat as off, turn off recirculation. This will stay off till the next scheduled event.
+When the user says they want heat, turn on the schedule override and turn on recirculation for the next 5 mins.
+When the user changes to Auto, then return to the current schedule.
 
 ## Setup
 ### Hardware
