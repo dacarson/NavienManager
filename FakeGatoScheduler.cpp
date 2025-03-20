@@ -102,7 +102,7 @@ void FakeGatoScheduler::stateChange(State newState){
   time_t nextStateTime;
   this->getNextState(&nextStateTime);
   struct tm *tm_struct = localtime(&nextStateTime);
-        WEBLOG("Next event scheduled for: %02d:%02d %02d/%02d/%04d\n",
+        Serial.printf("Next event scheduled for: %02d:%02d %02d/%02d/%04d\n",
               tm_struct->tm_hour, tm_struct->tm_min,
               tm_struct->tm_mon + 1, tm_struct->tm_mday,  // tm_mon is 0-based
               tm_struct->tm_year + 1900);               // tm_year is years since 1900

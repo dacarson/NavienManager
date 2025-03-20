@@ -392,7 +392,6 @@ void SchedulerBase::loop() {
   if (overrideActive) {
     newState = State::Override;
     if (newState != currentState) {
-      Serial.printf("state change old %d new %d\n", currentState, newState);
       stateChange(newState);
       currentState = newState;
     }
