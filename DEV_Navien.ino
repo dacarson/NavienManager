@@ -146,13 +146,10 @@ struct DEV_Navien : Service::Thermostat {
 
   void loop() override {
 
-    bool createHistoryEntry = false;
-
     float outletTemp = navienSerial.currentState()->gas.outlet_temp;
     if (currentTemp->timeVal() > 5000 && fabs(currentTemp->getVal<float>() - outletTemp) > 0.50) {  // if it's been more than 5 seconds since last update, and temperature has changed
       currentTemp->setVal(outletTemp);
       Serial.printf("Navien current Temperature is %s.\n", temp2String(currentTemp->getNewVal<float>()).c_str());
-      createHistoryEntry = true;
     }
 
     float setTemp = navienSerial.currentState()->gas.set_temp;
@@ -162,7 +159,6 @@ struct DEV_Navien : Service::Thermostat {
     if ((targetTemp->getVal<float>() != setTemp) && (setTemp >= TARGET_TEMP_MIN) && (setTemp <= TARGET_TEMP_MAX)) {
       targetTemp->setVal(setTemp);
       Serial.printf("Navien target Temperature is %s.\n", temp2String(targetTemp->getNewVal<float>()).c_str());
-      createHistoryEntry = true;
     }
 
     // display_metric is 1 for Metric, 0 for Imperial.
@@ -184,7 +180,6 @@ struct DEV_Navien : Service::Thermostat {
     int operatingCap = (int)roundf(navienSerial.currentState()->water.operating_capacity);
     if (operatingCap != valvePosition->getVal()) {
       valvePosition->setVal(operatingCap);
-      createHistoryEntry = true;
     }
 
     // Check the state of the Navien and update appropriately
@@ -199,28 +194,24 @@ struct DEV_Navien : Service::Thermostat {
     }
     
     if (navienSerial.currentState()->water.recirculation_active) {
+      
       if (targetState->getVal() != AUTO) {
         targetState->setVal(AUTO);
-        createHistoryEntry = true;
       }
     } else { // recirculation isn't active, but we may be heating.
       if (targetState->getVal() != HEAT && heating_state == HEATING) {
         targetState->setVal(HEAT);
-        createHistoryEntry = true;
       } else if (targetState->getVal() != OFF && heating_state == IDLE) {
         targetState->setVal(OFF);
-        createHistoryEntry = true;
       }
     }
 
-    if (createHistoryEntry) {
-      createHistoryEntry = false;
   #if defined (TEST)
-      historyService->accumulateLogEntry(26.6, setTemp, (uint8_t)0, targetState->getVal(), 0);
+    historyService->accumulateLogEntry(26.6, setTemp, (uint8_t)0, targetState->getVal(), 0);
   #else
-      historyService->accumulateLogEntry(outletTemp, setTemp, (uint8_t)operatingCap, targetState->getVal(), 0);
+    historyService->accumulateLogEntry(outletTemp, setTemp, (uint8_t)operatingCap, targetState->getVal(), 0);
   #endif
-    }
+  
 
     scheduler->loop();
   }
