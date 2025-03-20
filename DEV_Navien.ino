@@ -86,10 +86,10 @@ struct DEV_Navien : Service::Thermostat {
     targetState->setValidValues(OFF, HEAT, AUTO);
 
     // Current Temperature
-    currentTemp = new Characteristic::CurrentTemperature(22.0);  // Default 22°C
+    currentTemp = new Characteristic::CurrentTemperature(45.0);  // Default 22°C
 
     // Target Temperature
-    targetTemp = new Characteristic::TargetTemperature(24.0);     // Default 24°C
+    targetTemp = new Characteristic::TargetTemperature(40.0);     // Default 40°C
     targetTemp->setRange(TARGET_TEMP_MIN, TARGET_TEMP_MAX, 0.5);  // Set min/max/step values
 
     valvePosition = new Characteristic::ValvePosition(0);
