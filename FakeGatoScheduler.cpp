@@ -114,6 +114,11 @@ void FakeGatoScheduler::stateChange(State newState){
     WEBLOG("Ignoring state change, scheduler not active.");
     return;
   }
+  // If the schedule is not running and we are leaving Override state
+  // then we need to go InActive
+  if (!scheduleActive && currentState != State::Override) {
+    newState = State::InActive;
+  }
   
     // Should not need to update the targetState of the Thermostat
     // as that will update when the state changes in the Navien
