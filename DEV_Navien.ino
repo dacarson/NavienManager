@@ -127,7 +127,7 @@ struct DEV_Navien : Service::Thermostat {
       }
     }
 
-    else if (targetTemp->updated()) {
+    if (targetTemp->updated()) {
       ret = navienSerial.setTemp(targetTemp->getNewVal<float>());
       WEBLOG("Temperature target changed to %s: %s\n", temp2String(targetTemp->getNewVal<float>()).c_str(), ret > 0 ? "Success" : "Failed");
     }
