@@ -388,15 +388,15 @@ void SchedulerBase::loop() {
     Serial.println("Override expired. Reverting to normal scheduling.");
   }
   
-    // If override is active, force the state
+    // If override is active, force the state and return
   if (overrideActive) {
     newState = State::Override;
     if (newState != currentState) {
       Serial.printf("state change old %d new %d\n", currentState, newState);
       stateChange(newState);
       currentState = newState;
-      return;
     }
+    return;
   }
   
   struct tm *tm_struct = localtime(&now);
