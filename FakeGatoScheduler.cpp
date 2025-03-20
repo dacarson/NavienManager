@@ -337,11 +337,13 @@ void FakeGatoScheduler::parseProgramData(uint8_t *data, int len) {
         Serial.printf("Economy Temp: %0.1f C\n", (0.5 * temperatures->economyScheduleTemp));
         Serial.printf("Comfort Temp: %0.1f C\n", (0.5 * temperatures->comfortScheduleTemp));
         
+        // Override the default and comfort temps with the device set_point because the
+        // Eve app only allows up to 30degC/86degF
         prog_send_data.temperatures.header = TEMPERATURES;
         prog_send_data.temperatures.unknown = 0x00;
-        prog_send_data.temperatures.defaultTemp = temperatures->defaultTemp;
+        prog_send_data.temperatures.defaultTemp = navienSerial.currentState()->gas.set_temp * 2;
+        prog_send_data.temperatures.comfortScheduleTemp = navienSerial.currentState()->gas.set_temp * 2;
         prog_send_data.temperatures.economyScheduleTemp = temperatures->economyScheduleTemp;
-        prog_send_data.temperatures.comfortScheduleTemp = temperatures->comfortScheduleTemp;
         byte_offset += sizeof(PROG_CMD_TEMPERATURES);
         storeData = true;
         break;
@@ -352,9 +354,9 @@ void FakeGatoScheduler::parseProgramData(uint8_t *data, int len) {
         Serial.print("Open window: ");
         Serial.print(open_window->unknown_01);
         Serial.print(" ");
-        Serial.print(open_window->unknown_01);
+        Serial.print(open_window->unknown_02);
         Serial.print(" ");
-        Serial.println(open_window->unknown_02);
+        Serial.println(open_window->unknown_03);
         // Should not be sent to the device. But if it does, ignore it.
         byte_offset += sizeof(PROG_DATA_OPEN_WINDOW);
         break;
