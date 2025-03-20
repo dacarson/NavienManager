@@ -98,7 +98,6 @@ void FakeGatoHistoryService::accumulateLogEntry(float currentTemp, float targetT
           return;
         }
 
-
       // Check if a key value changed (triggers high-frequency logging)
       bool keyValueChanged = ((uint16_t)(targetTemp * 100) != store.history[store.lastEntry % store.historySize].targetTemp ||
                               thermoTarget != store.history[store.lastEntry % store.historySize].thermoTarget ||
@@ -115,10 +114,6 @@ void FakeGatoHistoryService::accumulateLogEntry(float currentTemp, float targetT
                 (uint16_t)(targetTemp * 100), store.history[store.lastEntry % store.historySize].targetTemp,
                 thermoTarget, store.history[store.lastEntry % store.historySize].thermoTarget, valvePercent); */
       } else if (valvePercent == 0 && logInterval == LOG_ENTRY_FREQ_ONE_MIN) {
-          if (avgLog.count > 0) {  // Ensure we have accumulated data
-            //WEBLOG("Writing high freq averaged data entry");
-            generateTimedHistoryEntry();
-          }
         logInterval = LOG_ENTRY_FREQ_TEN_MIN;
         //WEBLOG("Switching to low freq logging");
       }
