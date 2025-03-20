@@ -192,8 +192,8 @@ struct DEV_Navien : Service::Thermostat {
     }
     
     if (navienSerial.currentState()->water.recirculation_active) {
-      
-      if (targetState->getVal() != AUTO) {
+      // Recirculation could be on because we wanted hot water now
+      if (targetState->getVal() != AUTO && targetState->getVal() != HEAT) {
         targetState->setVal(AUTO);
       }
     } else { // recirculation isn't active, but we may be heating.
