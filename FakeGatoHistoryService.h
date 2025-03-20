@@ -109,6 +109,7 @@ private:
     Characteristic::EveSetTime setTime;
     HistoryStatusData historyStatusData;
     AveragedEntry avgLog = {0};
+    LogEntry previousEntry = {0};
     bool restarted = true;
     bool sendTime = true;
     int logInterval;

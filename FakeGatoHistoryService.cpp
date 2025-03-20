@@ -88,15 +88,22 @@ FakeGatoHistoryService::FakeGatoHistoryService()
 
 void FakeGatoHistoryService::accumulateLogEntry(float currentTemp, float targetTemp, uint8_t valvePercent, uint8_t thermoTarget, uint8_t openWindow) {
 
+    // Ignore duplicate entries
+    if ((uint16_t)(currentTemp * 100) == previousEntry.currentTemp &&
+      (uint16_t)(targetTemp * 100) == previousEntry.targetTemp &&
+      valvePercent == previousEntry.valvePercent &&
+      thermoTarget == previousEntry.thermoTarget &&
+      openWindow == previousEntry.openWindow) {
+        return;
+      }
+
+    previousEntry.currentTemp = (uint16_t)(currentTemp * 100);
+    previousEntry.targetTemp = (uint16_t)(targetTemp * 100);
+    previousEntry.valvePercent = valvePercent;
+    previousEntry.thermoTarget = thermoTarget;
+    previousEntry.openWindow = openWindow;
+
     if (store.lastEntry && store.history[store.lastEntry % store.historySize].time != 0) { // make sure we have a valid previous entry
-      // Ignore duplicate entries
-      if ((uint16_t)(currentTemp * 100) == store.history[store.lastEntry % store.historySize].currentTemp &&
-        (uint16_t)(targetTemp * 100) == store.history[store.lastEntry % store.historySize].targetTemp &&
-        valvePercent == store.history[store.lastEntry % store.historySize].valvePercent &&
-        thermoTarget == store.history[store.lastEntry % store.historySize].thermoTarget &&
-        openWindow == store.history[store.lastEntry % store.historySize].openWindow) {
-          return;
-        }
 
       // Check if a key value changed (triggers high-frequency logging)
       bool keyValueChanged = ((uint16_t)(targetTemp * 100) != store.history[store.lastEntry % store.historySize].targetTemp ||
