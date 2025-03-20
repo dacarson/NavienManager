@@ -343,7 +343,7 @@ enum CommandActionHotButton {
 
 public:
   Navien(uint8_t uart_nr)
-    : HardwareSerial(uart_nr), navilink_present(false) {}
+    : HardwareSerial(uart_nr), navilink_present(false), test_mode(true), recv_state(INITIAL) {}
   
   /* Navien is 19200 baud, 8 bit, no parity, 1 stop bit */
   void begin(int8_t rxPin, int8_t txPin) { HardwareSerial::begin(19200, SERIAL_8N1, rxPin, txPin); }
@@ -489,6 +489,9 @@ protected:
 
   // Control available
   bool navilink_present;
+
+  // Assume running in test mode *until* we see a packet
+  bool test_mode;
 };
 
 #endif  // Navien_h

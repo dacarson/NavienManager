@@ -206,6 +206,12 @@ void Navien::loop() {
   if (!availableBytes)
     return;
 
+  // We have moved from Initial, so we must
+  // be talking to a real unit.
+  if (recv_state != INITIAL && test_mode) {
+    test_mode = false;
+}
+
   while (availableBytes) {
     switch (recv_state) {
       case INITIAL:
@@ -327,15 +333,20 @@ void Navien::prepare_command_send() {
   memcpy(&send_buffer, COMMAND_HEADER, sizeof(COMMAND_HEADER));
 }
 
-int Navien::power(bool on) {
+int Navien::power(bool power_on) {
   prepare_command_send();
-  if (on) {
+  if (power_on) {
     send_buffer.cmd.system_power = 0x0a;
   } else {
     send_buffer.cmd.system_power = 0x0b;
   }
   uint8_t crc = Navien::checksum(send_buffer.raw_data, HDR_SIZE + send_buffer.hdr.len, CHECKSUM_SEED_62);
   send_buffer.raw_data[HDR_SIZE + send_buffer.hdr.len] = crc;
+
+  if (test_mode) {
+    state.water.system_power = power_on;
+    return(HDR_SIZE + send_buffer.hdr.len);
+  }
 
   // Send the command
   return send_cmd();
@@ -349,6 +360,11 @@ int Navien::setTemp(float temp_degC) {
 
   uint8_t crc = Navien::checksum(send_buffer.raw_data, HDR_SIZE + send_buffer.hdr.len, CHECKSUM_SEED_62);
   send_buffer.raw_data[HDR_SIZE + send_buffer.hdr.len] = crc;
+
+  if (test_mode) {
+    state.gas.set_temp = temp_degC;
+    return(HDR_SIZE + send_buffer.hdr.len);
+  }
 
   // Send the command
   return send_cmd();
@@ -376,10 +392,10 @@ int Navien::hotButton() {
   return sent_len;
 }
 
-int Navien::recirculation(bool on) {
+int Navien::recirculation(bool recirc_on) {
   prepare_command_send();
 
-  send_buffer.cmd.hot_button_recirculation = on ? Navien::RECIRCULATION_ON : Navien::RECIRCULATION_OFF;
+  send_buffer.cmd.hot_button_recirculation = recirc_on ? Navien::RECIRCULATION_ON : Navien::RECIRCULATION_OFF;
 
   uint8_t crc = Navien::checksum(send_buffer.raw_data, HDR_SIZE + send_buffer.hdr.len, CHECKSUM_SEED_62);
   send_buffer.raw_data[HDR_SIZE + send_buffer.hdr.len] = crc;
@@ -392,6 +408,13 @@ int Navien::recirculation(bool on) {
   send_buffer.cmd.hot_button_recirculation = 0x00;
   crc = Navien::checksum(send_buffer.raw_data, HDR_SIZE + send_buffer.hdr.len, CHECKSUM_SEED_62);
   send_buffer.raw_data[HDR_SIZE + send_buffer.hdr.len] = crc;
+
+  if (test_mode) {
+    state.water.recirculation_active = recirc_on;
+    state.water.recirculation_running = recirc_on;
+    state.gas.current_gas_usage = recirc_on ? 200 : 0;
+    sent_len = HDR_SIZE + send_buffer.hdr.len;
+  }
 
   // Don't clear the send buffer so it is sent on the next loop()
   return sent_len;
