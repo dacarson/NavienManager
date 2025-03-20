@@ -87,11 +87,6 @@ FakeGatoHistoryService::FakeGatoHistoryService()
 }
 
 void FakeGatoHistoryService::accumulateLogEntry(float currentTemp, float targetTemp, uint8_t valvePercent, uint8_t thermoTarget, uint8_t openWindow) {
-// Ignore zero entries.
-    if (!targetTemp) {
-      WEBLOG("Ignoring zero value Log entries");
-      return;
-    }
 
     if (store.lastEntry && store.history[store.lastEntry % store.historySize].time != 0) { // make sure we have a valid previous entry
       // Ignore duplicate entries
