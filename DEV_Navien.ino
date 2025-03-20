@@ -111,18 +111,25 @@ struct DEV_Navien : Service::Thermostat {
     int ret = 0;
 
     if (targetState->updated()) {
+      // Check to see if the user overrides current schedule
       switch (targetState->getNewVal()) {
         case OFF:
           ret = navienSerial.recirculation(0);
-          WEBLOG("Turn OFF Recirculation: %s\n", ret==0 ? "Success" : "Failed");
+          WEBLOG("Ignore schedule, turning off recirculation: %s\n", ret > 0 ? "Success" : "Failed");
           break;
         case HEAT:
-          ret = navienSerial.hotButton();
-          WEBLOG("Device requesting heat now. Set point at %s: %s\n", temp2String(targetTemp->getVal<float>()).c_str(), ret > 0 ? "Success" : "Failed");
+        // Tell scheduler to override for 5 mins
+          scheduler->activateOverride();
+          WEBLOG("Requesting Heat NOW for 5 mins");
           break;
         case AUTO:
-          ret = navienSerial.recirculation(1);
-          WEBLOG("Turn ON Recirculation with set point at %s: %s\n", temp2String(targetTemp->getVal<float>()).c_str(), ret > 0 ? "Success" : "Failed");
+          if (scheduler->getCurrentState() == SchedulerBase::Active) {
+            ret = navienSerial.recirculation(1);
+            WEBLOG("Resume schedule, turning on recirculation: %s\n", ret > 0 ? "Success" : "Failed");
+          } else {
+            ret = navienSerial.recirculation(0);
+            WEBLOG("Resume schedule, turning off recirculation: %s\n", ret > 0 ? "Success" : "Failed");
+          }
           break;
       }
     }
