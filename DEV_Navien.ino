@@ -29,9 +29,6 @@ extern Navien navienSerial;
 FakeGatoHistoryService *historyService;
 FakeGatoScheduler *scheduler;
 
-//#define TEST 1
-
-
 CUSTOM_CHAR(ValvePosition, E863F12E-079E-48FF-8F27-9C2605A29F52, PR+EV, UINT8, 0, 0, 100, true);
 CUSTOM_CHAR_DATA(ProgramCommand, E863F12C-079E-48FF-8F27-9C2605A29F52, PW + EV);
 
@@ -160,9 +157,6 @@ struct DEV_Navien : Service::Thermostat {
     }
 
     float setTemp = navienSerial.currentState()->gas.set_temp;
-  #if defined (TEST)
-    setTemp = 46.0;
-  #endif
     if ((targetTemp->getVal<float>() != setTemp) && (setTemp >= TARGET_TEMP_MIN) && (setTemp <= TARGET_TEMP_MAX)) {
       targetTemp->setVal(setTemp);
       Serial.printf("Navien target Temperature is %s.\n", temp2String(targetTemp->getNewVal<float>()).c_str());
@@ -192,9 +186,6 @@ struct DEV_Navien : Service::Thermostat {
     // Check the state of the Navien and update appropriately
     int heating_state = navienSerial.currentState()->gas.current_gas_usage > 0 ? HEATING : IDLE;
 
-  #if defined (TEST)
-    heating_state = targetState->getVal() == HEAT ? HEATING : IDLE;
-  #endif
     if (currentState->getVal() != heating_state) {
       Serial.printf("Updating heat state %d\n", heating_state);
       currentState->setVal(heating_state);
@@ -213,13 +204,8 @@ struct DEV_Navien : Service::Thermostat {
       }
     }
 
-  #if defined (TEST)
-    historyService->accumulateLogEntry(26.6, setTemp, (uint8_t)0, targetState->getVal(), 0);
-  #else
     historyService->accumulateLogEntry(outletTemp, setTemp, (uint8_t)operatingCap, targetState->getVal(), 0);
-  #endif
   
-
     scheduler->loop();
   }
 
@@ -239,11 +225,7 @@ void setupHomeSpanAccessories() {
   new Characteristic::Identify();
   new Characteristic::Manufacturer("Navien");
   new Characteristic::Model("NPE-240A");
-#if defined (TEST)
-  new Characteristic::SerialNumber("1.0 test");
-#else
   serialNumber = new Characteristic::SerialNumber("1.0");
-#endif
 
   new DEV_Navien();
 }
