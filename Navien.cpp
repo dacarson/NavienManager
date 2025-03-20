@@ -413,6 +413,7 @@ int Navien::recirculation(bool recirc_on) {
     state.water.recirculation_active = recirc_on;
     state.water.recirculation_running = recirc_on;
     state.gas.current_gas_usage = recirc_on ? 200 : 0;
+    state.water.operating_capacity = recirc_on ? 15 : 0;
     sent_len = HDR_SIZE + send_buffer.hdr.len;
   }
 
