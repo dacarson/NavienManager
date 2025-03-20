@@ -118,18 +118,18 @@ struct DEV_Navien : Service::Thermostat {
           break;
         case HEAT:
           ret = navienSerial.hotButton();
-          WEBLOG("Device requesting heat now. Set point at %s: %s\n", temp2String(targetTemp->getVal<float>()).c_str(), ret==0 ? "Success" : "Failed");
+          WEBLOG("Device requesting heat now. Set point at %s: %s\n", temp2String(targetTemp->getVal<float>()).c_str(), ret < 0 ? "Success" : "Failed");
           break;
         case AUTO:
           ret = navienSerial.recirculation(1);
-          WEBLOG("Turn ON Recirculation with set point at %s: %s\n", temp2String(targetTemp->getVal<float>()).c_str(), ret==0 ? "Success" : "Failed");
+          WEBLOG("Turn ON Recirculation with set point at %s: %s\n", temp2String(targetTemp->getVal<float>()).c_str(), ret < 0 ? "Success" : "Failed");
           break;
       }
     }
 
     else if (targetTemp->updated()) {
       ret = navienSerial.setTemp(targetTemp->getNewVal<float>());
-      WEBLOG("Temperature target changed to %s: %s\n", temp2String(targetTemp->getNewVal<float>()).c_str(), ret==0 ? "Success" : "Failed");
+      WEBLOG("Temperature target changed to %s: %s\n", temp2String(targetTemp->getNewVal<float>()).c_str(), ret < 0 ? "Success" : "Failed");
     }
 
     if (programCommand->updated()) {
