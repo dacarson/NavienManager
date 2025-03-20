@@ -35,8 +35,10 @@ extern Navien navienSerial;
 extern FakeGatoHistoryService *historyService;
 extern FakeGatoScheduler *scheduler;
 String trace;
-extern void dumpGasStatus();
-extern void dumpWaterStatus();
+
+// Functions in NavienBroadcaster.ino
+extern String waterToJSON(const Navien::NAVIEN_STATE *state, String rawhexstring = "");
+extern String gasToJSON(const Navien::NAVIEN_STATE *state, String rawhexstring = "");
 
 
 // Define the type for the command callback as a function pointer
@@ -131,11 +133,11 @@ void commandStop(const String& params) {
 }
 
 void commandGas(const String& params) {
-  dumpGasStatus();
+  telnet.println(gasToJSON(navienSerial.currentState()));
 }
 
 void commandWater(const String& params) {
-  dumpWaterStatus();
+  telnet.println(waterToJSON(navienSerial.currentState()));
 }
 
 void commandControl(const String& params) {

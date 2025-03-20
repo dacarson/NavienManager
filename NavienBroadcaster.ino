@@ -104,10 +104,6 @@ String waterToJSON(const Navien::NAVIEN_STATE *state, String rawhexstring = "") 
   return json;
 }
 
-void dumpWaterStatus() {
-  telnet.println(waterToJSON(navienSerial.currentState()));
-}
-
 void onWaterPacket(Navien::NAVIEN_STATE *state) {
   resetPreviousValues();
 
@@ -149,10 +145,6 @@ String gasToJSON(const Navien::NAVIEN_STATE *state, String rawhexstring = "") {
   return json;
 }
 
-void dumpGasStatus() {
-  telnet.println(gasToJSON(navienSerial.currentState()));
-}
-
 void onGasPacket(Navien::NAVIEN_STATE *state) {
   resetPreviousValues();
 
@@ -186,10 +178,6 @@ String commandToJSON(const Navien::NAVIEN_STATE *state, String rawhexstring = ""
   return json;
 }
 
-void dumpCommandStatus() {
-  telnet.println(commandToJSON(navienSerial.currentState()));
-}
-
 void onCommandPacket(Navien::NAVIEN_STATE *state) {
   resetPreviousValues();
 
@@ -214,10 +202,6 @@ String announceToJSON(const Navien::NAVIEN_STATE *state, String rawhexstring = "
   json += "}";
 
   return json;
-}
-
-void dumpAnnounceStatus() {
-  telnet.println(announceToJSON(navienSerial.currentState()));
 }
 
 void onAnnouncePacket(Navien::NAVIEN_STATE *state) {
