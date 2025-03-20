@@ -57,8 +57,9 @@ struct DEV_Navien : Service::Thermostat {
     COOLING = 2
   };  // Current States
 
-  int TARGET_TEMP_MIN = 15;
-  int TARGET_TEMP_MAX = 100;
+  // Navien 240A has temperature range for domestic hot water (DHW) of 37degC to 60degC
+  int TARGET_TEMP_MIN = 37;
+  int TARGET_TEMP_MAX = 60;
 
   // Declare the Themo characteristics
   Characteristic::CurrentHeatingCoolingState *currentState;
