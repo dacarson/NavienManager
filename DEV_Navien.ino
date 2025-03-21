@@ -153,9 +153,9 @@ struct DEV_Navien : Service::Thermostat {
     if (targetTemp->updated()) {
       // Ignore temparature requests that are not valie
       float newSetPoint = targetTemp->getNewVal<float>();
-      if (newSetPoint <= TARGET_TEMP_MIN && newSetPoint >= TARGET_TEMP_MAX) {
-      ret = navienSerial.setTemp(targetTemp->getNewVal<float>());
-      WEBLOG("Temperature target changed to %s: %s\n", temp2String(targetTemp->getNewVal<float>()).c_str(), ret > 0 ? "Success" : "Failed");
+      if (newSetPoint >= TARGET_TEMP_MIN && newSetPoint <= TARGET_TEMP_MAX) {
+        ret = navienSerial.setTemp(targetTemp->getNewVal<float>());
+        WEBLOG("Temperature target changed to %s: %s\n", temp2String(targetTemp->getNewVal<float>()).c_str(), ret > 0 ? "Success" : "Failed");
       } else {
         WEBLOG("Ignoring Temperature target of %s as it is out of range", temp2String(targetTemp->getNewVal<float>()).c_str());
       }
@@ -181,13 +181,50 @@ struct DEV_Navien : Service::Thermostat {
       Serial.printf("Navien current Temperature is %s.\n", temp2String(currentTemp->getNewVal<float>()).c_str());
     }
 
-    float setTemp = navienSerial.currentState()->gas.set_temp;
+    int operatingCap = (int)roundf(navienSerial.currentState()->water.operating_capacity);
+    if (operatingCap != valvePosition->getVal()) {
+      valvePosition->setVal(operatingCap);
+    }
+
+    // Navien is actively maintaining the set point
+    bool navienActivelyMaintainingTemp = 
+      navienSerial.currentState()->water.recirculation_active || navienSerial.currentState()->gas.current_gas_usage > 0;
+
+    // Set the set point only when the unit is operating
+    float setTemp = TARGET_TEMP_MIN;
+    if (navienActivelyMaintainingTemp) {
+      setTemp = navienSerial.currentState()->gas.set_temp;
+    }
     if ((targetTemp->getVal<float>() != setTemp) && (setTemp >= TARGET_TEMP_MIN) && (setTemp <= TARGET_TEMP_MAX)) {
       targetTemp->setVal(setTemp);
       Serial.printf("Navien target Temperature is %s.\n", temp2String(targetTemp->getNewVal<float>()).c_str());
     }
 
-    // display_metric is 1 for Metric, 0 for Imperial.
+    // Check the state of the Navien and update appropriately
+    int heating_state = navienSerial.currentState()->gas.current_gas_usage > 0 ? HEATING : IDLE;
+    if (currentState->getVal() != heating_state) {
+      Serial.printf("Updating heat state %d\n", heating_state);
+      currentState->setVal(heating_state);
+    }
+
+    if (navienActivelyMaintainingTemp) {
+        if (targetState->getVal() != HEAT) {
+          targetState->setVal(HEAT);
+          Serial.println("Forcing target state to Heat");
+        }
+    } else if (scheduler->enabled()) { // Schedule is running, just off right now
+        if (targetState->getVal() != AUTO) {
+          targetState->setVal(AUTO);
+          Serial.println("Forcing target state to Auto");
+        }
+    } else { // Scheduler is off and we're not heating so we are off
+        if (targetState->getVal() != OFF) {
+          targetState->setVal(OFF);
+          Serial.println("Forcing target state to Off");
+        }
+    }
+
+        // display_metric is 1 for Metric, 0 for Imperial.
     bool display_metric = navienSerial.currentState()->water.display_metric;
     if (display_metric && displayUnits.getVal() != CELSIUS) {
       displayUnits.setVal(CELSIUS);
@@ -201,35 +238,6 @@ struct DEV_Navien : Service::Thermostat {
       sprintf(serial, "%0.2f - %0.2f", navienSerial.currentState()->gas.panel_version, navienSerial.currentState()->gas.controller_version);
       serialNumber->setString(serial);
       serialNumberSet = true;
-    }
-
-    int operatingCap = (int)roundf(navienSerial.currentState()->water.operating_capacity);
-    if (operatingCap != valvePosition->getVal()) {
-      valvePosition->setVal(operatingCap);
-    }
-
-    // Check the state of the Navien and update appropriately
-    int heating_state = navienSerial.currentState()->gas.current_gas_usage > 0 ? HEATING : IDLE;
-    if (currentState->getVal() != heating_state) {
-      Serial.printf("Updating heat state %d\n", heating_state);
-      currentState->setVal(heating_state);
-    }
-    if (scheduler->getCurrentState() != SchedulerBase::Override) {
-      if (navienSerial.currentState()->water.recirculation_active) {
-        // Recirculation could be on because we wanted hot water now
-        if (targetState->getVal() != AUTO) {
-          targetState->setVal(AUTO);
-          Serial.println("Forcing target state to Auto");
-        }
-      } else { // recirculation isn't active, but we may be heating.
-        if (targetState->getVal() != HEAT && heating_state == HEATING) {
-          targetState->setVal(HEAT);
-          Serial.println("Forcing target state to Heat");
-        } else if (targetState->getVal() != OFF && heating_state == IDLE) {
-          targetState->setVal(OFF);
-          Serial.println("Forcing target state to Off");
-        }
-      }
     }
 
     historyService->accumulateLogEntry(outletTemp, setTemp, (uint8_t)operatingCap, targetState->getVal(), 0);
