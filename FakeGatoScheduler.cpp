@@ -110,13 +110,13 @@ void FakeGatoScheduler::stateChange(State newState){
   
   // Track Override states even if the scheduler is not active
   if (!scheduleActive && 
-    (newState != State::Override || currentState != State::Override)) {
+    (newState != State::Override && currentState != State::Override)) {
     WEBLOG("Ignoring state change, scheduler not active.");
     return;
   }
   // If the schedule is not running and we are leaving Override state
   // then we need to go InActive
-  if (!scheduleActive && currentState != State::Override) {
+  if (!scheduleActive && currentState == State::Override) {
     newState = State::InActive;
   }
   
