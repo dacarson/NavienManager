@@ -185,22 +185,25 @@ struct DEV_Navien : Service::Thermostat {
 
     // Check the state of the Navien and update appropriately
     int heating_state = navienSerial.currentState()->gas.current_gas_usage > 0 ? HEATING : IDLE;
-
     if (currentState->getVal() != heating_state) {
       Serial.printf("Updating heat state %d\n", heating_state);
       currentState->setVal(heating_state);
     }
-    
-    if (navienSerial.currentState()->water.recirculation_active) {
-      // Recirculation could be on because we wanted hot water now
-      if (targetState->getVal() != AUTO && targetState->getVal() != HEAT) {
-        targetState->setVal(AUTO);
-      }
-    } else { // recirculation isn't active, but we may be heating.
-      if (targetState->getVal() != HEAT && heating_state == HEATING) {
-        targetState->setVal(HEAT);
-      } else if (targetState->getVal() != OFF && heating_state == IDLE) {
-        targetState->setVal(OFF);
+    if (scheduler->getCurrentState() != SchedulerBase::Override) {
+      if (navienSerial.currentState()->water.recirculation_active) {
+        // Recirculation could be on because we wanted hot water now
+        if (targetState->getVal() != AUTO) {
+          targetState->setVal(AUTO);
+          Serial.println("Forcing target state to Auto");
+        }
+      } else { // recirculation isn't active, but we may be heating.
+        if (targetState->getVal() != HEAT && heating_state == HEATING) {
+          targetState->setVal(HEAT);
+          Serial.println("Forcing target state to Heat");
+        } else if (targetState->getVal() != OFF && heating_state == IDLE) {
+          targetState->setVal(OFF);
+          Serial.println("Forcing target state to Off");
+        }
       }
     }
 
