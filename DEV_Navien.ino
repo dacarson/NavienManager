@@ -144,8 +144,14 @@ struct DEV_Navien : Service::Thermostat {
     }
 
     if (targetTemp->updated()) {
+      // Ignore temparature requests that are not valie
+      float newSetPoint = targetTemp->getNewVal<float>();
+      if (newSetPoint <= TARGET_TEMP_MIN && newSetPoint >= TARGET_TEMP_MAX) {
       ret = navienSerial.setTemp(targetTemp->getNewVal<float>());
       WEBLOG("Temperature target changed to %s: %s\n", temp2String(targetTemp->getNewVal<float>()).c_str(), ret > 0 ? "Success" : "Failed");
+      } else {
+        WEBLOG("Ignoring Temperature target of %s as it is out of range", temp2String(targetTemp->getNewVal<float>()).c_str());
+      }
     }
 
     if (programCommand->updated()) {
