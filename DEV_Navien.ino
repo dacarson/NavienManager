@@ -119,9 +119,16 @@ struct DEV_Navien : Service::Thermostat {
           }
           break;
         case HEAT:
-        // Tell scheduler to override for 5 mins
-          scheduler->activateOverride();
-          WEBLOG("Requesting Heat NOW for 5 mins");
+          // If the schedule is not enabled, or is enabled and not active, then allow override
+          // If the scheduler is enabled and active, override doesn't do anything so reset back to AUTO
+          if (!scheduler->enabled() || (scheduler->enabled() && !scheduler->isActive())){
+            scheduler->activateOverride();
+            WEBLOG("Requesting Heat NOW for 5 mins");
+          } else {
+            WEBLOG("Ignoring Heat NOW request as it's already running");
+            targetState->setVal(AUTO);
+          }
+
           break;
         case AUTO:
           if (scheduler->getCurrentState() == SchedulerBase::Active || scheduler->getCurrentState() == SchedulerBase::Override) {
