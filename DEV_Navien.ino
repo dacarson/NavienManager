@@ -111,8 +111,12 @@ struct DEV_Navien : Service::Thermostat {
       // Check to see if the user overrides current schedule
       switch (targetState->getNewVal()) {
         case OFF:
-          ret = navienSerial.recirculation(0);
-          WEBLOG("Ignore schedule, turning off recirculation: %s\n", ret > 0 ? "Success" : "Failed");
+          if (navienSerial.currentState()->water.recirculation_active) {
+            ret = navienSerial.recirculation(0);
+            WEBLOG("Ignore schedule, turning off recirculation: %s\n", ret > 0 ? "Success" : "Failed");
+          } else {
+            WEBLOG("Ignore schedule, leaving recirculation off\n");
+          }
           break;
         case HEAT:
         // Tell scheduler to override for 5 mins
@@ -120,12 +124,20 @@ struct DEV_Navien : Service::Thermostat {
           WEBLOG("Requesting Heat NOW for 5 mins");
           break;
         case AUTO:
-          if (scheduler->getCurrentState() == SchedulerBase::Active) {
-            ret = navienSerial.recirculation(1);
-            WEBLOG("Resume schedule, turning on recirculation: %s\n", ret > 0 ? "Success" : "Failed");
+          if (scheduler->getCurrentState() == SchedulerBase::Active || scheduler->getCurrentState() == SchedulerBase::Override) {
+            if (!navienSerial.currentState()->water.recirculation_active) {
+              ret = navienSerial.recirculation(1);
+              WEBLOG("Resume schedule, turning on recirculation: %s\n", ret > 0 ? "Success" : "Failed");
+            } else {
+              WEBLOG("Resume schedule, leaving recirculation on\n");
+            }
           } else {
-            ret = navienSerial.recirculation(0);
-            WEBLOG("Resume schedule, turning off recirculation: %s\n", ret > 0 ? "Success" : "Failed");
+            if (navienSerial.currentState()->water.recirculation_active) {
+              ret = navienSerial.recirculation(0);
+              WEBLOG("Resume schedule, turning off recirculation: %s\n", ret > 0 ? "Success" : "Failed");
+            } else {
+              WEBLOG("Resume schedule, leaving recirculation off\n");
+            }
           }
           break;
       }
