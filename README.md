@@ -11,12 +11,15 @@
 Two modes of operation. 
 - Monitor mode - a NaviLink Wifi box is attached and controlling the Navien tankless hotwater unit.
 - Control mode - NaviLink box is not attached, and can be controlled via HomeKit.
-
+  
+## Features
 The features of this software are:
 ### Homekit integration, Eve app integration.
    Eve app, Hot Water. Valve position is hidden by default.
    
 ### Web server (via HomeSpan)
+The current status of the Navien unit can be viewed at any time by browsing to it's web page. The webpage is hosted at the IP address of the ESP32, ie `http://<ip-address>/status`. 
+
 ### Telnet
    * bye - Disconnect
    * wifi - Print WiFi status
@@ -43,7 +46,8 @@ The features of this software are:
   * fsStat - File system status
   
 ### Data broadcast (UDP)
-
+To continuously monitor and log the status of the Navien unit, the software broadcasts its status over the local network (not the internet) using UDP on port `2025`. Duplicate data is throttled to one broadcast every 5 seconds—if the same packet is observed again within that time, it is dropped. However, if the packet changes in any way, it will be broadcast immediately.  
+This broadcasted data can be collected on another machine and used for logging. In the `logging` folder, there is an example script that collects the broadcast data and logs it to InfluxDB. A Grafana template is also provided, which can be used in conjunction with InfluxDB to visualize the collected data.
 
 ## Setup
 ### Hardware
