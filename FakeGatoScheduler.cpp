@@ -349,7 +349,7 @@ void FakeGatoScheduler::parseProgramData(uint8_t *data, int len) {
         prog_send_data.temperatures.unknown = 0x00;
         prog_send_data.temperatures.defaultTemp = navienSerial.currentState()->gas.set_temp * 2;
         prog_send_data.temperatures.comfortScheduleTemp = navienSerial.currentState()->gas.set_temp * 2;
-        prog_send_data.temperatures.economyScheduleTemp = temperatures->economyScheduleTemp;
+        prog_send_data.temperatures.economyScheduleTemp = Navien::TEMPERATURE_MIN;
         byte_offset += sizeof(PROG_CMD_TEMPERATURES);
         storeData = true;
         break;
