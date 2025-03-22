@@ -54,9 +54,6 @@ struct DEV_Navien : Service::Thermostat {
     COOLING = 2
   };  // Current States
 
-  // Navien 240A has temperature range for domestic hot water (DHW) of 37degC to 60degC
-  int TARGET_TEMP_MIN = 37;
-  int TARGET_TEMP_MAX = 60;
 
   // Declare the Themo characteristics
   Characteristic::CurrentHeatingCoolingState *currentState;
@@ -87,7 +84,7 @@ struct DEV_Navien : Service::Thermostat {
 
     // Target Temperature
     targetTemp = new Characteristic::TargetTemperature(40.0);     // Default 40°C
-    targetTemp->setRange(TARGET_TEMP_MIN, TARGET_TEMP_MAX, 0.5);  // Set min/max/step values
+    targetTemp->setRange(Navien::TEMPERATURE_MIN, Navien::TEMPERATURE_MAX, 0.5);  // Set min/max/step values
 
     valvePosition = new Characteristic::ValvePosition(0);
     valvePosition->setDescription("Actuation");
@@ -121,11 +118,15 @@ struct DEV_Navien : Service::Thermostat {
         case HEAT:
           // If the schedule is not enabled, or is enabled and not active, then allow override
           // If the scheduler is enabled and active, override doesn't do anything so reset back to AUTO
-          if (!scheduler->enabled() || (scheduler->enabled() && !scheduler->isActive())){
-            scheduler->activateOverride();
-            WEBLOG("Requesting Heat NOW for 5 mins");
+          if (!scheduler->enabled() || (scheduler->enabled() && !scheduler->isActive())) {
+            if (scheduler->getCurrentState() != SchedulerBase::Override) {
+              scheduler->activateOverride();
+              WEBLOG("Requesting Heat NOW for 5 mins");
+            } else {
+              Serial.println("Requesting override twice, so ignoring it");
+            }
           } else {
-            WEBLOG("Ignoring Heat NOW request as it's already running");
+            WEBLOG("Ignoring Heat NOW request as it's already running via schedule");
             targetState->setVal(AUTO);
           }
 
@@ -153,7 +154,7 @@ struct DEV_Navien : Service::Thermostat {
     if (targetTemp->updated()) {
       // Ignore temparature requests that are not valie
       float newSetPoint = targetTemp->getNewVal<float>();
-      if (newSetPoint >= TARGET_TEMP_MIN && newSetPoint <= TARGET_TEMP_MAX) {
+      if (newSetPoint >= Navien::TEMPERATURE_MIN && newSetPoint <= Navien::TEMPERATURE_MAX) {
         ret = navienSerial.setTemp(targetTemp->getNewVal<float>());
         WEBLOG("Temperature target changed to %s: %s\n", temp2String(targetTemp->getNewVal<float>()).c_str(), ret > 0 ? "Success" : "Failed");
       } else {
@@ -191,11 +192,11 @@ struct DEV_Navien : Service::Thermostat {
       navienSerial.currentState()->water.recirculation_active || navienSerial.currentState()->gas.current_gas_usage > 0;
 
     // Set the set point only when the unit is operating
-    float setTemp = TARGET_TEMP_MIN;
+    float setTemp = Navien::TEMPERATURE_MIN;
     if (navienActivelyMaintainingTemp) {
       setTemp = navienSerial.currentState()->gas.set_temp;
     }
-    if ((targetTemp->getVal<float>() != setTemp) && (setTemp >= TARGET_TEMP_MIN) && (setTemp <= TARGET_TEMP_MAX)) {
+    if ((targetTemp->getVal<float>() != setTemp) && (setTemp >= Navien::TEMPERATURE_MIN) && (setTemp <= Navien::TEMPERATURE_MAX)) {
       targetTemp->setVal(setTemp);
       Serial.printf("Navien target Temperature is %s.\n", temp2String(targetTemp->getNewVal<float>()).c_str());
     }
@@ -212,7 +213,7 @@ struct DEV_Navien : Service::Thermostat {
           targetState->setVal(HEAT);
           Serial.println("Forcing target state to Heat");
         }
-    } else if (scheduler->enabled()) { // Schedule is running, just off right now
+    } else if (scheduler->enabled() || navienSerial.currentState()->water.schedule_active) { // Schedule is running, just off right now
         if (targetState->getVal() != AUTO) {
           targetState->setVal(AUTO);
           Serial.println("Forcing target state to Auto");

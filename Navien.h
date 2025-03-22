@@ -337,6 +337,11 @@ enum CommandActionHotButton {
     HEADER_PARSED
   } READ_STATE;
 
+enum NavienTemperatureRange {
+    // Navien 240A has temperature range for domestic hot water (DHW) of 37degC to 60degC
+  TEMPERATURE_MIN = 37,
+  TEMPERATURE_MAX = 60
+};
 
   typedef void (*PacketCallbackFunction)(NAVIEN_STATE *state);
   typedef void (*ErrorCallbackFunction)(const char* functionName, const char* error);
