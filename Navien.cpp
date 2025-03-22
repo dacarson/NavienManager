@@ -363,6 +363,7 @@ int Navien::setTemp(float temp_degC) {
 
   if (test_mode) {
     state.gas.set_temp = temp_degC;
+    state.water.set_temp = temp_degC;
     return(HDR_SIZE + send_buffer.hdr.len);
   }
 
