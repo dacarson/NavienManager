@@ -21,6 +21,7 @@ SOFTWARE.
 */
 
 #include "HomeSpan.h"
+#include "esp_mac.h"  // required - exposes esp_mac_type_t values
 #include "FakeGatoScheduler.h"
 #include "FakeGatoHistoryService.h"
 extern Navien navienSerial;
@@ -32,7 +33,8 @@ FakeGatoScheduler *scheduler;
 CUSTOM_CHAR(ValvePosition, E863F12E-079E-48FF-8F27-9C2605A29F52, PR+EV, UINT8, 0, 0, 100, true);
 CUSTOM_CHAR_DATA(ProgramCommand, E863F12C-079E-48FF-8F27-9C2605A29F52, PW + EV);
 
-Characteristic::SerialNumber *serialNumber;
+Characteristic::FirmwareRevision *firmwareRevision;
+Characteristic::HardwareRevision *hardwareRevision;
 
 struct DEV_Navien : Service::Thermostat {
 
@@ -66,7 +68,7 @@ struct DEV_Navien : Service::Thermostat {
   Characteristic::ProgramCommand *programCommand;
   Characteristic::ValvePosition *valvePosition;
 
-  bool serialNumberSet = false;
+  bool accessoryInfoSet = false;
 
   DEV_Navien()
     : Service::Thermostat() {
@@ -234,11 +236,10 @@ struct DEV_Navien : Service::Thermostat {
     }
 
     // Try updating the version number
-    if (serialNumber && !serialNumberSet) {
-      char serial[30];
-      sprintf(serial, "%0.2f - %0.2f", navienSerial.currentState()->gas.panel_version, navienSerial.currentState()->gas.controller_version);
-      serialNumber->setString(serial);
-      serialNumberSet = true;
+    if (!accessoryInfoSet) {
+      firmwareRevision->setString(String(navienSerial.currentState()->gas.controller_version).c_str());
+      hardwareRevision->setString(String(navienSerial.currentState()->gas.panel_version).c_str());
+      accessoryInfoSet = true;
     }
 
     historyService->accumulateLogEntry(outletTemp, setTemp, (uint8_t)operatingCap, targetState->getVal(), 0);
@@ -255,6 +256,23 @@ struct DEV_Navien : Service::Thermostat {
   }
 };
 
+// Fetch the fused MAC address as WiFi object may not be connected yet, and it's value will be zero
+// Use the mac address without colons as the device serial number.
+String getSerialNumber() {
+
+  String mac = "";
+
+  unsigned char mac_base[6] = {0};
+
+  if (esp_efuse_mac_get_default(mac_base) == ESP_OK) {
+    char buffer[13];  // 6*2 characters for hex + 1 character for null terminator
+    sprintf(buffer, "%02X%02X%02X%02X%02X%02X", mac_base[0], mac_base[1], mac_base[2], mac_base[3], mac_base[4], mac_base[5]);
+    mac = buffer;
+  }
+
+  return mac;
+}
+
 void setupHomeSpanAccessories() {
 
   new SpanAccessory();
@@ -262,7 +280,9 @@ void setupHomeSpanAccessories() {
   new Characteristic::Identify();
   new Characteristic::Manufacturer("Navien");
   new Characteristic::Model("NPE-240A");
-  serialNumber = new Characteristic::SerialNumber("1.0");
+  firmwareRevision = new Characteristic::FirmwareRevision("-");
+  hardwareRevision = new Characteristic::HardwareRevision("-");
+  new Characteristic::SerialNumber(getSerialNumber().c_str());
 
   new DEV_Navien();
 }
