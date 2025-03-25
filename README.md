@@ -15,7 +15,7 @@ With NaviLink, I can configure a fixed schedule for recirculation. However, this
 My home is a HomeKit home, and I wanted to control the hot water unit through it. I decided to model the hot water unit as a thermostat. This allows me to say things like **“Hey Siri, turn on Hot Water Heater”** or create any number of scenes that activate recirculation. I’ve enabled two modes of operation:
 
 ### Monitor Mode
-A NaviLink Wi-Fi box is attached and controls the Navien tankless hot water unit. Adjusting any HomeKit settings in this mode has no effect; they will simply revert to reflect the current state of the unit.
+In this mode, a NaviLink Wi-Fi box is attached and controls the Navien tankless hot water unit. Adjusting any HomeKit settings in this mode has no effect; they will simply revert to reflect the current state of the unit.
 
 - If the HomeKit thermostat shows **HEAT**, it means recirculation is currently running, or that a tap is open and the unit is actively heating water. The setpoint reflects the unit’s configured temperature.
 - If the thermostat shows **AUTO**, the system is idle, and the setpoint is set to the minimum value.
@@ -36,7 +36,7 @@ The HomeKit integration is described in the [Description](#description) section 
 
 - You may see the setpoint fluctuate on the temperature graph. This is intentional and indicates when the unit is actively heating to the setpoint versus when it is idle. The lower setpoint represents the minimum temperature that the hot water unit can be set to.
 - The **Valve** graph shows the current operating load. When the valve is open, the unit is actively heating, and the graph reflects its current operating capacity.
-- The **Valve** metric is not shown by default in the Eve app. To enable it, edit the Thermostat page and manually add it as a visible characteristic.
+- The **Valve** metric is not shown by default in the Eve app. To enable it, edit the Thermostat page and manually add it as a visible characteristic.  
   <img width="500" alt="Eve thermostat screen" src="https://github.com/user-attachments/assets/bdcb70b5-9ed8-47b2-a24c-a1740a0730ab" />
 
    
@@ -90,7 +90,7 @@ Because the hot water unit is not in a convenient location for active developmen
   
 ### Data broadcast (UDP)
 To continuously monitor and log the status of the Navien unit, the software broadcasts its status over the local network (not the internet) using UDP on port `2025`. Duplicate data is throttled to one broadcast every 5 seconds—if the same packet is observed again within that time, it is dropped. However, if the packet changes in any way, it will be broadcast immediately.  
-This broadcasted data can be collected on another machine and used for logging. In the `logging` folder, there is an example script that collects the broadcast data and logs it to InfluxDB. A Grafana template is also provided, which can be used in conjunction with InfluxDB to visualize the collected data.
+This broadcasted data can be collected on another machine and used for logging. In the `Logging` folder, there is an example script that collects the broadcast data and logs it to InfluxDB. A Grafana template is also provided, which can be used in conjunction with InfluxDB to visualize the collected data.  
 <img width="1496" alt="Grafana status" src="https://github.com/user-attachments/assets/4846a6d5-f917-4f56-9773-adb856c933ff" />
 
 
