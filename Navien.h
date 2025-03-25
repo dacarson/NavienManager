@@ -210,7 +210,7 @@ enum CommandActionHotButton {
     uint8_t unknown_17; // 0x00
     uint8_t unknown_18; // 0x00
     uint8_t unknown_19; // 0x00
-    uint8_t unknown_20; // Same current_gas_usgae * 250, but has some info prefex
+    uint8_t unknown_20; // Same current_gas_usage * 250, but has some info prefex, also extremely similar to operating_capactiy
     uint8_t unknown_21; // 0x01
     uint8_t current_gas_lo;     // 22
     uint8_t current_gas_hi;     // 23
