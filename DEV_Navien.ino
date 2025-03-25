@@ -62,6 +62,7 @@ struct DEV_Navien : Service::Thermostat {
   Characteristic::TargetHeatingCoolingState *targetState;
   Characteristic::CurrentTemperature *currentTemp;
   Characteristic::TargetTemperature *targetTemp;
+  Characteristic::ProgramMode programMode;
   Characteristic::TemperatureDisplayUnits displayUnits{ 0, true };
 
   // Declare the Custom characteristics
@@ -187,6 +188,14 @@ struct DEV_Navien : Service::Thermostat {
     int operatingCap = (int)roundf(navienSerial.currentState()->water.operating_capacity);
     if (operatingCap != valvePosition->getVal()) {
       valvePosition->setVal(operatingCap);
+    }
+
+    if (!scheduler->enabled() &&  !navienSerial.currentState()->water.schedule_active) {
+      programMode.setVal(0);
+    } else if (scheduler->getCurrentState() == SchedulerBase::Override) {
+      programMode.setVal(2);
+    } else {
+      programMode.setVal(1);
     }
 
     // Navien is actively maintaining the set point
