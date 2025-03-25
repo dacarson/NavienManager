@@ -20,7 +20,7 @@ A NaviLink Wi-Fi box is attached and controls the Navien tankless hot water unit
 - If the HomeKit thermostat shows **HEAT**, it means recirculation is currently running, or that a tap is open and the unit is actively heating water. The setpoint reflects the unit’s configured temperature.
 - If the thermostat shows **AUTO**, the system is idle, and the setpoint is set to the minimum value.
 
-### Control Mode
+### Control Mode (WIP - still validating)
 The NaviLink box is not attached, allowing full control via HomeKit. In this mode, a schedule can be defined using the Eve app. The setpoint should be controlled via Apple’s Home app, as Eve does not support the full temperature range of a hot water unit. The temperature set in the Home app overrides any setpoint from the Eve schedule.
 
 - If the thermostat shows **AUTO**, it means a schedule is running but recirculation is currently inactive.
@@ -37,38 +37,62 @@ The HomeKit integration is described in the [Description](#description) section 
 - You may see the setpoint fluctuate on the temperature graph. This is intentional and indicates when the unit is actively heating to the setpoint versus when it is idle. The lower setpoint represents the minimum temperature that the hot water unit can be set to.
 - The **Valve** graph shows the current operating load. When the valve is open, the unit is actively heating, and the graph reflects its current operating capacity.
 - The **Valve** metric is not shown by default in the Eve app. To enable it, edit the Thermostat page and manually add it as a visible characteristic.
+  <img width="500" alt="Eve thermostat screen" src="https://github.com/user-attachments/assets/bdcb70b5-9ed8-47b2-a24c-a1740a0730ab" />
+
    
-### Web server (via HomeSpan)
-The current status of the Navien unit can be viewed at any time by browsing to it's web page. The webpage is hosted at the IP address of the ESP32, ie `http://<ip-address>/status`. 
+### Web Server (via [HomeSpan](https://github.com/HomeSpan/HomeSpan))
+
+The current status of the Navien unit can be viewed at any time by visiting its web page. The webpage is hosted at the IP address of the ESP32, e.g., `http://<ip-address>/status`.
+
+At the top of the status page is a green toggle button. Tapping it switches the units displayed on the screen between metric and imperial.
+
+There are two schedulers shown:
+1. The built-in Navien scheduler, which does **not** support "Hot Water Now" functionality.
+2. A custom scheduler provided by this project, which **does** support "Hot Water Now" requests even while a schedule is running.
+
+If both schedulers are active, the Navien scheduler takes precedence. In the image below, shows the system running in Monitor mode. Attempts to change the state of the hotwater unit are correctly failing.
+
+<img width="1488" alt="Navien Status screen" src="https://github.com/user-attachments/assets/fa161464-81c6-4bcd-b79f-f4b13bdf4a2d" />
+
 
 ### Telnet
-   * `bye` - Disconnect
-   * `wifi` - Print WiFi status
-   * `reboot` - Reboot ESP32
-   * `ping` - Test if telnet commands are working
 
-  * `eraseHistory` - Erase all history entries
-  * `erasePgm` - Erase all Program State
-  * `history` - Print history entries in CSV format (optional: number of entries)
-  
-  * `gas` - Print current gas state as JSON
-  * `water` - Print current water state as JSON
-  * `trace` - Dump interactions (options: gas/water/command/announce)
-  * `stop` - Stop tracing
-  
-  * `control` - Check if control commands are available
-  * `hotButton` - Send hot button command
-  * `power` - Set or get power state (on/off)
-  * `recirc` - Set or get recirculation state (on/off)
-  * `setTemp` - Set or get set point temperature
-  
-  * `time` - Print local and gmt time
-  * `timezone` - Set or get current timezone
-  * `fsStat` - File system status
+Because the hot water unit is not in a convenient location for active development, I added Telnet capabilities to the ESP32. This allows a user to investigate and control the hot water unit remotely, as well as monitor its activity in real time. The Telnet functionality is broken into several categories:
+
+**General operation commands:**
+- `bye` — Disconnect
+- `wifi` — Print WiFi status
+- `fsStat` — Show file system status
+- `reboot` — Reboot the ESP32
+- `ping` — Test if Telnet commands are working
+
+**History and program state:**
+- `eraseHistory` — Erase all history entries
+- `erasePgm` — Erase all program state
+- `history` — Print history entries in CSV format (optional: specify number of entries)
+
+**Navien hot water monitoring:**
+- `gas` — Print current gas state as JSON
+- `water` — Print current water state as JSON
+- `trace` — Dump interactions (options: `gas`, `water`, `command`, `announce`)
+- `stop` — Stop tracing
+
+**Navien control commands:**
+- `control` — Check if control commands are available
+- `hotButton` — Send Hot Button command
+- `power` — Set or get power state (`on`/`off`)
+- `recirc` — Set or get recirculation state (`on`/`off`)
+- `setTemp` — Set or get temperature setpoint
+
+**Time operations:**
+- `time` — Print local and GMT time
+- `timezone` — Set or get the current timezone
   
 ### Data broadcast (UDP)
 To continuously monitor and log the status of the Navien unit, the software broadcasts its status over the local network (not the internet) using UDP on port `2025`. Duplicate data is throttled to one broadcast every 5 seconds—if the same packet is observed again within that time, it is dropped. However, if the packet changes in any way, it will be broadcast immediately.  
 This broadcasted data can be collected on another machine and used for logging. In the `logging` folder, there is an example script that collects the broadcast data and logs it to InfluxDB. A Grafana template is also provided, which can be used in conjunction with InfluxDB to visualize the collected data.
+<img width="1496" alt="Grafana status" src="https://github.com/user-attachments/assets/4846a6d5-f917-4f56-9773-adb856c933ff" />
+
 
 ## Setup
 ### Hardware
@@ -81,6 +105,9 @@ For the RS-485 interface, I found a **WeMos-compatible RS-485 shield** that work
 *(Note: I’m not yet using this feature, as my Navien unit **does not** provide power on the NaviLink cable.)*
 
 To tap into the communication line, I used a **breakout box**. My Navien unit already had a NaviLink module installed, so I wanted to begin by passively monitoring the traffic between the NaviLink and the Navien unit. Placing the breakout box inline allowed me to do just that.
+The middle two lines on the breakout box are the two lines I connected to the RS-485 sheild. In the photo below, the Blue wire is attached to the B- terminal of the RS-485 shield, and the Purple wire is attached to the A+ terminal.
+
+<img width="500" alt="RJ45 breakout box" src="https://github.com/user-attachments/assets/d5f5c30d-4ed4-4dfe-a96a-0cd06035718e" />
 
 #### 🧩 Parts List
 
@@ -113,3 +140,4 @@ This library is licensed under [MIT License](https://opensource.org/license/mit/
 Community members of [Home Assist](https://community.home-assistant.io/t/navien-esp32-navilink-interface/720567/170), who decoded the protocol and much of the packet data for the Navien NaviLink connection  
 [htumanya](https://github.com/htumanyan/navien) for the well-crafted base class for Navien  
 [simont77](https://github.com/simont77/fakegato-history) for decoding the Eve History logging interface   
+[HomeSpan](https://github.com/HomeSpan/HomeSpan) for the HomeKit accessory library for ESP32 devices
