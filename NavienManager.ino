@@ -68,7 +68,7 @@ void setup() {
   //homeSpan.setWifiCredentials(ssid, password);
   homeSpan.setWifiBegin(myWiFiBegin);
   homeSpan.setConnectionCallback(onWifiConnected);
-  homeSpan.begin(Category::Thermostats,"Navien");
+  homeSpan.begin(Category::Thermostats,"Hot Water");
   homeSpan.enableOTA(false, false);
 
   setupHomeSpanWeb(); // Setup the homespan webpage
