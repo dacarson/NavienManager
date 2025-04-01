@@ -18,14 +18,15 @@ My home is a HomeKit home, and I wanted to control the hot water unit through it
 In this mode, a NaviLink Wi-Fi box is attached and controls the Navien tankless hot water unit. Adjusting any HomeKit settings in this mode has no effect; they will simply revert to reflect the current state of the unit.
 
 - If the HomeKit thermostat shows **HEAT**, it means recirculation is currently running, or that a tap is open and the unit is actively heating water. The setpoint reflects the unit’s configured temperature.
-- If the thermostat shows **AUTO**, the system is idle, and the setpoint is set to the minimum value.
+- If the thermostat shows **OFF**, the system is idle, and the setpoint is set to the minimum value. The adjustment of the setpoint is useful to show in the Eve app when the hot water unit is heating or not.
 
 ### Control Mode (WIP - still validating)
 The NaviLink box is not attached, allowing full control via HomeKit. In this mode, a schedule can be defined using the Eve app. The setpoint should be controlled via Apple’s Home app, as Eve does not support the full temperature range of a hot water unit. The temperature set in the Home app overrides any setpoint from the Eve schedule.
 
-- If the thermostat shows **AUTO**, it means a schedule is running but recirculation is currently inactive.
-- Switching to **HEAT** activates recirculation for 5 minutes, after which it returns to the schedule.
-- Switching to **OFF** turns off recirculation if it was running. The thermostat will return to **AUTO** when the next scheduled event occurs.
+The thermostat states represent the same as Monitor mode. However, changing them now has an effect.
+
+- Switching to **HEAT** activates recirculation for 5 minutes, after which it returns to the schedule. If it is already running, it has no effect.
+- Switching to **OFF** turns off recirculation if it was running. The thermostat will return to schedule when the next scheduled event occurs.
 - If **Vacation Mode** is enabled via Automation in the Eve app, the hot water unit will be powered off and all schedules will be suspended.
   
 ## Features

@@ -80,7 +80,7 @@ struct DEV_Navien : Service::Thermostat {
 
     // Target Heating Cooling State (User Selectable)
     targetState = new Characteristic::TargetHeatingCoolingState(OFF);  // Default: Off
-    targetState->setValidValues(OFF, HEAT, AUTO);
+    targetState->setValidValues(OFF, HEAT);
 
     // Current Temperature
     currentTemp = new Characteristic::CurrentTemperature(45.0);  // Default 22°C
@@ -120,7 +120,7 @@ struct DEV_Navien : Service::Thermostat {
           break;
         case HEAT:
           // If the schedule is not enabled, or is enabled and not active, then allow override
-          // If the scheduler is enabled and active, override doesn't do anything so reset back to AUTO
+          // If the scheduler is enabled and active, override doesn't do anything
           if (!scheduler->enabled() || (scheduler->enabled() && !scheduler->isActive())) {
             if (scheduler->getCurrentState() != SchedulerBase::Override) {
               scheduler->activateOverride();
@@ -130,26 +130,8 @@ struct DEV_Navien : Service::Thermostat {
             }
           } else {
             WEBLOG("Ignoring Heat NOW request as it's already running via schedule");
-            targetState->setVal(AUTO);
           }
 
-          break;
-        case AUTO:
-          if (scheduler->getCurrentState() == SchedulerBase::Active || scheduler->getCurrentState() == SchedulerBase::Override) {
-            if (!navienSerial.currentState()->water.recirculation_active) {
-              ret = navienSerial.recirculation(1);
-              WEBLOG("Resume schedule, turning on recirculation: %s\n", ret > 0 ? "Success" : "Failed");
-            } else {
-              WEBLOG("Resume schedule, leaving recirculation on\n");
-            }
-          } else {
-            if (navienSerial.currentState()->water.recirculation_active) {
-              ret = navienSerial.recirculation(0);
-              WEBLOG("Resume schedule, turning off recirculation: %s\n", ret > 0 ? "Success" : "Failed");
-            } else {
-              WEBLOG("Resume schedule, leaving recirculation off\n");
-            }
-          }
           break;
       }
     }
@@ -223,11 +205,6 @@ struct DEV_Navien : Service::Thermostat {
         if (targetState->getVal() != HEAT) {
           targetState->setVal(HEAT);
           Serial.println("Forcing target state to Heat");
-        }
-    } else if (scheduler->enabled() || navienSerial.currentState()->water.schedule_active) { // Schedule is running, just off right now
-        if (targetState->getVal() != AUTO) {
-          targetState->setVal(AUTO);
-          Serial.println("Forcing target state to Auto");
         }
     } else { // Scheduler is off and we're not heating so we are off
         if (targetState->getVal() != OFF) {
