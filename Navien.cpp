@@ -76,7 +76,7 @@ void Navien::parse_gas() {
   state.gas.accumulated_gas_usage = 0.1f * raw_gas;  // Using float multiplication for better precision
   state.gas.current_gas_usage = recv_buffer.gas.current_gas_hi << 8 | recv_buffer.gas.current_gas_lo;
 
-  // Convert total operating time to seconds using 32-bit arithmetic
+  // Convert total operating time to minutes using 32-bit arithmetic
   uint32_t raw_time = (recv_buffer.gas.total_operating_time_hi << 8 | recv_buffer.gas.total_operating_time_lo);
   state.gas.total_operating_time = 60 * raw_time;  // Safe with uint32_t
 
