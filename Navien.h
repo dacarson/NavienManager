@@ -284,49 +284,49 @@ enum CommandActionHotButton {
   typedef struct {
     struct {
       bool system_power;
-      float set_temp;
-      float outlet_temp;
-      float inlet_temp;
-      float flow_lpm;
-      bool recirculation_active;
-      bool recirculation_running;
-      bool display_metric;
+      float set_temp; // degree C
+      float outlet_temp; // degree C
+      float inlet_temp; // degree C
+      float flow_lpm; // Water flow velocity, via Recirculation or Tap being on 
+      bool recirculation_active; // Recirculation mode is current ON
+      bool recirculation_running; // Recirculation pump is currently running
+      bool display_metric; // True == degree C; False == degree F
       bool schedule_active;
       bool hotbutton_active;
-      float operating_capacity;
-      bool consumption_active;
+      float operating_capacity; // Percentage 0.0 - 100.0 %
+      bool consumption_active; // Tap is turned on
       uint8_t flow_state;
     } water;
 
     struct {
-      float set_temp;
-      float outlet_temp;
-      float inlet_temp;
+      float set_temp;  // degree C
+      float outlet_temp; // degree C
+      float inlet_temp; // degree C
       float controller_version;
       float panel_version;
       float accumulated_gas_usage;    // m^3 (ccf = m^3 / 2.832, Therms = m^3 / 2.832 * 1.02845 )
       uint16_t current_gas_usage;     // kcal (btu == kcal * 3.965667)
-      uint32_t total_operating_time;  // seconds - expanded to handle large values
-      uint32_t accumulated_domestic_usage_cnt;  // Counter for domestic usage, multiplied by 10
+      uint32_t total_operating_time;  // minutes 
+      uint32_t accumulated_domestic_usage_cnt;  // Counter for domestic usage, increments every 10 usages
     } gas;
 
     struct {
-      bool power_command;
-      bool power_on;
+      bool power_command; // Observe the power on command
+      bool power_on; // Power On command, True == turn On; False == turn OFF
 
-      bool set_temp_command;
-      float set_temp;
+      bool set_temp_command; // Observe the Set Temperature command
+      float set_temp; // Set the Set Temperature to this value in deg. C
 
-      bool hot_button_command;
+      bool hot_button_command; // Send Hot Button command
 
-      bool recirculation_command;
-      bool recirculation_on;
+      bool recirculation_command; // Observe the recirculation command
+      bool recirculation_on; // Recirculation command, True == turn On; False == turn OFF
 
       uint8_t cmd_data;
     } command;
 
     struct {
-      bool navilink_present;
+      bool navilink_present; // Navilink unit is present controlling the Navien
     } announce;
 
   } NAVIEN_STATE;
