@@ -346,8 +346,14 @@ int Navien::send_cmd() {
   }
 
   int sent_len = -1;
-  if (!navilink_present)
+  if (!navilink_present) {
     sent_len = write(send_buffer.raw_data, len);
+    // if the command was actually sent, then echo it to the client
+    if (sent_len == len) {
+      recv_buffer = send_buffer;
+      parse_command();
+    }
+  }
 
   return sent_len;
 }
