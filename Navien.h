@@ -23,6 +23,7 @@ SOFTWARE.
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <HardwareSerial.h>
 
 #ifndef Navien_h
@@ -415,6 +416,10 @@ protected:
   // Debug helper to print hex buffers
   static void print_buffer(const uint8_t *data, size_t length, ErrorCallbackFunction on_error_cb);
 
+  // Can I send a command now - avoid collisions on RS485 line
+  bool can_send(int curr_available);
+  int queue_send_cmd(const PACKET_BUFFER& pkt);
+
   // Write the send_buffer command
   // Returns number of bytes sent, or -1 for failure
   int send_cmd();
@@ -474,10 +479,6 @@ protected:
   // and the cmd_type field is CONTROL_COMMAND
   void parse_command();
 
-  // Generate a command packet. Command packets are always 4F (79)
-  // in length.
-  void prepare_command_send();
-
 protected:
   // Keeps track of the state machine and iterates through
   // initialized -> marker found -> header parsed -> data parsed -> initialized
@@ -486,8 +487,14 @@ protected:
   // Data received off the wire
   PACKET_BUFFER recv_buffer;
 
-  // Data to send over the wire
-  PACKET_BUFFER send_buffer;
+
+  // Use an array to build a list of commands to be sent
+  // They will be sent when the wire is clear
+  static constexpr size_t QUEUE_CAPACITY = 5;
+  std::array<PACKET_BUFFER, QUEUE_CAPACITY> send_array;
+  size_t send_queue_head = 0;
+  size_t send_queue_tail = 0;
+  size_t send_queue_count = 0;
 
   // Data, extracted from gas and water packers and stored
   NAVIEN_STATE state;

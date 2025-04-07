@@ -203,6 +203,11 @@ void Navien::loop() {
 
   int availableBytes = available();
 
+  // Check to see if we can send data, and send if possible
+  if (recv_state == INITIAL && can_send(availableBytes)) {
+    send_cmd();
+  }
+
   if (!availableBytes)
     return;
 
@@ -210,7 +215,7 @@ void Navien::loop() {
   // be talking to a real unit.
   if (recv_state != INITIAL && test_mode) {
     test_mode = false;
-}
+  }
 
   while (availableBytes) {
     switch (recv_state) {
@@ -265,9 +270,6 @@ void Navien::loop() {
         parse_packet();
         availableBytes = available();
         recv_state = INITIAL;
-
-        // We have a complete packet, so now send whatever is in the send buffer
-        send_cmd();
     }
   }
 }
@@ -303,12 +305,37 @@ void Navien::print_buffer(const uint8_t *data, size_t length, ErrorCallbackFunct
   }
 }
 
-// Send what ever is in the send buffer
-// then clear it.
-// Return the number of bytes sent.
+int Navien::queue_send_cmd(const PACKET_BUFFER& pkt) {
+  if (send_queue_count >= QUEUE_CAPACITY)
+    return -1;
+  send_array[send_queue_tail] = pkt;
+  send_queue_tail = (send_queue_tail + 1) % QUEUE_CAPACITY;
+  ++send_queue_count;
+  return 0;
+}
+
+bool Navien::can_send(int curr_available) {
+  static unsigned long last_received = 0;
+
+  if (curr_available > 0) {
+    last_received = millis();
+    return false;
+  }
+
+  if (millis() - last_received > 10) { // e.g. 10ms of silence
+    return true;
+  }
+
+  return false;
+} 
+
 int Navien::send_cmd() {
 
-  if (!send_buffer.hdr.len) return -1;  // Nothing to send.
+  if (send_queue_count == 0)
+    return -1;
+  PACKET_BUFFER send_buffer = send_array[send_queue_head];
+  send_queue_head = (send_queue_head + 1) % QUEUE_CAPACITY;
+  --send_queue_count;
 
   // +1 to include the crc value
   int len = HDR_SIZE + send_buffer.hdr.len + 1;
@@ -322,19 +349,13 @@ int Navien::send_cmd() {
   if (!navilink_present)
     sent_len = write(send_buffer.raw_data, len);
 
-  // Clear the send buffer
-  memset(&send_buffer, 0x0, sizeof(PACKET_BUFFER));
   return sent_len;
 }
 
-
-void Navien::prepare_command_send() {
-  memset(&send_buffer, 0x0, sizeof(PACKET_BUFFER));
-  memcpy(&send_buffer, COMMAND_HEADER, sizeof(COMMAND_HEADER));
-}
-
 int Navien::power(bool power_on) {
-  prepare_command_send();
+  PACKET_BUFFER send_buffer{};
+  memcpy(&send_buffer, COMMAND_HEADER, sizeof(COMMAND_HEADER));
+
   if (power_on) {
     send_buffer.cmd.system_power = 0x0a;
   } else {
@@ -348,13 +369,14 @@ int Navien::power(bool power_on) {
     return(HDR_SIZE + send_buffer.hdr.len);
   }
 
-  // Send the command
-  return send_cmd();
+  // Queue the command
+  return queue_send_cmd(send_buffer);
 }
 
 
 int Navien::setTemp(float temp_degC) {
-  prepare_command_send();
+  PACKET_BUFFER send_buffer{};
+  memcpy(&send_buffer, COMMAND_HEADER, sizeof(COMMAND_HEADER));
 
   send_buffer.cmd.set_temp = int(temp_degC * 2.0);
 
@@ -367,45 +389,46 @@ int Navien::setTemp(float temp_degC) {
     return(HDR_SIZE + send_buffer.hdr.len);
   }
 
-  // Send the command
-  return send_cmd();
+  // Queue the command
+  return queue_send_cmd(send_buffer);
 }
 
 
 int Navien::hotButton() {
-  prepare_command_send();
+  PACKET_BUFFER send_buffer{};
+  memcpy(&send_buffer, COMMAND_HEADER, sizeof(COMMAND_HEADER));
 
   send_buffer.cmd.hot_button_recirculation = Navien::HOT_BUTTON_DOWN;
 
   uint8_t crc = Navien::checksum(send_buffer.raw_data, HDR_SIZE + send_buffer.hdr.len, CHECKSUM_SEED_62);
   send_buffer.raw_data[HDR_SIZE + send_buffer.hdr.len] = crc;
 
-  // Send the command
-  int sent_len = send_cmd();
+  // Queue the command
+  int sent_len = queue_send_cmd(send_buffer);
 
   // queue up the button release command
-  prepare_command_send();
+  memcpy(&send_buffer, COMMAND_HEADER, sizeof(COMMAND_HEADER));
   send_buffer.cmd.hot_button_recirculation = 0x00;
   crc = Navien::checksum(send_buffer.raw_data, HDR_SIZE + send_buffer.hdr.len, CHECKSUM_SEED_62);
   send_buffer.raw_data[HDR_SIZE + send_buffer.hdr.len] = crc;
 
-  // Don't clear the send buffer so it is sent on the next loop()
-  return sent_len;
+  return queue_send_cmd(send_buffer);
 }
 
 int Navien::recirculation(bool recirc_on) {
-  prepare_command_send();
+  PACKET_BUFFER send_buffer{};
+  memcpy(&send_buffer, COMMAND_HEADER, sizeof(COMMAND_HEADER));
 
   send_buffer.cmd.hot_button_recirculation = recirc_on ? Navien::RECIRCULATION_ON : Navien::RECIRCULATION_OFF;
 
   uint8_t crc = Navien::checksum(send_buffer.raw_data, HDR_SIZE + send_buffer.hdr.len, CHECKSUM_SEED_62);
   send_buffer.raw_data[HDR_SIZE + send_buffer.hdr.len] = crc;
 
-  // Send the command
-  int sent_len = send_cmd();
+  // Queue the command
+  int sent_len = queue_send_cmd(send_buffer);
 
   // queue up the button release command
-  prepare_command_send();
+  memcpy(&send_buffer, COMMAND_HEADER, sizeof(COMMAND_HEADER));
   send_buffer.cmd.hot_button_recirculation = 0x00;
   crc = Navien::checksum(send_buffer.raw_data, HDR_SIZE + send_buffer.hdr.len, CHECKSUM_SEED_62);
   send_buffer.raw_data[HDR_SIZE + send_buffer.hdr.len] = crc;
@@ -418,8 +441,7 @@ int Navien::recirculation(bool recirc_on) {
     sent_len = HDR_SIZE + send_buffer.hdr.len;
   }
 
-  // Don't clear the send buffer so it is sent on the next loop()
-  return sent_len;
+  return queue_send_cmd(send_buffer);
 }
 
 uint8_t Navien::checksum(const uint8_t *buffer, uint8_t len, uint16_t seed) {
