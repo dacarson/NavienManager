@@ -90,6 +90,7 @@ void Navien::parse_gas() {
 void Navien::parse_status_packet() {
   switch (recv_buffer.hdr.packet_type) {
     case Navien::PACKET_TYPE_WATER:
+    case Navien::PACKET_TYPE_WATER2:
       parse_water();
       break;
     case Navien::PACKET_TYPE_GAS:

@@ -107,6 +107,7 @@ public:
    * There are two known packet types with somewhat overlapping
    * data but also with unique data points in each
    * 0x50 - water flow and temperature data - PACKET_TYPE_WATER
+   * 0x51 - cascade Navien, water flow and temperature data - PACKET_TYPE_WATER2
    * 0x0F - gas flow and also water temperature - PACKET_TYPE_GAS
    */
     uint8_t packet_type;
@@ -136,6 +137,7 @@ enum PacketDirection {
 
 enum PacketType {
   PACKET_TYPE_WATER = 0x50,
+  PACKET_TYPE_WATER2 = 0x51,
   PACKET_TYPE_GAS = 0x0F
 };
 
