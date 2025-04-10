@@ -77,21 +77,22 @@ String buffer_to_hex_string(const uint8_t *data, size_t length) {
 
 /* Handle Water packets */
 
-String waterToJSON(const Navien::NAVIEN_STATE *state, String rawhexstring = "") {
+String waterToJSON(const Navien::NAVIEN_STATE_WATER *water, String rawhexstring = "") {
   String json = "{ \"type\" : \"water\", ";
-  json += " \"system_power\" : " + String(state->water.system_power) + ", ";
-  json += " \"set_temp\" : " + String(state->water.set_temp) + ", ";
-  json += " \"inlet_temp\" : " + String(state->water.inlet_temp) + ", ";
-  json += " \"outlet_temp\" : " + String(state->water.outlet_temp) + ", ";
-  json += " \"flow_lpm\" : " + String(state->water.flow_lpm) + ", ";
-  json += " \"flow_state\" : " + String(state->water.flow_state) + ", ";
-  json += " \"recirculation_active\" : " + String(state->water.recirculation_active) + ", ";
-  json += " \"recirculation_running\" : " + String(state->water.recirculation_running) + ", ";
-  json += " \"display_metric\" : " + String(state->water.display_metric) + ", ";
-  json += " \"schedule_active\" : " + String(state->water.schedule_active) + ", ";
-  json += " \"hotbutton_active\" : " + String(state->water.hotbutton_active) + ", ";
-  json += " \"operating_capacity\" : " + String(state->water.operating_capacity) + ", ";
-  json += " \"consumption_active\" : " + String(state->water.consumption_active) + ", ";
+  json += " \"device_number\" : " + String(water->device_number) + ", ";
+  json += " \"system_power\" : " + String(water->system_power) + ", ";
+  json += " \"set_temp\" : " + String(water->set_temp) + ", ";
+  json += " \"inlet_temp\" : " + String(water->inlet_temp) + ", ";
+  json += " \"outlet_temp\" : " + String(water->outlet_temp) + ", ";
+  json += " \"flow_lpm\" : " + String(water->flow_lpm) + ", ";
+  json += " \"flow_state\" : " + String(water->flow_state) + ", ";
+  json += " \"recirculation_active\" : " + String(water->recirculation_active) + ", ";
+  json += " \"recirculation_running\" : " + String(water->recirculation_running) + ", ";
+  json += " \"display_metric\" : " + String(water->display_metric) + ", ";
+  json += " \"schedule_active\" : " + String(water->schedule_active) + ", ";
+  json += " \"hotbutton_active\" : " + String(water->hotbutton_active) + ", ";
+  json += " \"operating_capacity\" : " + String(water->operating_capacity) + ", ";
+  json += " \"consumption_active\" : " + String(water->consumption_active) + ", ";
   json += " \"debug\" : \"" + rawhexstring + "\", ";
   json += " \"unknown_10\" : " + String(navienSerial.rawPacketData()->water.unknown_10) + ", ";
   json += " \"unknown_27\" : " + String(navienSerial.rawPacketData()->water.unknown_27) + ", ";
@@ -104,13 +105,13 @@ String waterToJSON(const Navien::NAVIEN_STATE *state, String rawhexstring = "") 
   return json;
 }
 
-void onWaterPacket(Navien::NAVIEN_STATE *state) {
+void onWaterPacket(Navien::NAVIEN_STATE_WATER *water) {
   resetPreviousValues();
 
   const Navien::PACKET_BUFFER *recv_buffer = navienSerial.rawPacketData();
   String rawhexstring = buffer_to_hex_string(recv_buffer->raw_data, Navien::HDR_SIZE + recv_buffer->hdr.len + 1);
   if (rawhexstring != previousWater) {
-    String json = waterToJSON(state, rawhexstring);
+    String json = waterToJSON(water, rawhexstring);
     udp.broadcastTo(json.c_str(), 2025);
 
     if (trace == "water" || trace == "all")

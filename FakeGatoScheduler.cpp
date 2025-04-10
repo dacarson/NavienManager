@@ -127,9 +127,9 @@ void FakeGatoScheduler::stateChange(State newState){
       // Fall through
     case State::Active:
       WEBLOG("SCHEDULER going Active %s", newState == State::Override ? "- Override" : "" );
-      if (!navienSerial.currentState()->water.system_power)
+      if (!navienSerial.currentState()->water[0].system_power)
         navienSerial.power(true);
-      if (!navienSerial.currentState()->water.recirculation_active)
+      if (!navienSerial.currentState()->water[0].recirculation_active)
         if (navienSerial.recirculation(true) == -1)
           WEBLOG("Failed to enable Recirculation.");
         // ignore setpoints as they only go to 30 degC
@@ -138,7 +138,7 @@ void FakeGatoScheduler::stateChange(State newState){
       
     case State::InActive:
       WEBLOG("SCHEDULER going Inactive");
-      if (!navienSerial.currentState()->water.system_power)
+      if (!navienSerial.currentState()->water[0].system_power)
         navienSerial.power(true);
       if (navienSerial.recirculation(false) == -1)
         WEBLOG("Failed to disable Recirculation.");

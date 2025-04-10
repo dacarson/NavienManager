@@ -42,21 +42,26 @@ bool Navien::seek_to_marker() {
 }
 
 void Navien::parse_water() {
-  state.water.system_power = (recv_buffer.water.system_power & 0x5) ? 0x1 : 0x0;
-  state.water.flow_state = recv_buffer.water.flow_state;
-  state.water.consumption_active = (recv_buffer.water.flow_state & 0x20) ? 0x1 : 0x0;
-  state.water.recirculation_running = (recv_buffer.water.flow_state & 0x08) ? 0x1 : 0x0;
-  state.water.set_temp = Navien::t2c(recv_buffer.water.set_temp);
-  state.water.outlet_temp = Navien::t2c(recv_buffer.water.outlet_temp);
-  state.water.inlet_temp = Navien::t2c(recv_buffer.water.inlet_temp);
-  state.water.display_metric = (recv_buffer.water.system_status & 0x8) ? 0x1 : 0x0;
-  state.water.schedule_active = (recv_buffer.water.system_status & 0x2) ? 0x1 : 0x0;
-  state.water.hotbutton_active = (recv_buffer.water.system_status & 0x2) ? 0x0 : 0x1;
-  state.water.operating_capacity = 0.5 * recv_buffer.water.operating_capacity;  // 0.5 increments
-  state.water.flow_lpm = Navien::flow2lpm(recv_buffer.water.water_flow);
-  state.water.recirculation_active = (recv_buffer.water.recirculation_enabled & 0x2) ? 0x1 : 0x0;
+  uint8_t device_number = recv_buffer.hdr.packet_type - PACKET_TYPE_WATER_MIN;
+  if (device_number > state.max_water_devices_seen)
+    state.max_water_devices_seen = device_number;
 
-  if (on_water_packet_cb) on_water_packet_cb(&state);
+  state.water[device_number].device_number = device_number;
+  state.water[device_number].system_power = (recv_buffer.water.system_power & 0x5) ? 0x1 : 0x0;
+  state.water[device_number].flow_state = recv_buffer.water.flow_state;
+  state.water[device_number].consumption_active = (recv_buffer.water.flow_state & 0x20) ? 0x1 : 0x0;
+  state.water[device_number].recirculation_running = (recv_buffer.water.flow_state & 0x08) ? 0x1 : 0x0;
+  state.water[device_number].set_temp = Navien::t2c(recv_buffer.water.set_temp);
+  state.water[device_number].outlet_temp = Navien::t2c(recv_buffer.water.outlet_temp);
+  state.water[device_number].inlet_temp = Navien::t2c(recv_buffer.water.inlet_temp);
+  state.water[device_number].display_metric = (recv_buffer.water.system_status & 0x8) ? 0x1 : 0x0;
+  state.water[device_number].schedule_active = (recv_buffer.water.system_status & 0x2) ? 0x1 : 0x0;
+  state.water[device_number].hotbutton_active = (recv_buffer.water.system_status & 0x2) ? 0x0 : 0x1;
+  state.water[device_number].operating_capacity = 0.5 * recv_buffer.water.operating_capacity;  // 0.5 increments
+  state.water[device_number].flow_lpm = Navien::flow2lpm(recv_buffer.water.water_flow);
+  state.water[device_number].recirculation_active = (recv_buffer.water.recirculation_enabled & 0x2) ? 0x1 : 0x0;
+
+  if (on_water_packet_cb) on_water_packet_cb(&state.water[device_number]);
 }
 
 void Navien::parse_gas() {
@@ -88,11 +93,13 @@ void Navien::parse_gas() {
 }
 
 void Navien::parse_status_packet() {
-  switch (recv_buffer.hdr.packet_type) {
-    case Navien::PACKET_TYPE_WATER:
-    case Navien::PACKET_TYPE_WATER2:
-      parse_water();
-      break;
+  uint8_t pkt_type = recv_buffer.hdr.packet_type;
+
+  if (pkt_type >= PACKET_TYPE_WATER_MIN && pkt_type <= PACKET_TYPE_WATER_MAX) {
+    parse_water();
+    return;
+  }
+  switch (pkt_type) {
     case Navien::PACKET_TYPE_GAS:
       parse_gas();
       break;
@@ -372,7 +379,7 @@ int Navien::power(bool power_on) {
   send_buffer.raw_data[HDR_SIZE + send_buffer.hdr.len] = crc;
 
   if (test_mode) {
-    state.water.system_power = power_on;
+    state.water[0].system_power = power_on;
     return(HDR_SIZE + send_buffer.hdr.len);
   }
 
@@ -392,7 +399,7 @@ int Navien::setTemp(float temp_degC) {
 
   if (test_mode) {
     state.gas.set_temp = temp_degC;
-    state.water.set_temp = temp_degC;
+    state.water[0].set_temp = temp_degC;
     return(HDR_SIZE + send_buffer.hdr.len);
   }
 
@@ -441,10 +448,10 @@ int Navien::recirculation(bool recirc_on) {
   send_buffer.raw_data[HDR_SIZE + send_buffer.hdr.len] = crc;
 
   if (test_mode) {
-    state.water.recirculation_active = recirc_on;
-    state.water.recirculation_running = recirc_on;
+    state.water[0].recirculation_active = recirc_on;
+    state.water[0].recirculation_running = recirc_on;
     state.gas.current_gas_usage = recirc_on ? 200 : 0;
-    state.water.operating_capacity = recirc_on ? 15 : 0;
+    state.water[0].operating_capacity = recirc_on ? 15 : 0;
     sent_len = HDR_SIZE + send_buffer.hdr.len;
   }
 

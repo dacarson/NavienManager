@@ -37,7 +37,7 @@ extern FakeGatoScheduler *scheduler;
 String trace;
 
 // Functions in NavienBroadcaster.ino
-extern String waterToJSON(const Navien::NAVIEN_STATE *state, String rawhexstring = "");
+extern String waterToJSON(const Navien::NAVIEN_STATE_WATER *water, String rawhexstring = "");
 extern String gasToJSON(const Navien::NAVIEN_STATE *state, String rawhexstring = "");
 
 
@@ -147,7 +147,9 @@ void commandGas(const String& params) {
 }
 
 void commandWater(const String& params) {
-  telnet.println(waterToJSON(navienSerial.currentState()));
+  for (int i = 0; i <= navienSerial.currentState()->max_water_devices_seen; i++) {
+    telnet.println(waterToJSON(&navienSerial.currentState()->water[i]));
+  }
 }
 
 void commandControl(const String& params) {
@@ -180,11 +182,17 @@ void commandSetTemp(const String& params) {
 void commandPower(const String& params) {
   if (params.isEmpty()) {
     telnet.print(F("Current Power is: "));
-    if (navienSerial.currentState()->water.system_power) {
-      telnet.println(F("ON"));
-    } else {
-      telnet.println(F("OFF"));
+    for (int i = 0; i <= navienSerial.currentState()->max_water_devices_seen; i++) {
+      if (navienSerial.currentState()->water[i].system_power) {
+        telnet.print(F("ON"));
+      } else {
+        telnet.print(F("OFF"));
+      }
+      if (i > 0) {
+        telnet.print(", ");
+      }
     }
+    telnet.println();
   } else if (params.equalsIgnoreCase("on")) {
     if (navienSerial.power(true) != -1) {
       telnet.println(F("Powering on."));
@@ -205,11 +213,17 @@ void commandPower(const String& params) {
 void commandRecirc(const String& params) {
   if (params.isEmpty()) {
     telnet.print(F("Recirculation is: "));
-    if (navienSerial.currentState()->water.recirculation_running) {
-      telnet.println(F("ON"));
-    } else {
-      telnet.println(F("OFF"));
+    for (int i = 0; i <= navienSerial.currentState()->max_water_devices_seen; i++) {
+      if (navienSerial.currentState()->water[i].recirculation_running) {
+        telnet.print(F("ON"));
+      } else {
+        telnet.print(F("OFF"));
+      }
+            if (i > 0) {
+        telnet.print(", ");
+      }
     }
+    telnet.println();
   } else if (params.equalsIgnoreCase("on")) {
     if (navienSerial.recirculation(true) != -1) {
       telnet.println(F("Turning recirculation on."));

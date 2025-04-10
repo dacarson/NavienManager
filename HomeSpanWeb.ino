@@ -89,7 +89,8 @@ void navienStatus(String &html) {
   uint16_t currentGasUsage = navienSerial.currentState()->gas.current_gas_usage; 
   float accumulatedGasUsage = navienSerial.currentState()->gas.accumulated_gas_usage;
 
-  float domesticFlowRate = navienSerial.currentState()->water.flow_lpm;
+  char buffer[25];
+  float domesticFlowRate = navienSerial.currentState()->water[0].flow_lpm;
 
   html = "<h3>Controller: "
     + String(navienSerial.currentState()->gas.controller_version)
@@ -104,28 +105,51 @@ void navienStatus(String &html) {
     "</label><span class='toggle-label'>Units</span></div>";
 
 
-  html += "<div class='status-container'>"
-    + statusCard("Hotwater Power", (navienSerial.currentState()->water.system_power ? "status-ok" : "status-error"), String(navienSerial.currentState()->water.system_power ? "On":"Off" ))
-    + statusCard("Domestic Consumption", (navienSerial.currentState()->water.consumption_active ? "status-warning" :"status-ok"), String(navienSerial.currentState()->water.consumption_active ? "Yes":"No"))
+  html += "<div class='status-container'>";
+  for (int i = 0; i <= navienSerial.currentState()->max_water_devices_seen; i++) {
+    if (i == 0) {
+      html += statusCard("Hotwater Power", (navienSerial.currentState()->water[i].system_power ? "status-ok" : "status-error"), String(navienSerial.currentState()->water[i].system_power ? "On":"Off" ));
+      html += statusCard("Domestic Consumption", (navienSerial.currentState()->water[i].consumption_active ? "status-warning" :"status-ok"), String(navienSerial.currentState()->water[i].consumption_active ? "Yes":"No"));
+    } else {
+      sprintf(buffer, "Hotwater Power [%d]", i);
+      html += statusCard(buffer, (navienSerial.currentState()->water[i].system_power ? "status-ok" : "status-error"), String(navienSerial.currentState()->water[i].system_power ? "On":"Off" ));
+      sprintf(buffer, "Domestic Consumption [%d]", i);
+      html += statusCard(buffer, (navienSerial.currentState()->water[i].consumption_active ? "status-warning" :"status-ok"), String(navienSerial.currentState()->water[i].consumption_active ? "Yes":"No"));
+    }
+  }
 
-    + statusCard("Current Gas Usage", currentGasUsage > 0 ? "status-warning" :"status-ok", String(currentGasUsage) + " kcal", String(3.96567 * currentGasUsage) + " BTU" )
-    + statusCard("Accumulated Gas", "status-ok", String(accumulatedGasUsage) + " m<sup>3</sup>", String(accumulatedGasUsage * 35315.0 / 100000) + " Therms" )
+    html += statusCard("Current Gas Usage", currentGasUsage > 0 ? "status-warning" :"status-ok", String(currentGasUsage) + " kcal", String(3.96567 * currentGasUsage) + " BTU" );
+    html += statusCard("Accumulated Gas", "status-ok", String(accumulatedGasUsage) + " m<sup>3</sup>", String(accumulatedGasUsage * 35315.0 / 100000) + " Therms" );
 
-    + statusCard("Domestic Outlet Set Temp",  "status-ok", String(setTemp) + " &deg;C", String((setTemp * 9.0 / 5.0) + 32) + " &deg;F")
-    + statusCard("Domestic Outlet Temp", "status-ok", String(outletTemp) + " &deg;C", String((outletTemp * 9.0 / 5.0) + 32) + " &deg;F")
+    html += statusCard("Domestic Outlet Set Temp",  "status-ok", String(setTemp) + " &deg;C", String((setTemp * 9.0 / 5.0) + 32) + " &deg;F");
+    html += statusCard("Domestic Outlet Temp", "status-ok", String(outletTemp) + " &deg;C", String((outletTemp * 9.0 / 5.0) + 32) + " &deg;F");
 
-    + statusCard("Inlet Temp", "status-ok", String(inletTemp) + " &deg;C", String((inletTemp * 9.0 / 5.0) + 32) + " &deg;F")
-    + statusCard("Domestic Flow Rate", domesticFlowRate > 0 ? "status-warning": "status-ok", String(domesticFlowRate) + " lpm", String(domesticFlowRate * 0.264172) + " GPM")
+    html += statusCard("Inlet Temp", "status-ok", String(inletTemp) + " &deg;C", String((inletTemp * 9.0 / 5.0) + 32) + " &deg;F");
+    html += statusCard("Domestic Flow Rate", domesticFlowRate > 0 ? "status-warning": "status-ok", String(domesticFlowRate) + " lpm", String(domesticFlowRate * 0.264172) + " GPM");
 
-    + statusCard("Total Operating Time", "status-ok", (String(navienSerial.currentState()->gas.total_operating_time / 60.0) + " hr"))
-    + statusCard("Accumulated Usage Cnt", "status-ok", String(navienSerial.currentState()->gas.accumulated_domestic_usage_cnt))
+    html += statusCard("Total Operating Time", "status-ok", (String(navienSerial.currentState()->gas.total_operating_time / 60.0) + " hr"));
+    html += statusCard("Accumulated Usage Cnt", "status-ok", String(navienSerial.currentState()->gas.accumulated_domestic_usage_cnt));
 
-    + statusCard("Navien Scheduler", navienSerial.currentState()->water.schedule_active ? "status-warning" :"status-ok", navienSerial.currentState()->water.schedule_active ? "Active":"Inactive")
-    + statusCard("Operating Capacity", navienSerial.currentState()->water.operating_capacity > 0 ? "status-warning" :"status-ok", (String(navienSerial.currentState()->water.operating_capacity) + " %"))
+  for (int i = 0; i <= navienSerial.currentState()->max_water_devices_seen; i++) {
+    if (i == 0) {
+      html += statusCard("Navien Scheduler", navienSerial.currentState()->water[i].schedule_active ? "status-warning" :"status-ok", navienSerial.currentState()->water[i].schedule_active ? "Active":"Inactive");
+      html += statusCard("Operating Capacity", navienSerial.currentState()->water[i].operating_capacity > 0 ? "status-warning" :"status-ok", (String(navienSerial.currentState()->water[i].operating_capacity) + " %"));
 
-    + statusCard("Recirculation", navienSerial.currentState()->water.recirculation_active ? "status-warning" :"status-ok", navienSerial.currentState()->water.recirculation_active ? "Active":"Inactive")
-    + statusCard("Recirculation Pump", navienSerial.currentState()->water.recirculation_running ? "status-warning" :"status-ok", navienSerial.currentState()->water.recirculation_running ? "Running":"Stopped")
-    + "</div>";
+      html += statusCard("Recirculation", navienSerial.currentState()->water[i].recirculation_active ? "status-warning" :"status-ok", navienSerial.currentState()->water[i].recirculation_active ? "Active":"Inactive");
+      html += statusCard("Recirculation Pump", navienSerial.currentState()->water[i].recirculation_running ? "status-warning" :"status-ok", navienSerial.currentState()->water[i].recirculation_running ? "Running":"Stopped");
+    } else {
+      sprintf(buffer, "Navien Scheduler [%d]", i);
+      html += statusCard(buffer, navienSerial.currentState()->water[i].schedule_active ? "status-warning" :"status-ok", navienSerial.currentState()->water[i].schedule_active ? "Active":"Inactive");
+      sprintf(buffer, "Operating Capacity [%d]", i);
+      html += statusCard(buffer, navienSerial.currentState()->water[i].operating_capacity > 0 ? "status-warning" :"status-ok", (String(navienSerial.currentState()->water[i].operating_capacity) + " %"));
+
+      sprintf(buffer, "Recirculation [%d]", i);
+      html += statusCard(buffer, navienSerial.currentState()->water[i].recirculation_active ? "status-warning" :"status-ok", navienSerial.currentState()->water[i].recirculation_active ? "Active":"Inactive");
+      sprintf(buffer, "Recirculation Pump", i);
+      html += statusCard(buffer, navienSerial.currentState()->water[i].recirculation_running ? "status-warning" :"status-ok", navienSerial.currentState()->water[i].recirculation_running ? "Running":"Stopped");
+    }
+  }
+    html += "</div>";
 
     html += "<h2>Scheduler Status</h2>"
     "<h3>Device Time: <span id='deviceTime'>" + getFormattedTime() + "</span></h3>"

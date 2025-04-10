@@ -111,7 +111,7 @@ struct DEV_Navien : Service::Thermostat {
       // Check to see if the user overrides current schedule
       switch (targetState->getNewVal()) {
         case OFF:
-          if (navienSerial.currentState()->water.recirculation_active) {
+          if (navienSerial.currentState()->water[0].recirculation_active) {
             ret = navienSerial.recirculation(0);
             WEBLOG("Ignore schedule, turning off recirculation: %s\n", ret > 0 ? "Success" : "Failed");
           } else {
@@ -167,12 +167,12 @@ struct DEV_Navien : Service::Thermostat {
       Serial.printf("Navien current Temperature is %s.\n", temp2String(currentTemp->getNewVal<float>()).c_str());
     }
 
-    int operatingCap = (int)roundf(navienSerial.currentState()->water.operating_capacity);
+    int operatingCap = (int)roundf(navienSerial.currentState()->water[0].operating_capacity);
     if (operatingCap != valvePosition->getVal()) {
       valvePosition->setVal(operatingCap);
     }
 
-    if (!scheduler->enabled() &&  !navienSerial.currentState()->water.schedule_active) {
+    if (!scheduler->enabled() &&  !navienSerial.currentState()->water[0].schedule_active) {
       programMode.setVal(0);
     } else if (scheduler->getCurrentState() == SchedulerBase::Override) {
       programMode.setVal(2);
@@ -182,7 +182,7 @@ struct DEV_Navien : Service::Thermostat {
 
     // Navien is actively maintaining the set point
     bool navienActivelyMaintainingTemp = 
-      navienSerial.currentState()->water.recirculation_active || navienSerial.currentState()->gas.current_gas_usage > 0;
+      navienSerial.currentState()->water[0].recirculation_active || navienSerial.currentState()->gas.current_gas_usage > 0;
 
     // Set the set point only when the unit is operating
     float setTemp = Navien::TEMPERATURE_MIN;
@@ -214,7 +214,7 @@ struct DEV_Navien : Service::Thermostat {
     }
 
         // display_metric is 1 for Metric, 0 for Imperial.
-    bool display_metric = navienSerial.currentState()->water.display_metric;
+    bool display_metric = navienSerial.currentState()->water[0].display_metric;
     if (display_metric && displayUnits.getVal() != CELSIUS) {
       displayUnits.setVal(CELSIUS);
     } else if (!display_metric && displayUnits.getVal() != FAHRENHEIT) {
