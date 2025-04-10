@@ -115,6 +115,16 @@ void commandWiFi(const String& params) {
   telnet.println(F(" dBm"));
 }
 
+void commandMemory(const String& params) {
+  telnet.println(F("Memory Details"));
+  telnet.print(F("  Free heap: "));
+  telnet.print(ESP.getFreeHeap());
+  telnet.println(F(" bytes"));
+  telnet.print(F("  Max alloc block: "));
+  telnet.print(ESP.getMaxAllocHeap());
+  telnet.println(F(" bytes"));
+}
+
 void commandTrace(const String& params) {
   if (params == F("gas") || params == F("water") || params == F("command") || params == F("announce")) {
     trace = params;
@@ -388,6 +398,7 @@ void setupTelnetCommands() {
 
   registerCommand(F("ping"), F("Test if telnet commands are working"), commandPing);
   registerCommand(F("wifi"), F("Print WiFi status"), commandWiFi);
+  registerCommand(F("memory"), F("Print available memory"), commandMemory);
 
   registerCommand(F("trace"), F("Dump interactions (options: gas/water/command/announce)"), commandTrace);
   registerCommand(F("stop"), F("Stop tracing"), commandStop);
