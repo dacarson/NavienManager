@@ -328,7 +328,7 @@ boolean FakeGatoHistoryService::update() {
     
     if (historyRequest.updated()) {
       int len = historyRequest.getNewData(0, 0);
-      uint8_t *data = (uint8_t *)malloc(sizeof(uint8_t) * len);
+      uint8_t* data = new uint8_t[len];
       historyRequest.getNewData(data, len);
       uint32_t address = *(uint32_t*)&data[2];
       
@@ -339,7 +339,7 @@ boolean FakeGatoHistoryService::update() {
     
     if (setTime.updated()) {
       int len = setTime.getNewData(0, 0);
-      uint8_t *data = (uint8_t *)malloc(sizeof(uint8_t) * len);
+      uint8_t* data = new uint8_t[len];
       setTime.getNewData(data, len);
       Serial.print(F("History Service Set Time (LocalTime) "));
       uint32_t eveTimestamp = *(uint32_t*)data;

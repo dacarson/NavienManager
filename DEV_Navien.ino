@@ -149,7 +149,7 @@ struct DEV_Navien : Service::Thermostat {
 
     if (programCommand->updated()) {
       int len = programCommand->getNewData(0, 0);
-      uint8_t *data = (uint8_t *)malloc(sizeof(uint8_t) * len);
+      uint8_t* data = new uint8_t[len];
       programCommand->getNewData(data, len);
       scheduler->parseProgramData(data, len);
       delete data;
