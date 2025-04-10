@@ -42,6 +42,12 @@ bool Navien::seek_to_marker() {
 }
 
 void Navien::parse_water() {
+  if (recv_buffer.water.cmd_type != CMD_TYPE_WATER) {
+    // Cascading units, have seen F7 13 50 52 10 03 40 00 04
+    Serial.println("Unknown water packet");
+    return;
+  }
+
   uint8_t device_number = recv_buffer.hdr.packet_type - PACKET_TYPE_WATER_MIN;
   if (device_number > state.max_water_devices_seen)
     state.max_water_devices_seen = device_number;
@@ -65,6 +71,10 @@ void Navien::parse_water() {
 }
 
 void Navien::parse_gas() {
+  if (recv_buffer.gas.cmd_type != CMD_TYPE_GAS) {
+    Serial.println("Unknown gas packet");
+    return;
+  }
   state.gas.set_temp = Navien::t2c(recv_buffer.gas.set_temp);
   state.gas.outlet_temp = Navien::t2c(recv_buffer.gas.outlet_temp);
   state.gas.inlet_temp = Navien::t2c(recv_buffer.gas.inlet_temp);
@@ -112,6 +122,10 @@ void Navien::parse_status_packet() {
 }
 
 void Navien::parse_announce() {
+  if (recv_buffer.announce.cmd_type != CMD_TYPE_ANNOUNCE) {
+    Serial.println("Unknown announce packet");
+    return;
+  }
   //Navien::print_buffer(recv_buffer.raw_data, recv_buffer.hdr.len + HDR_SIZE, on_error_cb);
 
   // If there are any announce packets seen, then there uis a navilink present
@@ -122,6 +136,10 @@ void Navien::parse_announce() {
 }
 
 void Navien::parse_command() {
+  if (recv_buffer.cmd.cmd_type != CMD_TYPE_CMD) {
+    Serial.println("Unknown command packet");
+    return;
+  }
   //Navien::print_buffer(recv_buffer.raw_data, recv_buffer.hdr.len + HDR_SIZE, on_error_cb);
 
   memset(&(state.command), 0x0, sizeof(state.command));

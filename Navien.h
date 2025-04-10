@@ -140,6 +140,13 @@ enum PacketType {
   PACKET_TYPE_GAS = 0x0F
 };
 
+enum StatusCmdType {
+  CMD_TYPE_WATER = 0x42,
+  CMD_TYPE_GAS = 0x45,
+  CMD_TYPE_CMD = 0x4F,
+  CMD_TYPE_ANNOUNCE = 0x4A
+};
+
 enum ControlPacketType {
   CONTROL_ANNOUNCE = 0x4A,
   CONTROL_COMMAND = 0x4F
