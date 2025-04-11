@@ -137,7 +137,7 @@ struct DEV_Navien : Service::Thermostat {
     }
 
     if (targetTemp->updated()) {
-      // Ignore temparature requests that are not valie
+      // Ignore temparature requests that are not valid
       float newSetPoint = targetTemp->getNewVal<float>();
       if (newSetPoint >= Navien::TEMPERATURE_MIN && newSetPoint <= Navien::TEMPERATURE_MAX) {
         ret = navienSerial.setTemp(targetTemp->getNewVal<float>());
@@ -184,11 +184,7 @@ struct DEV_Navien : Service::Thermostat {
     bool navienActivelyMaintainingTemp = 
       navienSerial.currentState()->water[0].recirculation_active || navienSerial.currentState()->gas.current_gas_usage > 0;
 
-    // Set the set point only when the unit is operating
-    float setTemp = Navien::TEMPERATURE_MIN;
-    if (navienActivelyMaintainingTemp) {
-      setTemp = navienSerial.currentState()->gas.set_temp;
-    }
+    float setTemp = navienSerial.currentState()->gas.set_temp;
     if ((targetTemp->getVal<float>() != setTemp) && (setTemp >= Navien::TEMPERATURE_MIN) && (setTemp <= Navien::TEMPERATURE_MAX)) {
       targetTemp->setVal(setTemp);
       Serial.printf("Navien target Temperature is %s.\n", temp2String(targetTemp->getNewVal<float>()).c_str());
@@ -228,7 +224,10 @@ struct DEV_Navien : Service::Thermostat {
       accessoryInfoSet = true;
     }
 
-    historyService->accumulateLogEntry(outletTemp, setTemp, (uint8_t)operatingCap, targetState->getVal(), 0);
+    // Make the logging pretty. Bounce the setTemp in the log *only* between the actual setTemp when
+    // it is heating and 10 when it isn't
+    float logSetTemp = navienActivelyMaintainingTemp ? setTemp : 10.0;
+    historyService->accumulateLogEntry(outletTemp, logSetTemp, (uint8_t)operatingCap, targetState->getVal(), 0);
   
     scheduler->loop();
   }
