@@ -147,8 +147,20 @@ void commandGas(const String& params) {
 }
 
 void commandWater(const String& params) {
+  bool createArray = navienSerial.currentState()->max_water_devices_seen > 0 ? true:false;
+  if (createArray) {
+    telnet.println(F("["));
+  }
   for (int i = 0; i <= navienSerial.currentState()->max_water_devices_seen; i++) {
-    telnet.println(waterToJSON(&navienSerial.currentState()->water[i]));
+    telnet.print(waterToJSON(&navienSerial.currentState()->water[i]));
+    if (i != navienSerial.currentState()->max_water_devices_seen) {
+      telnet.println(F(","));
+    } else {
+      telnet.println();
+    }
+  }
+  if (createArray) {
+    telnet.println(F("]"));
   }
 }
 
