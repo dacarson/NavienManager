@@ -24,6 +24,7 @@ SOFTWARE.
 
 #include <ESPTelnet.h>
 #include <AsyncUDP.h>
+#include <ArduinoJson.h>
 #include "Navien.h"
 
 const unsigned long broadcastDuplicatePacketThrottle = 5000;  // 5 seconds in milliseconds (5000 ms)
@@ -42,6 +43,11 @@ String previousCommand;
 String previousAnnounce;
 unsigned long previousMillis = 0;
 
+#define JSON_ASSIGN_WATER(field) doc[#field] = water->field;
+#define JSON_ASSIGN_WATER_BOOL_TO_INT(field) doc[#field] = (int)(water->field);
+#define JSON_ASSIGN_GAS(field) doc[#field] = state->gas.field;
+#define JSON_ASSIGN_COMMAND(field) doc[#field] = state->command.field;
+#define JSON_ASSIGN_COMMAND_BOOL_TO_INT(field) doc[#field] = (int)(state->command.field);
 
   /* Each broadcast routine checks to see if the new packet is different to 
   * the previous packet. Only if it is different does it broadcast it. This
@@ -76,32 +82,34 @@ String buffer_to_hex_string(const uint8_t *data, size_t length) {
 }
 
 /* Handle Water packets */
-
 String waterToJSON(const Navien::NAVIEN_STATE_WATER *water, String rawhexstring = "") {
-  String json = "{ \"type\" : \"water\", ";
-  json += " \"device_number\" : " + String(water->device_number) + ", ";
-  json += " \"system_power\" : " + String(water->system_power) + ", ";
-  json += " \"set_temp\" : " + String(water->set_temp) + ", ";
-  json += " \"inlet_temp\" : " + String(water->inlet_temp) + ", ";
-  json += " \"outlet_temp\" : " + String(water->outlet_temp) + ", ";
-  json += " \"flow_lpm\" : " + String(water->flow_lpm) + ", ";
-  json += " \"flow_state\" : " + String(water->flow_state) + ", ";
-  json += " \"recirculation_active\" : " + String(water->recirculation_active) + ", ";
-  json += " \"recirculation_running\" : " + String(water->recirculation_running) + ", ";
-  json += " \"display_metric\" : " + String(water->display_metric) + ", ";
-  json += " \"schedule_active\" : " + String(water->schedule_active) + ", ";
-  json += " \"hotbutton_active\" : " + String(water->hotbutton_active) + ", ";
-  json += " \"operating_capacity\" : " + String(water->operating_capacity) + ", ";
-  json += " \"consumption_active\" : " + String(water->consumption_active) + ", ";
-  json += " \"debug\" : \"" + rawhexstring + "\", ";
-  json += " \"unknown_10\" : " + String(navienSerial.rawPacketData()->water.unknown_10) + ", ";
-  json += " \"unknown_27\" : " + String(navienSerial.rawPacketData()->water.unknown_27) + ", ";
-  json += " \"unknown_28\" : " + String(navienSerial.rawPacketData()->water.unknown_28) + ", ";
-  json += " \"unknown_30\" : " + String(navienSerial.rawPacketData()->water.unknown_30) + ", ";
-  json += " \"counter_a\" : " + String(navienSerial.rawPacketData()->water.unknown_29 << 8 | navienSerial.rawPacketData()->water.unknown_28) + ", ";
-  json += " \"counter_b\" : " + String(navienSerial.rawPacketData()->water.unknown_31 << 8 | navienSerial.rawPacketData()->water.unknown_30);
-  json += "}";
+  JsonDocument doc;
+  doc["type"] = "water";
+  
+  JSON_ASSIGN_WATER(device_number);
+  JSON_ASSIGN_WATER(system_power);
+  JSON_ASSIGN_WATER(set_temp);
+  JSON_ASSIGN_WATER(inlet_temp);
+  JSON_ASSIGN_WATER(outlet_temp);
+  JSON_ASSIGN_WATER(flow_lpm);
+  JSON_ASSIGN_WATER(flow_state);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(recirculation_active);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(recirculation_running);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(display_metric);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(schedule_active);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(hotbutton_active);
+  JSON_ASSIGN_WATER(operating_capacity);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(consumption_active);
+  doc["debug"] = rawhexstring;
+  doc["unknown_10"] = navienSerial.rawPacketData()->water.unknown_10;
+  doc["unknown_27"] = navienSerial.rawPacketData()->water.unknown_27;
+  doc["unknown_28"] = navienSerial.rawPacketData()->water.unknown_28;
+  doc["unknown_30"] = navienSerial.rawPacketData()->water.unknown_30;
+  doc["counter_a"] = navienSerial.rawPacketData()->water.unknown_29 << 8 | navienSerial.rawPacketData()->water.unknown_28;
+  doc["counter_b"] = navienSerial.rawPacketData()->water.unknown_31 << 8 | navienSerial.rawPacketData()->water.unknown_30;
 
+  String json;
+  serializeJson(doc, json);
   return json;
 }
 
@@ -123,26 +131,29 @@ void onWaterPacket(Navien::NAVIEN_STATE_WATER *water) {
 /* Handle Gas packets */
 
 String gasToJSON(const Navien::NAVIEN_STATE *state, String rawhexstring = "") {
-  String json = "{ \"type\" : \"gas\", ";
-  json += " \"controller_version\" : " + String(state->gas.controller_version) + ", ";
-  json += " \"set_temp\" : " + String(state->gas.set_temp) + ", ";
-  json += " \"inlet_temp\" : " + String(state->gas.inlet_temp) + ", ";
-  json += " \"outlet_temp\" : " + String(state->gas.outlet_temp) + ", ";
-  json += " \"panel_version\" : " + String((float)state->gas.panel_version) + ", ";
-  json += " \"current_gas_usage\" : " + String(state->gas.current_gas_usage) + ", ";
-  json += " \"accumulated_gas_usage\" : " + String(state->gas.accumulated_gas_usage) + ", ";
-  json += " \"total_operating_time\" : " + String(state->gas.total_operating_time) + ", ";
-  json += " \"accumulated_domestic_usage_cnt\" : " + String(state->gas.accumulated_domestic_usage_cnt) + ", ";
-  json += " \"debug\" : \"" + rawhexstring + "\", ";
-  json += " \"unknown_20\" : " + String(navienSerial.rawPacketData()->gas.unknown_20) + ", ";
-  json += " \"unknown_28\" : " + String(navienSerial.rawPacketData()->gas.unknown_28) + ", ";
-  json += " \"unknown_32\" : " + String(navienSerial.rawPacketData()->gas.unknown_32) + ", ";
-  json += " \"unknown_33\" : " + String(navienSerial.rawPacketData()->gas.unknown_33) + ", ";
-  json += " \"unknown_34\" : " + String(navienSerial.rawPacketData()->gas.unknown_34) + ", ";
-  json += " \"counter_a\" : " + String(navienSerial.rawPacketData()->gas.unknown_29 << 8 | navienSerial.rawPacketData()->gas.unknown_28) + ", ";
-  json += " \"counter_c\" : " + String(navienSerial.rawPacketData()->gas.unknown_34 << 8 | navienSerial.rawPacketData()->gas.unknown_33);
-  json += "}";
+  JsonDocument doc;
+  doc["type"] = "gas";
 
+  JSON_ASSIGN_GAS(controller_version);
+  JSON_ASSIGN_GAS(set_temp);
+  JSON_ASSIGN_GAS(inlet_temp);
+  JSON_ASSIGN_GAS(outlet_temp);
+  JSON_ASSIGN_GAS(panel_version);
+  JSON_ASSIGN_GAS(current_gas_usage);
+  JSON_ASSIGN_GAS(accumulated_gas_usage);
+  JSON_ASSIGN_GAS(total_operating_time);
+  JSON_ASSIGN_GAS(accumulated_domestic_usage_cnt);
+  doc["debug"] = rawhexstring;
+  doc["unknown_20"] = navienSerial.rawPacketData()->gas.unknown_20;
+  doc["unknown_28"] = navienSerial.rawPacketData()->gas.unknown_28;
+  doc["unknown_32"] = navienSerial.rawPacketData()->gas.unknown_32;
+  doc["unknown_33"] = navienSerial.rawPacketData()->gas.unknown_33;
+  doc["unknown_34"] = navienSerial.rawPacketData()->gas.unknown_34;
+  doc["counter_a"] = navienSerial.rawPacketData()->gas.unknown_29 << 8 | navienSerial.rawPacketData()->gas.unknown_28;
+  doc["counter_c"] = navienSerial.rawPacketData()->gas.unknown_34 << 8 | navienSerial.rawPacketData()->gas.unknown_33;
+
+  String json;
+  serializeJson(doc, json);
   return json;
 }
 
@@ -164,18 +175,21 @@ void onGasPacket(Navien::NAVIEN_STATE *state) {
 /* Handle Command packets */
 
 String commandToJSON(const Navien::NAVIEN_STATE *state, String rawhexstring = "") {
-  String json = "{ \"type\" : \"command\", ";
-  json += " \"power_command\" : " + String(state->command.power_command) + ", ";
-  json += " \"power_on\" : " + String(state->command.power_on) + ", ";
-  json += " \"set_temp_command\" : " + String(state->command.set_temp_command) + ", ";
-  json += " \"set_temp\" : " + String(state->command.set_temp) + ", ";
-  json += " \"hot_button_command\" : " + String(state->command.hot_button_command) + ", ";
-  json += " \"recirculation_command\" : " + String(state->command.recirculation_command) + ", ";
-  json += " \"recirculation\" : " + String(state->command.recirculation_on) + ", ";
-  json += " \"cmd_data\" : " + String(state->command.cmd_data) + ", ";
-  json += " \"debug\" : \"" + rawhexstring + "\"";
-  json += "}";
+  JsonDocument doc;
+  doc["type"] = "command";
 
+  JSON_ASSIGN_COMMAND_BOOL_TO_INT(power_command);
+  JSON_ASSIGN_COMMAND_BOOL_TO_INT(power_on);
+  JSON_ASSIGN_COMMAND_BOOL_TO_INT(set_temp_command);
+  JSON_ASSIGN_COMMAND(set_temp);
+  JSON_ASSIGN_COMMAND_BOOL_TO_INT(hot_button_command);
+  JSON_ASSIGN_COMMAND_BOOL_TO_INT(recirculation_command);
+  JSON_ASSIGN_COMMAND_BOOL_TO_INT(recirculation_on);
+  JSON_ASSIGN_COMMAND(cmd_data);
+  doc["debug"] = rawhexstring;
+
+  String json;
+  serializeJson(doc, json);
   return json;
 }
 
