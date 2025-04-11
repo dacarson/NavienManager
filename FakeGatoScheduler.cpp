@@ -273,12 +273,23 @@ void FakeGatoScheduler::parseProgramData(uint8_t *data, int len) {
       case SCHEDULE_STATE:
       {
         PROG_CMD_SCHEDULE_STATE *schedule_state = (PROG_CMD_SCHEDULE_STATE *)(&data[byte_offset]);
+        // Update the current state to what the user wants
         if (schedule_state->schedule_on) {
           scheduleActive = true;
           Serial.println("Schedule: On");
         } else {
           scheduleActive = false;
           Serial.println("Schedule: Off");
+        }
+        // Now set the fake state, because the Eve app attempts to turn on the heat if the 
+        // current temperature is less that the target and the schedule is on. So...
+        // If the scheduler is either off or not active then report that the schedule is turned off
+        if (!scheduleActive || (currentState != SchedulerBase::Active && currentState != SchedulerBase::Override)) {
+          schedule_state->schedule_on = 0;
+        }
+        // If the user turned it on, but our current state is inactive, then show it as off
+        if (scheduleActive && (currentState == SchedulerBase::Active || currentState == SchedulerBase::Override)) {
+          schedule_state->schedule_on = 0;
         }
         memcpy(&prog_send_data.schedule_state, schedule_state, sizeof(PROG_CMD_SCHEDULE_STATE));
         byte_offset += sizeof(PROG_CMD_SCHEDULE_STATE);

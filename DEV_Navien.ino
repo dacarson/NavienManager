@@ -70,6 +70,7 @@ struct DEV_Navien : Service::Thermostat {
   Characteristic::ValvePosition *valvePosition;
 
   bool accessoryInfoSet = false;
+  bool activelyControllingUnit = false;
 
   DEV_Navien()
     : Service::Thermostat() {
@@ -161,6 +162,19 @@ struct DEV_Navien : Service::Thermostat {
 
   void loop() override {
 
+    // Is the scheduler ready
+    if (scheduler->getCurrentState() != SchedulerBase::Unknown) {
+      // Are we taking over controlling the unit
+      if (!activelyControllingUnit && navienSerial.controlAvailable()) {
+        WEBLOG("No Navilink present, taking control of Navien and setting initial state");
+        activelyControllingUnit = true;
+        takeControl();
+      } else if (activelyControllingUnit && !navienSerial.controlAvailable()) {
+        WEBLOG("Navilink present, no longer controlling the unit");
+        activelyControllingUnit = false;
+      }
+    }
+
     float outletTemp = navienSerial.currentState()->gas.outlet_temp;
     if (currentTemp->timeVal() > 5000 && fabs(currentTemp->getVal<float>() - outletTemp) > 0.50) {  // if it's been more than 5 seconds since last update, and temperature has changed
       currentTemp->setVal(outletTemp);
@@ -238,6 +252,41 @@ struct DEV_Navien : Service::Thermostat {
     String t = displayUnits.getVal() ? String(round(temp * 1.8 + 32.0)) : String(temp);
     t += displayUnits.getVal() ? " F" : " C";
     return (t);
+  }
+
+  void takeControl() {
+    // When a NaviLink unit disappears, the Navien state changes.
+    // We need to set the Navien to the state the scheduler expects
+
+    // Do nothing if the scheduler is not enabled
+    if (!scheduler->enabled()) {
+      return;
+    }
+
+    switch (scheduler->getCurrentState()) {
+      case SchedulerBase::InActive:
+        // Unit should be on and Reciculation should be off
+        if (!navienSerial.currentState()->water[0].system_power)
+          navienSerial.power(1);
+        if (navienSerial.currentState()->water[0].recirculation_active)
+          navienSerial.recirculation(0);
+        break;
+
+      case SchedulerBase::Active:
+      case SchedulerBase::Override:
+        // Unit should be on and Reciculation should be on
+        if (!navienSerial.currentState()->water[0].system_power)
+          navienSerial.power(1);
+        if (!navienSerial.currentState()->water[0].recirculation_active)
+          navienSerial.recirculation(0);
+        break;
+
+      case SchedulerBase::Vacation:
+        // Unit should be Off
+        if (navienSerial.currentState()->water[0].system_power)
+          navienSerial.power(0);
+      break;
+    }
   }
 };
 
