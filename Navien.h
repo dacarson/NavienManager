@@ -365,6 +365,7 @@ enum CommandActionHotButton {
   static constexpr float TEMPERATURE_MAX = 60.0f;
 
   typedef void (*NavienWaterCallback)(NAVIEN_STATE_WATER *water);
+  typedef void (*NavienGasCallback)(NAVIEN_STATE_GAS *gas);
   typedef void (*PacketCallbackFunction)(NAVIEN_STATE *state);
   typedef void (*ErrorCallbackFunction)(const char* functionName, const char* error);
 
@@ -379,7 +380,7 @@ public:
   void loop();
 
   // Set the callback functions, called when packet is processed
-  void onGasPacket(PacketCallbackFunction f) {
+  void onGasPacket(NavienGasCallback f) {
     on_gas_packet_cb = f;
   }
   void onWaterPacket(NavienWaterCallback f) {
@@ -454,7 +455,7 @@ protected:
   static uint8_t checksum(const uint8_t *buffer, uint8_t len, uint16_t seed);
 
   // Callback functions that will be called when packets are received
-  PacketCallbackFunction on_gas_packet_cb = NULL;
+  NavienGasCallback on_gas_packet_cb = NULL;
   NavienWaterCallback on_water_packet_cb = NULL;
   PacketCallbackFunction on_command_packet_cb = NULL;
   PacketCallbackFunction on_announce_packet_cb = NULL;

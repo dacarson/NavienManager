@@ -45,7 +45,9 @@ unsigned long previousMillis = 0;
 
 #define JSON_ASSIGN_WATER(field) doc[#field] = water->field;
 #define JSON_ASSIGN_WATER_BOOL_TO_INT(field) doc[#field] = (int)(water->field);
-#define JSON_ASSIGN_GAS(field) doc[#field] = state->gas.field;
+#define JSON_ASSIGN_WATER_FLOAT(field) doc[#field] = serialized(String(water->field, 1))
+#define JSON_ASSIGN_GAS(field) doc[#field] = gas->field;
+#define JSON_ASSIGN_GAS_FLOAT(field) doc[#field] = serialized(String(gas->field, 1))
 #define JSON_ASSIGN_COMMAND(field) doc[#field] = state->command.field;
 #define JSON_ASSIGN_COMMAND_BOOL_TO_INT(field) doc[#field] = (int)(state->command.field);
 
@@ -87,18 +89,18 @@ String waterToJSON(const Navien::NAVIEN_STATE_WATER *water, String rawhexstring 
   doc["type"] = "water";
   
   JSON_ASSIGN_WATER(device_number);
-  JSON_ASSIGN_WATER(system_power);
-  JSON_ASSIGN_WATER(set_temp);
-  JSON_ASSIGN_WATER(inlet_temp);
-  JSON_ASSIGN_WATER(outlet_temp);
-  JSON_ASSIGN_WATER(flow_lpm);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(system_power);
+  JSON_ASSIGN_WATER_FLOAT(set_temp);
+  JSON_ASSIGN_WATER_FLOAT(inlet_temp);
+  JSON_ASSIGN_WATER_FLOAT(outlet_temp);
+  JSON_ASSIGN_WATER_FLOAT(flow_lpm);
   JSON_ASSIGN_WATER(flow_state);
   JSON_ASSIGN_WATER_BOOL_TO_INT(recirculation_active);
   JSON_ASSIGN_WATER_BOOL_TO_INT(recirculation_running);
   JSON_ASSIGN_WATER_BOOL_TO_INT(display_metric);
   JSON_ASSIGN_WATER_BOOL_TO_INT(schedule_active);
   JSON_ASSIGN_WATER_BOOL_TO_INT(hotbutton_active);
-  JSON_ASSIGN_WATER(operating_capacity);
+  JSON_ASSIGN_WATER_FLOAT(operating_capacity);
   JSON_ASSIGN_WATER_BOOL_TO_INT(consumption_active);
   doc["debug"] = rawhexstring;
   doc["unknown_10"] = navienSerial.rawPacketData()->water.unknown_10;
@@ -130,15 +132,15 @@ void onWaterPacket(Navien::NAVIEN_STATE_WATER *water) {
 
 /* Handle Gas packets */
 
-String gasToJSON(const Navien::NAVIEN_STATE *state, String rawhexstring = "") {
+String gasToJSON(const Navien::NAVIEN_STATE_GAS *gas, String rawhexstring = "") {
   JsonDocument doc;
   doc["type"] = "gas";
 
-  JSON_ASSIGN_GAS(controller_version);
-  JSON_ASSIGN_GAS(set_temp);
-  JSON_ASSIGN_GAS(inlet_temp);
-  JSON_ASSIGN_GAS(outlet_temp);
-  JSON_ASSIGN_GAS(panel_version);
+  JSON_ASSIGN_GAS_FLOAT(controller_version);
+  JSON_ASSIGN_GAS_FLOAT(set_temp);
+  JSON_ASSIGN_GAS_FLOAT(inlet_temp);
+  JSON_ASSIGN_GAS_FLOAT(outlet_temp);
+  JSON_ASSIGN_GAS_FLOAT(panel_version);
   JSON_ASSIGN_GAS(current_gas_usage);
   JSON_ASSIGN_GAS(accumulated_gas_usage);
   JSON_ASSIGN_GAS(total_operating_time);
@@ -157,13 +159,13 @@ String gasToJSON(const Navien::NAVIEN_STATE *state, String rawhexstring = "") {
   return json;
 }
 
-void onGasPacket(Navien::NAVIEN_STATE *state) {
+void onGasPacket(Navien::NAVIEN_STATE_GAS *gas) {
   resetPreviousValues();
 
   const Navien::PACKET_BUFFER *recv_buffer = navienSerial.rawPacketData();
   String rawhexstring = buffer_to_hex_string(recv_buffer->raw_data, Navien::HDR_SIZE + recv_buffer->hdr.len + 1);
   if (rawhexstring != previousGas) {
-    String json = gasToJSON(state, rawhexstring);
+    String json = gasToJSON(gas, rawhexstring);
     udp.broadcastTo(json.c_str(), 2025);
 
     if (trace == "gas" || trace == "all")

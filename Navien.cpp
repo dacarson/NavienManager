@@ -99,7 +99,7 @@ void Navien::parse_gas() {
   uint32_t raw_usage = (recv_buffer.gas.cumulative_domestic_usage_cnt_hi << 8 | recv_buffer.gas.cumulative_domestic_usage_cnt_lo);
   state.gas.accumulated_domestic_usage_cnt = 10 * raw_usage;  // Safe with uint32_t
 
-  if (on_gas_packet_cb) on_gas_packet_cb(&(state));
+  if (on_gas_packet_cb) on_gas_packet_cb(&(state.gas));
 }
 
 void Navien::parse_status_packet() {

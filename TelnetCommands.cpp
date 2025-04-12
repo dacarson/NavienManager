@@ -38,7 +38,7 @@ String trace;
 
 // Functions in NavienBroadcaster.ino
 extern String waterToJSON(const Navien::NAVIEN_STATE_WATER *water, String rawhexstring = "");
-extern String gasToJSON(const Navien::NAVIEN_STATE *state, String rawhexstring = "");
+extern String gasToJSON(const Navien::NAVIEN_STATE_GAS *gas, String rawhexstring = "");
 
 
 // Define the type for the command callback as a function pointer
@@ -143,7 +143,7 @@ void commandStop(const String& params) {
 }
 
 void commandGas(const String& params) {
-  telnet.println(gasToJSON(navienSerial.currentState()));
+  telnet.println(gasToJSON(&navienSerial.currentState()->gas));
 }
 
 void commandWater(const String& params) {
