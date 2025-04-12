@@ -239,8 +239,8 @@ struct DEV_Navien : Service::Thermostat {
     }
 
     // Make the logging pretty. Bounce the setTemp in the log *only* between the actual setTemp when
-    // it is heating and 10 when it isn't
-    float logSetTemp = navienActivelyMaintainingTemp ? setTemp : 10.0;
+    // it is heating and Navien's min temperature when it isn't
+    float logSetTemp = navienActivelyMaintainingTemp ? setTemp : Navien::TEMPERATURE_MIN;
     historyService->accumulateLogEntry(outletTemp, logSetTemp, (uint8_t)operatingCap, targetState->getVal(), 0);
   
     scheduler->loop();
