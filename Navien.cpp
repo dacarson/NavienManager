@@ -224,12 +224,10 @@ void Navien::parse_packet() {
 
 void Navien::loop() {
   uint8_t byte;
-
   char errBuffer[255];
-
   int availableBytes = available();
 
-  // Check to see if we can send data, and send if possible
+  // Check if we should send a command
   if (recv_state == INITIAL && can_send(availableBytes)) {
     send_cmd();
   }
@@ -237,66 +235,82 @@ void Navien::loop() {
   if (!availableBytes)
     return;
 
-  // We have moved from Initial, so we must
-  // be talking to a real unit.
+  // Disable test_mode if we're getting real responses
   if (recv_state != INITIAL && test_mode) {
     test_mode = false;
   }
 
-  while (availableBytes) {
+  unsigned long startMillis = millis();
+  int loopIterations = 0;
+  const int MAX_LOOP_ITERATIONS = 100;
+
+  while (availableBytes && loopIterations++ < MAX_LOOP_ITERATIONS) {
     switch (recv_state) {
       case INITIAL:
         if (seek_to_marker()) {
           recv_state = MARKER_FOUND;
           break;
         }
-        // No marker found and no data left to read. Exit and wait
-        // for more bytes to come.
+        // No marker found — wait for more bytes
         return;
+
       case MARKER_FOUND:
         availableBytes = available();
-        if (availableBytes < HDR_SIZE) {
+        if (availableBytes < HDR_SIZE)
           return;
-        }
+
         if (!read(recv_buffer.raw_data, HDR_SIZE)) {
           sprintf(errBuffer, "Failed to read header: %d when told %d is available", HDR_SIZE, availableBytes);
           if (on_error_cb)
             on_error_cb(__func__, errBuffer);
-          break;
+          recv_state = INITIAL;
+          return;
         }
-        recv_state = HEADER_PARSED;
-        //Navien::print_buffer(recv_buffer.raw_data, HDR_SIZE, on_error_cb);
 
-        // Reset if headerlen is too long
+        recv_state = HEADER_PARSED;
+
         if (recv_buffer.hdr.len == 0xFF || recv_buffer.hdr.len >= sizeof(PACKET_BUFFER)) {
           if (recv_buffer.hdr.len == 0xFF) {
             if (on_error_cb)
               on_error_cb(__func__, "Invalid header length, are the 485 wires reversed?");
           } else if (on_error_cb)
-              on_error_cb(__func__, "Buffer to small for packet length data, dropping packet.");
+            on_error_cb(__func__, "Buffer too small for packet length data, dropping packet.");
           recv_state = INITIAL;
           return;
         }
+        break;
 
-      case HEADER_PARSED:
+      case HEADER_PARSED: {
         availableBytes = available();
-
-        // +1 here is for the checksum - it is in the last byte
         uint8_t len = recv_buffer.hdr.len + 1;
-        if (availableBytes < len) {
+
+        if (availableBytes < len)
           return;
-        }
+
         if (!read(recv_buffer.raw_data + HDR_SIZE, len)) {
           sprintf(errBuffer, "Failed to read %d bytes when told %d is available", len, availableBytes);
           if (on_error_cb)
             on_error_cb(__func__, errBuffer);
-          break;
+          recv_state = INITIAL;
+          return;
         }
-        //Navien::print_buffer(recv_buffer.raw_data, len+HDR_SIZE, on_error_cb);
+
         parse_packet();
         availableBytes = available();
         recv_state = INITIAL;
+        break;
+      }
+
+      default:
+        recv_state = INITIAL;
+        break;
     }
+
+    // Check elapsed time or max loop iterations
+    if (millis() - startMillis > 100) break;
+
+    yield();  // Let the ESP32 breathe for WDT
+    availableBytes = available(); // refresh at end
   }
 }
 
@@ -348,7 +362,7 @@ bool Navien::can_send(int curr_available) {
     return false;
   }
 
-  if (millis() - last_received > 10) { // e.g. 10ms of silence
+  if (millis() - last_received > 30) { // e.g. 30ms of silence
     return true;
   }
 
