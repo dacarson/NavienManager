@@ -187,8 +187,19 @@ String footerScript =
         "function updateTimestamp(){"
           "document.getElementById('timestamp').innerText=new Date().toLocaleString();}"
         "updateTimestamp();setInterval(updateTimestamp,6e4);"
-        "setInterval(()=>location.reload(),6e4);}" // <-- Auto-reload every 60s
-      "});"
+        "setInterval(()=>location.reload(),6e4);"
+      "}"
+      // 🔽 Wrap the first .bod1 h2 in a link
+      "let h2=document.querySelector('.bod1 h2:first-of-type');"
+      "if(h2 && !h2.querySelector('a')){"
+        "let a=document.createElement('a');"
+        "a.href='https://github.com/dacarson/NavienManager';"
+        "a.innerHTML=h2.innerHTML;"
+        "h2.innerHTML='';"
+        "a.style.color = 'inherit';" // Keep the same text color as parent
+        "h2.appendChild(a);"
+      "}"
+    "});"
     "</script>";
 
     html += footerScript;
