@@ -50,6 +50,7 @@ unsigned long previousMillis = 0;
 #define JSON_ASSIGN_GAS_FLOAT(field) doc[#field] = serialized(String(gas->field, 1))
 #define JSON_ASSIGN_COMMAND(field) doc[#field] = state->command.field;
 #define JSON_ASSIGN_COMMAND_BOOL_TO_INT(field) doc[#field] = (int)(state->command.field);
+#define JSON_ASSIGN_ANNOUNCE_BOOL_TO_INT(field) doc[#field] = (int)(state->announce.field);
 
   /* Each broadcast routine checks to see if the new packet is different to 
   * the previous packet. Only if it is different does it broadcast it. This
@@ -213,11 +214,13 @@ void onCommandPacket(Navien::NAVIEN_STATE *state) {
 /* Handle Announce packets */
 
 String announceToJSON(const Navien::NAVIEN_STATE *state, String rawhexstring = "") {
-  String json = "{ \"type\" : \"announce\", ";
-  json += " \"navilink_present\" : " + String(state->announce.navilink_present) + ", ";
-  json += " \"debug\" : \"" + rawhexstring + "\"";
-  json += "}";
+  JsonDocument doc;
+  doc["type"] = "announce";
+  JSON_ASSIGN_ANNOUNCE_BOOL_TO_INT(navilink_present);
+  doc["debug"] = rawhexstring;
 
+  String json;
+  serializeJson(doc, json);
   return json;
 }
 
