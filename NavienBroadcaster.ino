@@ -142,7 +142,7 @@ String gasToJSON(const Navien::NAVIEN_STATE_GAS *gas, String rawhexstring = "") 
   JSON_ASSIGN_GAS_FLOAT(outlet_temp);
   JSON_ASSIGN_GAS_FLOAT(panel_version);
   JSON_ASSIGN_GAS(current_gas_usage);
-  JSON_ASSIGN_GAS(accumulated_gas_usage);
+  JSON_ASSIGN_GAS_FLOAT(accumulated_gas_usage);
   JSON_ASSIGN_GAS(total_operating_time);
   JSON_ASSIGN_GAS(accumulated_domestic_usage_cnt);
   doc["debug"] = rawhexstring;
