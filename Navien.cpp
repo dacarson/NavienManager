@@ -351,7 +351,7 @@ int Navien::queue_send_cmd(const PACKET_BUFFER& pkt) {
   send_array[send_queue_tail] = pkt;
   send_queue_tail = (send_queue_tail + 1) % QUEUE_CAPACITY;
   ++send_queue_count;
-  return 0;
+  return 1;
 }
 
 bool Navien::can_send(int curr_available) {
