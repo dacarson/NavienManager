@@ -106,9 +106,12 @@ if __name__ == "__main__":
     while 1:
 
         msg=s.recvfrom(1024)
-        data=json.loads(msg[0])      # this is the JSON payload
+        try:
+            data = json.loads(msg[0])
+        except json.JSONDecodeError as e:
+            print(f"Bad JSON in message: {msg[0]!r}")
+            print(f"Decode error: {e}")
+            continue  # or handle as needed
         
         process(data)
-
-        time.sleep(0.01)
 
