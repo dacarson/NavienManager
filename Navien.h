@@ -523,6 +523,9 @@ protected:
 
   // Control available
   bool navilink_present;
+  // If we see 10 water packets and no announce packet
+  // reset navilink to not being present
+  int water_packets_since_announce;
 
   // Assume running in test mode *until* we see a packet
   bool test_mode;

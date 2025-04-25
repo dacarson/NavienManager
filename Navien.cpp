@@ -67,6 +67,15 @@ void Navien::parse_water() {
   state.water[device_number].flow_lpm = Navien::flow2lpm(recv_buffer.water.water_flow);
   state.water[device_number].recirculation_active = (recv_buffer.water.recirculation_enabled & 0x2) ? 0x1 : 0x0;
 
+  // If we see 10+ water packets since the last navilink packet, assume that 
+  // it is no longer present.
+  if (water_packets_since_announce < 10) {
+    water_packets_since_announce++;
+  } else {
+    navilink_present = false;
+    state.announce.navilink_present = false;
+  }
+
   if (on_water_packet_cb) on_water_packet_cb(&state.water[device_number]);
 }
 
@@ -131,6 +140,8 @@ void Navien::parse_announce() {
   // If there are any announce packets seen, then there uis a navilink present
   navilink_present = true;
   state.announce.navilink_present = true;
+
+  water_packets_since_announce = 0;
 
   if (on_announce_packet_cb) on_announce_packet_cb(&(state));
 }
