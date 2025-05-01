@@ -232,6 +232,11 @@ void FakeGatoScheduler::updateSchedulerWeekSchedule() {
       weekSchedule[(day + 1) % 7].slots[i].endMinute = (uint8_t)(daySchedule->slot[i].offset_end % 6) * 10;
     }
   }
+  
+  // Recalculate current state after schedule update
+  if (isInitialized) {
+    initializeCurrentState();
+  }
 }
 
 void FakeGatoScheduler::parseProgramData(uint8_t *data, int len) {
@@ -391,6 +396,7 @@ void FakeGatoScheduler::parseProgramData(uint8_t *data, int len) {
         memcpy(&prog_send_data.weekSchedule, weekSchedule, sizeof(PROG_CMD_WEEK_SCHEDULE));
         updateSchedulerWeekSchedule();
         updateCurrentScheduleIfNeeded(true);
+        initializeCurrentState(); // Recalculate current state after schedule change
         byte_offset += sizeof(PROG_CMD_WEEK_SCHEDULE);
         storeData = true;
         break;

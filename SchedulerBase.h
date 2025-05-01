@@ -97,6 +97,11 @@ private:
   time_t overrideStartTime = 0;  // When override began
   time_t overrideEndTime = 0;    // When override should expire
   bool overrideActive = false;   // Is override running?
+  time_t nextStateChangeTime = 0; // When the next state change should occur
 
   nvs_handle_t nvsStorageHandle;
+
+protected:
+  // Initialize the current state based on current time and schedule
+  void initializeCurrentState();
 };

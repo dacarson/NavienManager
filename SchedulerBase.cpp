@@ -116,6 +116,11 @@ void SchedulerBase::setVacationState(bool active) {
   } else {
     startVacationTime = 0;
   }
+  
+  // Recalculate next state change since vacation state changed
+  if (isInitialized) {
+    getNextState(&nextStateChangeTime);
+  }
 }
 
 void SchedulerBase::activateOverride(int durationMinutes) {
@@ -123,9 +128,9 @@ void SchedulerBase::activateOverride(int durationMinutes) {
   overrideStartTime = now;
   overrideEndTime = now + (durationMinutes * 60); // Convert minutes to seconds
   overrideActive = true;
-    // Do the state change in the loop so that the right
-    // state change callbacks are called.
-    //currentState = State::Override;
+  
+  // Calculate next state change (which will be when override expires)
+  nextStateChangeTime = overrideEndTime;
   
   Serial.printf("Override activated! Scheduler forced ON for %d minutes.\n", durationMinutes);
 }
@@ -307,13 +312,12 @@ int SchedulerBase::begin() {
     return false;
   }
   
-    // If we failed to load the schedule from EEPROM, then
-    // init to a default schedule.
+  // If we failed to load the schedule from EEPROM, then
+  // init to a default schedule.
   if (!loadScheduleFromStorage()) {
     Serial.println("No saved Schedule, loading default.");
     initDefault();
   }
-  
   
   uint32_t storedTime = 0;
   status = nvs_get_u32(nvsStorageHandle, "startVacation", &storedTime);
@@ -344,12 +348,53 @@ int SchedulerBase::begin() {
     tzset();
   }
   
-    // Enable SNTP
+  // Enable SNTP
   esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG(NTP_SERVER);
   esp_netif_sntp_init(&config);  // DEFAULT_CONFIG is to start the server on init()
   sntpSyncDone = false;
   
+  // Don't calculate next state change time here - it will be done in loop()
+  // once SNTP sync is complete and TZ is set
+  
   return true;
+}
+
+void SchedulerBase::initializeCurrentState() {
+  time_t now = time(nullptr);
+  
+  State newState = State::InActive; // Default to inactive
+  
+  // First check if we're in override mode
+  if (overrideActive && now < overrideEndTime) {
+    newState = State::Override;
+  }
+  // Then check if we're in vacation mode
+  else if (startVacationTime && now >= startVacationTime && (!endVacationTime || now < endVacationTime)) {
+    newState = State::Vacation;
+  }
+  // Finally check if we're in an active time slot
+  else {
+    struct tm *tm_struct = localtime(&now);
+    int currentHour = tm_struct->tm_hour;
+    int currentMinute = tm_struct->tm_min;
+    int currentDay = tm_struct->tm_wday;
+    
+    for (int i = 0; i < 4 && weekSchedule[currentDay].slots[i].startHour != 0xFF; i++) {
+      if (isTimeWithinSlot(currentHour, currentMinute, weekSchedule[currentDay].slots[i])) {
+        newState = State::Active;
+        break;
+      }
+    }
+  }
+  
+  // Set the new state and notify
+  if (newState != currentState) {
+    stateChange(newState);
+    currentState = newState;
+  }
+  
+  // Calculate the next state change time
+  getNextState(&nextStateChangeTime);
 }
 
 void SchedulerBase::loop() {
@@ -372,23 +417,31 @@ void SchedulerBase::loop() {
     return;
   }
   
-    // No timezone set, so we can't schedule.
+  // No timezone set, so we can't schedule.
   if (getenv("TZ") == 0) {
     isInitialized = false;
     return;
   }
-  isInitialized = true;
+
+  // If we just became initialized, determine our current state
+  if (!isInitialized) {
+    isInitialized = true;
+    initializeCurrentState();
+    return;
+  }
   
   time_t now = time(nullptr);
-  State newState = State::InActive;
+  State newState = currentState; // Default to current state
   
-    // Handle override expiration
+  // Handle override expiration
   if (overrideActive && now >= overrideEndTime) {
     overrideActive = false;
     Serial.println("Override expired. Reverting to normal scheduling.");
+    // Recalculate next state change since override expired
+    getNextState(&nextStateChangeTime);
   }
   
-    // If override is active, force the state and return
+  // If override is active, force the state and return
   if (overrideActive) {
     newState = State::Override;
     if (newState != currentState) {
@@ -398,25 +451,19 @@ void SchedulerBase::loop() {
     return;
   }
   
-  struct tm *tm_struct = localtime(&now);
-  
-  int currentHour = tm_struct->tm_hour;
-  int currentMinute = tm_struct->tm_min;
-  int currentDay = tm_struct->tm_wday;
-  
-  
-  if ((!startVacationTime || now < startVacationTime) && (!endVacationTime || now > endVacationTime)) {
-    for (int i = 0; i < 4 && weekSchedule[currentDay].slots[i].startHour != 0xFF; i++) {
-      if (isTimeWithinSlot(currentHour, currentMinute, weekSchedule[currentDay].slots[i])) {
-        newState = State::Active;
-      }
+  // Check if it's time for a state change
+  if (nextStateChangeTime > 0 && now >= nextStateChangeTime) {
+    // Get the next state and its time
+    newState = getNextState(&nextStateChangeTime);
+    
+    if (newState != currentState) {
+      stateChange(newState);
+      currentState = newState;
     }
-  } else {
-    newState = State::Vacation;
   }
   
-  if (newState != currentState) {
-    stateChange(newState);
+  // If we don't have a next state change time, calculate it
+  if (nextStateChangeTime == 0) {
+    getNextState(&nextStateChangeTime);
   }
-  currentState = newState;
 }
