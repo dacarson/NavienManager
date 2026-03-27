@@ -178,7 +178,7 @@ struct DEV_Navien : Service::Thermostat {
     float outletTemp = navienSerial.currentState()->gas.outlet_temp;
     if (currentTemp->timeVal() > 5000 && fabs(currentTemp->getVal<float>() - outletTemp) > 0.50) {  // if it's been more than 5 seconds since last update, and temperature has changed
       currentTemp->setVal(outletTemp);
-      Serial.printf("Navien current Temperature is %s.\n", temp2String(currentTemp->getNewVal<float>()).c_str());
+      //Serial.printf("Navien current Temperature is %s.\n", temp2String(currentTemp->getNewVal<float>()).c_str());
     }
 
     int operatingCap = (int)roundf(navienSerial.currentState()->water[0].operating_capacity);
