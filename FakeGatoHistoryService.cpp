@@ -87,79 +87,91 @@ FakeGatoHistoryService::FakeGatoHistoryService()
 }
 
 void FakeGatoHistoryService::accumulateLogEntry(float currentTemp, float targetTemp, uint8_t valvePercent, uint8_t thermoTarget, uint8_t openWindow) {
+    bool isDuplicate = ((uint16_t)(currentTemp * 100) == previousEntry.currentTemp &&
+                        (uint16_t)(targetTemp * 100) == previousEntry.targetTemp &&
+                        valvePercent == previousEntry.valvePercent &&
+                        thermoTarget == previousEntry.thermoTarget &&
+                        openWindow == previousEntry.openWindow);
 
-    // Ignore duplicate entries
-    if ((uint16_t)(currentTemp * 100) == previousEntry.currentTemp &&
-      (uint16_t)(targetTemp * 100) == previousEntry.targetTemp &&
-      valvePercent == previousEntry.valvePercent &&
-      thermoTarget == previousEntry.thermoTarget &&
-      openWindow == previousEntry.openWindow) {
-        return;
-      }
-
+    // Store current values for next duplicate check
     previousEntry.currentTemp = (uint16_t)(currentTemp * 100);
     previousEntry.targetTemp = (uint16_t)(targetTemp * 100);
     previousEntry.valvePercent = valvePercent;
     previousEntry.thermoTarget = thermoTarget;
     previousEntry.openWindow = openWindow;
 
-    if (store.lastEntry && store.history[store.lastEntry % store.historySize].time != 0) { // make sure we have a valid previous entry
-
-      // Check if a key value changed (triggers high-frequency logging)
-      bool keyValueChanged = ((uint16_t)(targetTemp * 100) != store.history[store.lastEntry % store.historySize].targetTemp ||
-                              thermoTarget != store.history[store.lastEntry % store.historySize].thermoTarget ||
-                              valvePercent > 0);
-
-      // **Log accumulated data before switching to high-frequency mode**
-      if (keyValueChanged && logInterval == LOG_ENTRY_FREQ_TEN_MIN) {
-          if (avgLog.count > 0) {  // Ensure we have accumulated data
-            //WEBLOG("Writing low freq averaged data entry");
-            generateTimedHistoryEntry();
-          }
-          logInterval = LOG_ENTRY_FREQ_ONE_MIN;
-          /*WEBLOG("Switching to high freq logging. TargetTemp new %d old %d ThermoTarget new %d old %d Valve %d",
-                (uint16_t)(targetTemp * 100), store.history[store.lastEntry % store.historySize].targetTemp,
-                thermoTarget, store.history[store.lastEntry % store.historySize].thermoTarget, valvePercent); */
-      } else if (valvePercent == 0 && logInterval == LOG_ENTRY_FREQ_ONE_MIN) {
-        logInterval = LOG_ENTRY_FREQ_TEN_MIN;
-        //WEBLOG("Switching to low freq logging");
-      }
-    } else {
-      // We have no entries, so create the first one
-      addHistoryEntry(currentTemp, targetTemp, valvePercent, thermoTarget, openWindow);
-      return;
+    // Check if this is the first entry
+    if (!store.lastEntry || store.history[store.lastEntry % store.historySize].time == 0) {
+        addHistoryEntry(currentTemp, targetTemp, valvePercent, thermoTarget, openWindow);
+        return;
     }
 
-      // Accumulate data for the current interval
+    // Check if key values changed
+    bool keyValueChanged = ((uint16_t)(targetTemp * 100) != store.history[store.lastEntry % store.historySize].targetTemp ||
+                           thermoTarget != store.history[store.lastEntry % store.historySize].thermoTarget ||
+                           valvePercent > 0);
+
+    // If key values changed, check if enough time has passed since last entry
+    if (keyValueChanged) {
+        time_t now = time(nullptr);
+        time_t lastEntryTime = store.history[store.lastEntry % store.historySize].time;
+        
+        // Only log if enough time has passed (at least 1 minute)
+        if (now - lastEntryTime >= 60) {
+            // If we have accumulated data, log it first
+            if (avgLog.count > 0) {
+                generateTimedHistoryEntry();
+            }
+            // Log the new state immediately
+            addHistoryEntry(currentTemp, targetTemp, valvePercent, thermoTarget, openWindow);
+            
+            // Switch to 1-minute logging if valve is open
+            if (valvePercent > 0 && logInterval == LOG_ENTRY_FREQ_TEN_MIN) {
+                logInterval = LOG_ENTRY_FREQ_ONE_MIN;
+            }
+            return;
+        }
+    }
+
+    // Ignore duplicates after giving key-change timing logic a chance to log.
+    if (isDuplicate) {
+        return;
+    }
+
+    // If valve closed and in 1-minute mode, switch back to 10-minute mode
+    if (valvePercent == 0 && logInterval == LOG_ENTRY_FREQ_ONE_MIN) {
+        logInterval = LOG_ENTRY_FREQ_TEN_MIN;
+    }
+
+    // Accumulate data for time-based logging
     avgLog.totalTemp += currentTemp;
     avgLog.totalTargetTemp += targetTemp;
     avgLog.totalValvePos += valvePercent;
-    // Store the last value, don't average these values
     avgLog.lastThermoTarget = thermoTarget;
     avgLog.lastOpenWindow = openWindow;
-
     avgLog.count++;
 }
 
 void FakeGatoHistoryService::generateTimedHistoryEntry() {
     if (avgLog.count > 0) {
-      float avgTemp = avgLog.totalTemp / avgLog.count;
-      float avgTargetTemp = avgLog.totalTargetTemp / avgLog.count;
-      uint8_t avgValvePos = avgLog.totalValvePos / avgLog.count;
-      addHistoryEntry(avgTemp, avgTargetTemp, avgValvePos, avgLog.lastThermoTarget, avgLog.lastOpenWindow);  // Send the averaged entry
-    } else {
-      if (store.lastEntry && store.history[store.lastEntry % store.historySize].time != 0) { // make sure we have a valid previous entry, if so copy it to a new entry
-      // Values in history are stored multiplied by 100, need to divide when reading back
-        float avgTemp = store.history[store.lastEntry % store.historySize].currentTemp / 100;
-        float avgTargetTemp = store.history[store.lastEntry % store.historySize].targetTemp / 100;
+        // Calculate averages for time-based entries
+        float avgTemp = avgLog.totalTemp / avgLog.count;
+        float avgTargetTemp = avgLog.totalTargetTemp / avgLog.count;
+        uint8_t avgValvePos = avgLog.totalValvePos / avgLog.count;
+        
+        // Use the last values for thermoTarget and openWindow since they are state values
+        addHistoryEntry(avgTemp, avgTargetTemp, avgValvePos, avgLog.lastThermoTarget, avgLog.lastOpenWindow);
+    } else if (store.lastEntry && store.history[store.lastEntry % store.historySize].time != 0) {
+        // If no accumulated data but we have a previous entry, copy it
+        float avgTemp = store.history[store.lastEntry % store.historySize].currentTemp / 100.0;
+        float avgTargetTemp = store.history[store.lastEntry % store.historySize].targetTemp / 100.0;
         uint8_t avgValvePos = store.history[store.lastEntry % store.historySize].valvePercent;
         uint8_t thermoTarget = store.history[store.lastEntry % store.historySize].thermoTarget;
         uint8_t openWindow = store.history[store.lastEntry % store.historySize].openWindow;
-        addHistoryEntry(avgTemp, avgTargetTemp, avgValvePos, thermoTarget, openWindow);  // Send the averaged entry
-      }
+        addHistoryEntry(avgTemp, avgTargetTemp, avgValvePos, thermoTarget, openWindow);
     }
     
-      // Reset for the next interval
+    // Reset accumulation for next interval
     avgLog.totalTemp = 0;
     avgLog.totalTargetTemp = 0;
     avgLog.totalValvePos = 0;

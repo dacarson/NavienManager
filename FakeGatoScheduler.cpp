@@ -468,7 +468,7 @@ int FakeGatoScheduler::begin() {
 void FakeGatoScheduler::loop() {
   SchedulerBase::loop();
   
-  if (refreshProgramData || programData->timeVal() > 60000) {
+  if (isInitialized && (refreshProgramData || programData->timeVal() > 60000) ){
     updateCurrentScheduleIfNeeded(false);
     addMilliseconds(&prog_send_data.currentTime, millis() - clockOffset);
     clockOffset = millis();
