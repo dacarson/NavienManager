@@ -22,9 +22,13 @@ SOFTWARE.
 */
 
 #include <Arduino.h>
+#include <cstring>
 #include "Navien.h"
 
 const uint8_t Navien::COMMAND_HEADER[] = { 0xF7, 0x05, 0x0F, 0x50, 0x10, 0x0C, 0x4F };
+
+const uint8_t Navien::ANNOUNCE_PACKET[] = {
+    0xF7, 0x05, 0x0F, 0x50, 0x10, 0x03, 0x4A, 0x00, 0x01, 0x55};
 
 bool Navien::seek_to_marker() {
   uint8_t byte;
@@ -130,23 +134,39 @@ void Navien::parse_status_packet() {
   }
 }
 
-void Navien::parse_announce() {
+void Navien::parse_announce(bool from_local_send) {
   if (recv_buffer.announce.cmd_type != CMD_TYPE_ANNOUNCE) {
     Serial.println("Unknown announce packet");
     return;
   }
   //Navien::print_buffer(recv_buffer.raw_data, recv_buffer.hdr.len + HDR_SIZE, on_error_cb);
 
-  // If there are any announce packets seen, then there uis a navilink present
-  navilink_present = true;
-  state.announce.navilink_present = true;
+  size_t plen = HDR_SIZE + recv_buffer.hdr.len + 1;
+  if (last_announced_raw_len == plen && plen <= sizeof(last_announced_raw) &&
+      last_announce_callback_ms != 0 &&
+      (unsigned long)(millis() - last_announce_callback_ms) <= ANNOUNCE_CALLBACK_DEDUPE_MS &&
+      memcmp(last_announced_raw, recv_buffer.raw_data, plen) == 0) {
+    return;
+  }
 
-  water_packets_since_announce = 0;
+  if (!from_local_send) {
+    // If there are any announce packets seen, then there is a navilink present
+    navilink_present = true;
+    state.announce.navilink_present = true;
+    water_packets_since_announce = 0;
+  }
+
+  if (plen <= sizeof(last_announced_raw)) {
+    memcpy(last_announced_raw, recv_buffer.raw_data, plen);
+    last_announced_raw_len = (uint8_t)plen;
+    last_announce_callback_ms = millis();
+  }
 
   if (on_announce_packet_cb) on_announce_packet_cb(&(state));
 }
 
-void Navien::parse_command() {
+void Navien::parse_command(bool from_local_send) {
+  (void)from_local_send;
   if (recv_buffer.cmd.cmd_type != CMD_TYPE_CMD) {
     Serial.println("Unknown command packet");
     return;
@@ -180,16 +200,18 @@ void Navien::parse_command() {
     state.command.recirculation_on = false;
   }
 
+  state.command.cmd_data = recv_buffer.cmd.cmd_data;
+
   if (on_command_packet_cb) on_command_packet_cb(&(state));
 }
 
-void Navien::parse_control_packet() {
+void Navien::parse_control_packet(bool from_local_send) {
   switch (recv_buffer.cmd.cmd_type) {
     case Navien::CONTROL_ANNOUNCE:
-      parse_announce();
+      parse_announce(from_local_send);
       break;
     case Navien::CONTROL_COMMAND:
-      parse_command();
+      parse_command(from_local_send);
       break;
     default:
       if (on_error_cb)
@@ -215,6 +237,7 @@ void Navien::parse_packet() {
         sprintf(errBuffer, "Status Packet checksum error: 0x%02X (calc) != 0x%02X (recv)", crc_c, crc_r);
         if (on_error_cb)
           on_error_cb(__func__, errBuffer);
+        Navien::print_buffer(recv_buffer.raw_data, recv_buffer.hdr.len + HDR_SIZE, on_error_cb);
         break;
       }
       parse_status_packet();
@@ -227,7 +250,23 @@ void Navien::parse_packet() {
           on_error_cb(__func__, errBuffer);
         break;
       }
-      parse_control_packet();
+      size_t recv_len = HDR_SIZE + recv_buffer.hdr.len + 1;
+      // Fixed periodic announce: match raw bytes only (avoid struct/overlay quirks on cmd_type).
+      if (last_periodic_announce_time != 0 && recv_len == sizeof(ANNOUNCE_PACKET) &&
+          memcmp(recv_buffer.raw_data, ANNOUNCE_PACKET, recv_len) == 0 &&
+          (unsigned long)(millis() - last_periodic_announce_time) <= OWN_ANNOUNCE_ECHO_SUPPRESS_MS) {
+        break;
+      }
+      // Suppress processing of our own command/announce packet echoed back from RS485.
+      if (last_sent_control_packet_len > 0) {
+        unsigned long elapsed = millis() - last_sent_control_packet_time;
+        if (elapsed <= LOCAL_ECHO_FILTER_WINDOW_MS &&
+            recv_len == last_sent_control_packet_len &&
+            memcmp(recv_buffer.raw_data, last_sent_control_packet.raw_data, recv_len) == 0) {
+          break;
+        }
+      }
+      parse_control_packet(false);
       break;
   }
 }
@@ -241,10 +280,13 @@ void Navien::loop() {
   // Check if we should send a command
   if (recv_state == INITIAL && can_send(availableBytes)) {
     send_cmd();
+    availableBytes = available();
   }
 
-  if (!availableBytes)
+  if (!availableBytes) {
+    maybe_send_periodic_announce();
     return;
+  }
 
   // Disable test_mode if we're getting real responses
   if (recv_state != INITIAL && test_mode) {
@@ -309,6 +351,8 @@ void Navien::loop() {
         parse_packet();
         availableBytes = available();
         recv_state = INITIAL;
+        // Track when we complete a packet for collision avoidance
+        last_packet_complete_time = millis();
         break;
       }
 
@@ -356,7 +400,7 @@ void Navien::print_buffer(const uint8_t *data, size_t length, ErrorCallbackFunct
   }
 }
 
-int Navien::queue_send_cmd(const PACKET_BUFFER& pkt) {
+int Navien::enqueue_send_cmd(const PACKET_BUFFER& pkt) {
   if (send_queue_count >= QUEUE_CAPACITY)
     return -1;
   send_array[send_queue_tail] = pkt;
@@ -365,20 +409,65 @@ int Navien::queue_send_cmd(const PACKET_BUFFER& pkt) {
   return 1;
 }
 
+int Navien::queue_send_cmd(const PACKET_BUFFER& pkt) {
+  if (!test_mode && !navilink_present && last_periodic_announce_time == 0 &&
+      pkt.cmd.cmd_type == CONTROL_COMMAND) {
+    return -1;
+  }
+  return enqueue_send_cmd(pkt);
+}
+
 bool Navien::can_send(int curr_available) {
   static unsigned long last_received = 0;
 
+  // If there's data available, we're receiving something - don't send
   if (curr_available > 0) {
     last_received = millis();
     return false;
   }
 
-  if (millis() - last_received > 30) { // e.g. 30ms of silence
-    return true;
+  // Don't send if we're in the middle of parsing a packet
+  // (wait until we're back to INITIAL state)
+  if (recv_state != INITIAL) {
+    return false;
   }
 
-  return false;
-} 
+  // Wait for sufficient silence after last byte received
+  // This ensures we're not in the middle of a packet transmission
+  // At 19200 baud, even the longest packets (~55 bytes) take ~29ms to transmit
+  // 50ms provides a safe margin to ensure we're between packets
+  unsigned long silence_duration = millis() - last_received;
+  if (silence_duration < BUS_SILENCE_MS) {
+    return false;
+  }
+
+  // Also check time since last complete packet was parsed
+  // This gives us an additional safety margin to avoid collisions
+  if (last_packet_complete_time > 0) {
+    unsigned long time_since_packet = millis() - last_packet_complete_time;
+    if (time_since_packet < PACKET_GAP_MS) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+void Navien::maybe_send_periodic_announce() {
+  if (test_mode || navilink_present || periodic_announce_pending)
+    return;
+
+  unsigned long now = millis();
+  if (last_periodic_announce_time != 0 &&
+      (unsigned long)(now - last_periodic_announce_time) < PERIODIC_ANNOUNCE_INTERVAL_MS)
+    return;
+
+  PACKET_BUFFER buf{};
+  memcpy(buf.raw_data, ANNOUNCE_PACKET, sizeof(ANNOUNCE_PACKET));
+  if (enqueue_send_cmd(buf) < 0)
+    return;
+  periodic_announce_pending = true;
+}
 
 int Navien::send_cmd() {
 
@@ -391,17 +480,54 @@ int Navien::send_cmd() {
   // +1 to include the crc value
   int len = HDR_SIZE + send_buffer.hdr.len + 1;
 
+  // Defer control commands until we've successfully transmitted an announce (bus takeover order).
+  if (!test_mode && !navilink_present && last_periodic_announce_time == 0 &&
+      send_buffer.cmd.cmd_type == CONTROL_COMMAND) {
+    enqueue_send_cmd(send_buffer);
+    return -1;
+  }
+
+  // Rate limiting: enforce minimum 2 second interval between any commands
+  // This is needed for commands like recirculation and hotButton that send
+  // two commands in sequence (command + follow-up)
+  if (last_command_sent_time > 0) {
+    unsigned long time_since_last = millis() - last_command_sent_time;
+    if (time_since_last < MIN_COMMAND_INTERVAL_MS) {
+      // Not enough time has passed, re-queue the command
+      enqueue_send_cmd(send_buffer);
+      return -1;
+    }
+  }
+
   int sent_len = -1;
+  // Allow sending only when NaviLink is not present.
   if (!navilink_present) {
-    sent_len = write(send_buffer.raw_data, len);
-    // if the command was actually sent, then echo it to the client
-    if (sent_len == len) {
-      recv_buffer = send_buffer;
-      parse_command();
+    // Double-check the bus is still clear right before sending
+    // This is a final safety check to avoid collisions
+    if (can_send(available())) {
+      sent_len = write(send_buffer.raw_data, len);
+      if (sent_len == len) {
+        last_command_sent_time = millis();
+        last_sent_control_packet = send_buffer;
+        last_sent_control_packet_len = len;
+        last_sent_control_packet_time = millis();
+        recv_buffer = send_buffer;
+        if (send_buffer.cmd.cmd_type == CONTROL_ANNOUNCE) {
+          periodic_announce_pending = false;
+          last_periodic_announce_time = millis();
+        }
+        parse_control_packet(true);
+      }
+    } else if (on_error_cb) {
+      on_error_cb(__func__, "Bus not clear for transmission, command queued again");
+      enqueue_send_cmd(send_buffer);
+      return -1;
     }
   } else if (on_error_cb) {
     on_error_cb(__func__, "Failed to send the command (navilink present):");
     Navien::print_buffer(send_buffer.raw_data, len, on_error_cb);
+    if (send_buffer.cmd.cmd_type == CONTROL_ANNOUNCE)
+      periodic_announce_pending = false;
   }
 
   return sent_len;
@@ -448,12 +574,20 @@ int Navien::setTemp(float temp_degC) {
   return queue_send_cmd(send_buffer);
 }
 
+uint8_t Navien::generateCmdData() {
+  // Use time-of-day seconds to generate cmd_data
+  // Increments every 39 seconds, rolls over every ~2.75 hours
+  time_t now = time(nullptr);
+  return (uint8_t)(now / 39);
+}
 
 int Navien::hotButton() {
+  uint8_t cmdData = generateCmdData();
   PACKET_BUFFER send_buffer{};
   memcpy(&send_buffer, COMMAND_HEADER, sizeof(COMMAND_HEADER));
 
   send_buffer.cmd.hot_button_recirculation = Navien::HOT_BUTTON_DOWN;
+  send_buffer.cmd.cmd_data = cmdData;
 
   uint8_t crc = Navien::checksum(send_buffer.raw_data, HDR_SIZE + send_buffer.hdr.len, CHECKSUM_SEED_62);
   send_buffer.raw_data[HDR_SIZE + send_buffer.hdr.len] = crc;
@@ -464,6 +598,7 @@ int Navien::hotButton() {
   // queue up the button release command
   memcpy(&send_buffer, COMMAND_HEADER, sizeof(COMMAND_HEADER));
   send_buffer.cmd.hot_button_recirculation = 0x00;
+  send_buffer.cmd.cmd_data = cmdData;
   crc = Navien::checksum(send_buffer.raw_data, HDR_SIZE + send_buffer.hdr.len, CHECKSUM_SEED_62);
   send_buffer.raw_data[HDR_SIZE + send_buffer.hdr.len] = crc;
 
@@ -471,32 +606,40 @@ int Navien::hotButton() {
 }
 
 int Navien::recirculation(bool recirc_on) {
+  uint8_t cmdData = generateCmdData();
   PACKET_BUFFER send_buffer{};
   memcpy(&send_buffer, COMMAND_HEADER, sizeof(COMMAND_HEADER));
 
   send_buffer.cmd.hot_button_recirculation = recirc_on ? Navien::RECIRCULATION_ON : Navien::RECIRCULATION_OFF;
+  send_buffer.cmd.cmd_data = cmdData;
 
   uint8_t crc = Navien::checksum(send_buffer.raw_data, HDR_SIZE + send_buffer.hdr.len, CHECKSUM_SEED_62);
   send_buffer.raw_data[HDR_SIZE + send_buffer.hdr.len] = crc;
 
-  // Queue the command
+  // Queue the first command
   int sent_len = queue_send_cmd(send_buffer);
 
-  // queue up the button release command
-  memcpy(&send_buffer, COMMAND_HEADER, sizeof(COMMAND_HEADER));
-  send_buffer.cmd.hot_button_recirculation = 0x00;
-  crc = Navien::checksum(send_buffer.raw_data, HDR_SIZE + send_buffer.hdr.len, CHECKSUM_SEED_62);
-  send_buffer.raw_data[HDR_SIZE + send_buffer.hdr.len] = crc;
+  // queue up the follow-up command (needed for recirculation to work)
+  // This command clears the recirculation command flag
+  PACKET_BUFFER follow_up_buffer{};
+  memcpy(&follow_up_buffer, COMMAND_HEADER, sizeof(COMMAND_HEADER));
+  follow_up_buffer.cmd.hot_button_recirculation = 0x00;
+  follow_up_buffer.cmd.cmd_data = cmdData;
+
+  crc = Navien::checksum(follow_up_buffer.raw_data, HDR_SIZE + follow_up_buffer.hdr.len, CHECKSUM_SEED_62);
+  follow_up_buffer.raw_data[HDR_SIZE + follow_up_buffer.hdr.len] = crc;
 
   if (test_mode) {
     state.water[0].recirculation_active = recirc_on;
     state.water[0].recirculation_running = recirc_on;
     state.gas.current_gas_usage = recirc_on ? 200 : 0;
     state.water[0].operating_capacity = recirc_on ? 15 : 0;
-    sent_len = HDR_SIZE + send_buffer.hdr.len;
+    sent_len = HDR_SIZE + follow_up_buffer.hdr.len;
+    // In test mode, send immediately without delay
+    return queue_send_cmd(follow_up_buffer);
   }
 
-  return queue_send_cmd(send_buffer);
+  return queue_send_cmd(follow_up_buffer);
 }
 
 uint8_t Navien::checksum(const uint8_t *buffer, uint8_t len, uint16_t seed) {

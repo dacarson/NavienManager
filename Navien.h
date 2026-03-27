@@ -128,6 +128,8 @@ public:
   static const uint8_t PACKET_MARKER = 0xF7;
   // Default send command header
   static const uint8_t COMMAND_HEADER[];
+  // Periodic NaviLink announce (control → heater) when no NaviLink detected on bus
+  static const uint8_t ANNOUNCE_PACKET[];
 
 enum PacketDirection {
   PACKET_DIRECTION_CONTROL = 0x0F,
@@ -165,6 +167,13 @@ enum CommandActionHotButton {
 
   static const uint16_t CHECKSUM_SEED_4B = 0x4b;
   static const uint16_t CHECKSUM_SEED_62 = 0x62;
+
+  // RS485 collision avoidance timing constants
+  // At 19200 baud, 8N1 format: 10 bits/byte = 0.52ms per byte
+  // Typical packets: Water ~48 bytes (~25ms), Gas ~55 bytes (~29ms), Command ~20 bytes (~10ms)
+  // We wait for silence to ensure we're between packets, not mid-transmission
+  static constexpr unsigned long BUS_SILENCE_MS = 50;  // Wait 50ms after last byte received
+  static constexpr unsigned long PACKET_GAP_MS = 30;   // Wait 30ms after last complete packet
 
 
   typedef struct {
@@ -412,9 +421,10 @@ public:
 // Control functions
 // These are only available if there is no NaviLink control unit attached
 
-  // Control available
-  // Returns true if control is available
-  bool controlAvailable() { return !navilink_present; }
+  // Control available: no remote NaviLink, and (test mode or we've sent at least one announce on the bus)
+  bool controlAvailable() {
+    return !navilink_present && (test_mode || last_periodic_announce_time != 0);
+  }
 
   // Turn on or off the unit
   // Return number of bytes sent, -1 on failure
@@ -440,7 +450,14 @@ protected:
 
   // Can I send a command now - avoid collisions on RS485 line
   bool can_send(int curr_available);
+  void maybe_send_periodic_announce();
+  /** Enqueue without policy checks (periodic announce, TX retries). */
+  int enqueue_send_cmd(const PACKET_BUFFER& pkt);
+  /** User-facing queue: defers CONTROL_COMMAND until we've transmitted an announce. */
   int queue_send_cmd(const PACKET_BUFFER& pkt);
+
+  // Generate the cmd_data field for the command packet
+  uint8_t generateCmdData();
 
   // Write the send_buffer command
   // Returns number of bytes sent, or -1 for failure
@@ -478,9 +495,9 @@ protected:
   // calls parse_water/gas depending on the paket type
   void parse_packet();
 
-  // Called when we observe a control packet from another
-  // control device (not us).
-  void parse_control_packet();
+  // Called when we observe a control packet.
+  // from_local_send: true when we generated/transmitted this packet locally.
+  void parse_control_packet(bool from_local_send = false);
 
   // Called when we receive a status packet from Navien device
   void parse_status_packet();
@@ -494,12 +511,14 @@ protected:
   void parse_gas();
 
   // Called when the direction reporting device to Navien
-  // and the cmd_type field is CONTROL_ANNOUNCE
-  void parse_announce();
+  // and the cmd_type field is CONTROL_ANNOUNCE.
+  // from_local_send: true after we transmit an announce (do not treat as remote NaviLink).
+  void parse_announce(bool from_local_send = false);
 
   // Called when the direction reporting device to Navien
-  // and the cmd_type field is CONTROL_COMMAND
-  void parse_command();
+  // and the cmd_type field is CONTROL_COMMAND.
+  // from_local_send: true after we transmit a command.
+  void parse_command(bool from_local_send = false);
 
 protected:
   // Keeps track of the state machine and iterates through
@@ -526,6 +545,32 @@ protected:
   // If we see 10 water packets and no announce packet
   // reset navilink to not being present
   int water_packets_since_announce;
+
+  // Track timing for collision avoidance
+  unsigned long last_packet_complete_time = 0;
+
+  // Track recently transmitted control packet to suppress local RS485 echo.
+  PACKET_BUFFER last_sent_control_packet{};
+  size_t last_sent_control_packet_len = 0;
+  unsigned long last_sent_control_packet_time = 0;
+  /** Match last TX bytes; window must cover slow loop() + RS485 turnaround. */
+  static constexpr unsigned long LOCAL_ECHO_FILTER_WINDOW_MS = 900;
+  /** Our periodic announce is fixed; suppress late echo even if we TX'd another cmd since. */
+  static constexpr unsigned long OWN_ANNOUNCE_ECHO_SUPPRESS_MS = 5000;
+  /** Same raw announce can reach parse_announce twice (local TX path + RS485 echo). */
+  static constexpr unsigned long ANNOUNCE_CALLBACK_DEDUPE_MS = 500;
+  uint8_t last_announced_raw[16]{};
+  uint8_t last_announced_raw_len = 0;
+  unsigned long last_announce_callback_ms = 0;
+
+  // Rate limiting for commands - minimum 2 seconds between any commands
+  unsigned long last_command_sent_time = 0;
+  static constexpr unsigned long MIN_COMMAND_INTERVAL_MS = 2000;
+
+  unsigned long last_periodic_announce_time = 0;
+  static constexpr unsigned long PERIODIC_ANNOUNCE_INTERVAL_MS = 5000;
+  /** True while a periodic announce is queued or being retried by send_cmd(). */
+  bool periodic_announce_pending = false;
 
   // Assume running in test mode *until* we see a packet
   bool test_mode;

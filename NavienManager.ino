@@ -29,6 +29,7 @@ SOFTWARE.
 #include "Navien.h"
 
 bool wifiConnected = false;
+bool timeInit = false;
 
 Navien navienSerial(2);
 #define RXD2 16
@@ -80,6 +81,15 @@ void setup() {
 void loop() {
   if (wifiConnected) {
   telnet.loop();
+  }
+
+  // Check for system clock setup, which the SchedulerBase class does
+  if (!timeInit && getenv("TZ")){
+    struct tm localTime;
+    if (getLocalTime(&localTime)) { // getLocalTime() returns non-zero if initialized
+      timeInit = true;
+      homeSpan.assumeTimeAcquired();
+    }
   }
 
   navienSerial.loop();
