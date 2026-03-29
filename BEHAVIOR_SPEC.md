@@ -176,6 +176,11 @@ The Eve app's thermostat schedule is parsed and stored in NVS (`SAVED_DATA` / `P
 
 **Schedule format:** Up to 4 time slots per day, Monday–Sunday (Eve convention), converted internally to Sunday–Saturday (C `tm_wday` convention). Each slot is encoded as 10-minute-resolution offsets (value / 6 = hour, value % 6 × 10 = minute).
 
+**Empty/unused slot sentinel:** `0xFF` is the sentinel value for an unused slot in both the Eve wire format and the internal representation:
+- In the Eve `CMD_DAY_SCHEDULE` struct, `slot[i].offset_start == 0xFF` marks slot `i` (and all following slots) as unused. The conversion loop in `updateSchedulerWeekSchedule()` stops at the first `0xFF` offset.
+- In `SchedulerBase`'s `DaySchedule` struct, `slots[i].startHour == 0xFF` marks slot `i` as unused. All iteration loops (`getNextState`, `getTimeSlot`, `isTimeWithinSlot` callers) stop at the first `0xFF` startHour.
+- The full `weekSchedule[7]` array is initialized to `0xFF` via `memset` at the start of `updateSchedulerWeekSchedule()` so that any slots not populated from Eve data are correctly marked unused rather than left with garbage values.
+
 **Timezone handling:** The Eve app sends the current local time in program data. The scheduler computes the UTC offset by comparing the Eve-supplied local time against the system clock (before any TZ is set) and stores a `UTC±N` string in NVS (`SCHEDULER` / `TZ`). Once set, the TZ is used for all `localtime()` calculations. The timezone can be overridden or cleared via the Telnet `timezone` command.
 
 **Control handoff:**

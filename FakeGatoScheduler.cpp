@@ -237,7 +237,11 @@ void FakeGatoScheduler::guessTimeZone(PROG_CMD_CURRENT_TIME *eveLocalTime) {
 void FakeGatoScheduler::updateSchedulerWeekSchedule() {
     // Note Eve schedules are Monday - Sunday
     // SchedulerBase are Sunday - Saturday
-  
+
+    // Clear all slots to 0xFF (unused) before filling valid ones, so
+    // uninitialized or stale data from previous loads cannot bleed through.
+  memset(weekSchedule, 0xFF, sizeof(weekSchedule));
+
   for (int day = 0; day < 7; day++) { // Monday - Sunday
     CMD_DAY_SCHEDULE *daySchedule = &(prog_send_data.weekSchedule.day[day]);
     for (int i = 0; i < 4 && daySchedule->slot[i].offset_start != 0xFF; i++) {
@@ -475,10 +479,14 @@ void FakeGatoScheduler::updateCurrentScheduleIfNeeded(bool force) {
 
 int FakeGatoScheduler::begin() {
   if (SchedulerBase::begin()) {
+    // Re-apply Eve schedule data on top of whatever SchedulerBase::begin()
+    // loaded (NVS "SCHEDULER" stale data or initDefault). Eve data in
+    // prog_send_data is the authoritative source for FakeGatoScheduler.
+    updateSchedulerWeekSchedule();
     updateCurrentScheduleIfNeeded(true);
     return true;
   }
-  
+
   return false;
 }
 

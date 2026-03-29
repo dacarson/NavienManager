@@ -341,7 +341,7 @@ int SchedulerBase::begin() {
   }
   
   status = nvs_get_u32(nvsStorageHandle, "endVacation", &storedTime);
-  startVacationTime = (time_t)storedTime;
+  endVacationTime = (time_t)storedTime;
   if (status) {
     Serial.println("Failed to load vacation end time, defaulting to unset.");
     endVacationTime = 0;
