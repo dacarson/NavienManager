@@ -346,7 +346,7 @@ boolean FakeGatoHistoryService::update() {
       
       Serial.printf(F("History Service Request %d\n"), address);
       sendHistory(address);
-      delete data;
+      delete[] data;
     }
     
     if (setTime.updated()) {
@@ -355,7 +355,7 @@ boolean FakeGatoHistoryService::update() {
       setTime.getNewData(data, len);
       Serial.print(F("History Service Set Time (LocalTime) "));
       uint32_t eveTimestamp = *(uint32_t*)data;
-      delete data;
+      delete[] data;
       
       time_t currentTime = eveTimestamp + EPOCH_OFFSET;  // Convert to Unix timestamp (since 1970)
       
