@@ -37,10 +37,10 @@ extern String trace;
 AsyncUDP udp;
 
 // Previous packets recieved, use to check for duplicate broadcasts
-String previousWater;
-String previousGas;
-String previousCommand;
-String previousAnnounce;
+char previousWater[385];
+char previousGas[385];
+char previousCommand[385];
+char previousAnnounce[385];
 unsigned long previousMillis = 0;
 
 #define JSON_ASSIGN_WATER(field) doc[#field] = water->field;
@@ -61,10 +61,10 @@ unsigned long previousMillis = 0;
 void resetPreviousValues() {
   unsigned long currentMillis = millis();
   if (currentMillis - previousMillis >= broadcastDuplicatePacketThrottle) {
-    previousWater = "";
-    previousGas = "";
-    previousCommand = "";
-    previousAnnounce = "";
+    previousWater[0] = '\0';
+    previousGas[0] = '\0';
+    previousCommand[0] = '\0';
+    previousAnnounce[0] = '\0';
     previousMillis = currentMillis;  // Reset the last time to the current time
   }
 }
@@ -121,14 +121,14 @@ void onWaterPacket(Navien::NAVIEN_STATE_WATER *water) {
 
   const Navien::PACKET_BUFFER *recv_buffer = navienSerial.rawPacketData();
   String rawhexstring = buffer_to_hex_string(recv_buffer->raw_data, Navien::HDR_SIZE + recv_buffer->hdr.len + 1);
-  if (rawhexstring != previousWater) {
+  if (strcmp(rawhexstring.c_str(), previousWater) != 0) {
     String json = waterToJSON(water, rawhexstring);
     udp.broadcastTo(json.c_str(), 2025);
 
     if (trace == "water" || trace == "all")
       telnet.println(json);
   }
-  previousWater = rawhexstring;
+  strncpy(previousWater, rawhexstring.c_str(), sizeof(previousWater) - 1);
 }
 
 /* Handle Gas packets */
@@ -165,14 +165,14 @@ void onGasPacket(Navien::NAVIEN_STATE_GAS *gas) {
 
   const Navien::PACKET_BUFFER *recv_buffer = navienSerial.rawPacketData();
   String rawhexstring = buffer_to_hex_string(recv_buffer->raw_data, Navien::HDR_SIZE + recv_buffer->hdr.len + 1);
-  if (rawhexstring != previousGas) {
+  if (strcmp(rawhexstring.c_str(), previousGas) != 0) {
     String json = gasToJSON(gas, rawhexstring);
     udp.broadcastTo(json.c_str(), 2025);
 
     if (trace == "gas" || trace == "all")
       telnet.println(json);
   }
-  previousGas = rawhexstring;
+  strncpy(previousGas, rawhexstring.c_str(), sizeof(previousGas) - 1);
 }
 
 /* Handle Command packets */
@@ -201,14 +201,14 @@ void onCommandPacket(Navien::NAVIEN_STATE *state) {
 
   const Navien::PACKET_BUFFER *recv_buffer = navienSerial.rawPacketData();
   String rawhexstring = buffer_to_hex_string(recv_buffer->raw_data, Navien::HDR_SIZE + recv_buffer->hdr.len + 1);
-  if (rawhexstring != previousCommand) {
+  if (strcmp(rawhexstring.c_str(), previousCommand) != 0) {
     String json = commandToJSON(state, rawhexstring);
     udp.broadcastTo(json.c_str(), 2025);
 
     if (trace == "command" || trace == "all")
       telnet.println(json);
   }
-  previousCommand = rawhexstring;
+  strncpy(previousCommand, rawhexstring.c_str(), sizeof(previousCommand) - 1);
 }
 
 /* Handle Announce packets */
@@ -229,14 +229,14 @@ void onAnnouncePacket(Navien::NAVIEN_STATE *state) {
 
   const Navien::PACKET_BUFFER *recv_buffer = navienSerial.rawPacketData();
   String rawhexstring = buffer_to_hex_string(recv_buffer->raw_data, Navien::HDR_SIZE + recv_buffer->hdr.len + 1);
-  if (rawhexstring != previousAnnounce) {
+  if (strcmp(rawhexstring.c_str(), previousAnnounce) != 0) {
     String json = announceToJSON(state, rawhexstring);
     udp.broadcastTo(json.c_str(), 2025);
 
     if (trace == "announce" || trace == "all")
       telnet.println(json);
   }
-  previousAnnounce = rawhexstring;
+  strncpy(previousAnnounce, rawhexstring.c_str(), sizeof(previousAnnounce) - 1);
 }
 
 /* Report any errors that occurred */

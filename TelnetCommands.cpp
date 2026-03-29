@@ -291,29 +291,6 @@ void commandEraseEve(const String& params) {
     telnet.println("Reboot to pick up changes");
 }
 
-void eraseStoredTimezone() {
-  nvs_handle_t nvsStorageHandle;  
-    esp_err_t status = nvs_open("SCHEDULER", NVS_READWRITE, &nvsStorageHandle);
-    if (status != ESP_OK) {
-        telnet.printf("❌ Failed to open NVS: %s\n", esp_err_to_name(status));
-        return;
-    }
-
-    status = nvs_erase_key(nvsStorageHandle, "TZ");  // ✅ Erase the stored time zone
-    if (status == ESP_OK) {
-        telnet.println("✅ Time zone erased from NVS.");
-    } else if (status == ESP_ERR_NVS_NOT_FOUND) {
-        telnet.println("⚠️ No stored time zone found.");
-    } else {
-        telnet.printf("❌ Failed to erase key: %s\n", esp_err_to_name(status));
-    }
-
-    nvs_commit(nvsStorageHandle);  // ✅ Commit changes
-    nvs_close(nvsStorageHandle);   // ✅ Close handle
-
-    unsetenv("TZ");  // ✅ Unset TZ from system
-    tzset();
-}
 
 void commandTimezone(const String& params) {
     nvs_handle_t nvsStorageHandle;  

@@ -163,7 +163,7 @@ void navienStatus(String &html) {
     html += "<h2>System Log</h2>"
     "<style>.tab2{margin: 0 auto;width:80%;border-collapse:collapse;background:#2a2a3a;color:white;}</style>";
 
-String footerScript = 
+static const char footerScript[] =
     "<script>"
       "document.addEventListener('DOMContentLoaded',()=>{"
         "const toggle = document.getElementById('unitToggle');"
@@ -209,7 +209,7 @@ String footerScript =
 void setupHomeSpanWeb() {
   homeSpan.enableWebLog(50);
   homeSpan.setWebLogCallback(navienStatus);
-  String cssStyle = 
+  static const char cssStyle[] =
   "body{font-family:Arial,sans-serif;background:#1e1e2f;color:#fff;margin:0;padding:20px;text-align:center}"
   "th{font-size:18px;font-weight:bold;text-align:left;}tr{font-size:16px;}"
   ".tab1 {display:none} .bod1 h2:first-of-type::after {content:\" Status\"}" // Hide the built-in table (tab1) and add "Status" to the first h2 heading
@@ -234,5 +234,5 @@ void setupHomeSpanWeb() {
   ".imperial {display: none;}"
   "body.imperial-mode .metric {display: none;}"
   "body.imperial-mode .imperial {display: inline;}";
-  homeSpan.setWebLogCSS(cssStyle.c_str());
+  homeSpan.setWebLogCSS(cssStyle);
 }
