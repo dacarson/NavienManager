@@ -63,9 +63,15 @@ FakeGatoScheduler::FakeGatoScheduler()
     nvs_get_blob(savedData,"PROG_SEND_DATA",&prog_send_data,&len);       // retrieve data
     
     WEBLOG("SCHEDULER Loaded Program State");
-      // Setup the scheduler state.
-    if (prog_send_data.schedule_state.schedule_on)
-      scheduleActive = true;
+      // Restore scheduleActive from its own key.
+      // prog_send_data.schedule_state.schedule_on is always stored as 0 (fake state
+      // reported to Eve), so it cannot be used to restore the real user intent.
+    uint8_t savedScheduleActive = 0;
+    if (nvs_get_u8(savedData, "SCHED_ACTIVE", &savedScheduleActive) == ESP_OK) {
+      scheduleActive = (savedScheduleActive != 0);
+    } else if (prog_send_data.schedule_state.schedule_on) {
+      scheduleActive = true;  // backwards-compat fallback for old firmware
+    }
     setVacationState(false);
     if (prog_send_data.vacation.enabled)
       setVacationState(true);
@@ -85,6 +91,15 @@ FakeGatoScheduler::FakeGatoScheduler()
   
   updateSchedulerWeekSchedule();
   refreshProgramData = true;
+}
+
+void FakeGatoScheduler::setEnabled(bool enable) {
+  scheduleActive = enable;
+  nvs_set_u8(savedData, "SCHED_ACTIVE", enable ? 1 : 0);
+  nvs_set_blob(savedData, "PROG_SEND_DATA", &prog_send_data, sizeof(prog_send_data));
+  nvs_commit(savedData);
+  refreshProgramData = true;
+  if (enable && isInitialized) initializeCurrentState();
 }
 
 String FakeGatoScheduler::getSchedulerState(int state) {
@@ -282,10 +297,12 @@ void FakeGatoScheduler::parseProgramData(uint8_t *data, int len) {
         if (schedule_state->schedule_on) {
           scheduleActive = true;
           Serial.println("Schedule: On");
+          if (isInitialized) initializeCurrentState();
         } else {
           scheduleActive = false;
           Serial.println("Schedule: Off");
         }
+        nvs_set_u8(savedData, "SCHED_ACTIVE", scheduleActive ? 1 : 0);
         // Now set the fake state, because the Eve app attempts to turn on the heat if the 
         // current temperature is less that the target and the schedule is on. So...
         // If the scheduler is either off or not active then report that the schedule is turned off

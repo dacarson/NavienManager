@@ -344,6 +344,55 @@ String getFormattedTimeForValue(time_t value) {
     return String(timeString);
 }
 
+void commandScheduler(const String& params) {
+  static const char *dayNames[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+
+  if (params.equalsIgnoreCase("on")) {
+    scheduler->setEnabled(true);
+    telnet.println(F("Scheduler enabled."));
+    return;
+  } else if (params.equalsIgnoreCase("off")) {
+    scheduler->setEnabled(false);
+    telnet.println(F("Scheduler disabled."));
+    return;
+  } else if (!params.isEmpty()) {
+    telnet.printf("Unknown scheduler parameter: %s\n", params.c_str());
+    return;
+  }
+
+  telnet.printf("Schedule enabled: %s\n", scheduler->enabled() ? "Yes" : "No");
+  telnet.printf("Current state:    %s\n", FakeGatoScheduler::getSchedulerState(scheduler->getCurrentState()).c_str());
+
+  if (scheduler->isOverrideActive()) {
+    telnet.printf("Override expires: %s\n", getFormattedTimeForValue(scheduler->getOverrideEndTime()).c_str());
+  }
+
+  time_t nextTime;
+  SchedulerBase::State nextState = scheduler->getNextState(&nextTime);
+  if (nextTime > 0) {
+    telnet.printf("Next transition:  %s -> %s\n",
+      getFormattedTimeForValue(nextTime).c_str(),
+      FakeGatoScheduler::getSchedulerState(nextState).c_str());
+  } else {
+    telnet.println("Next transition:  None scheduled");
+  }
+
+  telnet.println("Weekly schedule:");
+  for (int day = 0; day < 7; day++) {
+    telnet.printf("  %s:", dayNames[day]);
+    bool hasSlots = false;
+    for (int slot = 0; slot < 4; slot++) {
+      uint8_t sh, sm, eh, em;
+      if (scheduler->getTimeSlot(day, slot, sh, sm, eh, em)) {
+        telnet.printf(" %02d:%02d-%02d:%02d", sh, sm, eh, em);
+        hasSlots = true;
+      }
+    }
+    if (!hasSlots) telnet.print(" (none)");
+    telnet.println();
+  }
+}
+
 void commandHistory(const String& params) {
   if (!historyService) {
     telnet.println(F("Error: History service not available"));
@@ -438,6 +487,7 @@ void setupTelnetCommands() {
   registerCommand(F("recirc"), F("Set or get recirculation state (on/off)"), commandRecirc);
   registerCommand(F("hotButton"), F("Send hot button command"), commandHotButton);
 
+  registerCommand(F("scheduler"), F("Show scheduler status or enable/disable it (on/off)"), commandScheduler);
   registerCommand(F("timezone"), F("Set or get current timezone"), commandTimezone);
   registerCommand(F("time"), F("Print local and gmt time"), commandTime);
   registerCommand(F("erasePgm"), F("Erase all Program State"), commandEraseEve);

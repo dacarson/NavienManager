@@ -237,6 +237,19 @@ SchedulerBase::State SchedulerBase::getNextState(time_t *nextStateTime) const {
   return State::InActive;
 }
 
+bool SchedulerBase::getTimeSlot(int day, int slotIndex, uint8_t &startHour, uint8_t &startMinute, uint8_t &endHour, uint8_t &endMinute) const {
+  if (day < 0 || day > 6 || slotIndex < 0 || slotIndex >= 4)
+    return false;
+  const TimeSlot &slot = weekSchedule[day].slots[slotIndex];
+  if (slot.startHour == 0xFF)
+    return false;
+  startHour = slot.startHour;
+  startMinute = slot.startMinute;
+  endHour = slot.endHour;
+  endMinute = slot.endMinute;
+  return true;
+}
+
 bool SchedulerBase::isTimeWithinSlot(int currentHour, int currentMinute, TimeSlot slot) const {
     // Convert times to minutes since midnight for comparison
   int currentTimeInMinutes = currentHour * 60 + currentMinute;
@@ -437,8 +450,8 @@ void SchedulerBase::loop() {
   if (overrideActive && now >= overrideEndTime) {
     overrideActive = false;
     Serial.println("Override expired. Reverting to normal scheduling.");
-    // Recalculate next state change since override expired
-    getNextState(&nextStateChangeTime);
+    initializeCurrentState();
+    return;
   }
   
   // If override is active, force the state and return
@@ -453,13 +466,7 @@ void SchedulerBase::loop() {
   
   // Check if it's time for a state change
   if (nextStateChangeTime > 0 && now >= nextStateChangeTime) {
-    // Get the next state and its time
-    newState = getNextState(&nextStateChangeTime);
-    
-    if (newState != currentState) {
-      stateChange(newState);
-      currentState = newState;
-    }
+    initializeCurrentState();
   }
   
   // If we don't have a next state change time, calculate it

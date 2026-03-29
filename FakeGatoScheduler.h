@@ -37,6 +37,7 @@ public:
   virtual void loop();
 
   bool enabled() { return scheduleActive; }
+  void setEnabled(bool enable);
 
   static String getSchedulerState(int state); // Return the state as a string
 

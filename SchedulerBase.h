@@ -58,6 +58,10 @@ class SchedulerBase {
     State getNextState(time_t *nextStateTime = 0) const;
 
     void activateOverride(int durationMinutes = 5);
+    bool isOverrideActive() const { return overrideActive; }
+    time_t getOverrideEndTime() const { return overrideEndTime; }
+    time_t getNextStateChangeTime() const { return nextStateChangeTime; }
+    bool getTimeSlot(int day, int slotIndex, uint8_t &startHour, uint8_t &startMinute, uint8_t &endHour, uint8_t &endMinute) const;
 
 protected:
     // Structure to store schedule for a day
