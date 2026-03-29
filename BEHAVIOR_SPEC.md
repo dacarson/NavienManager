@@ -89,6 +89,8 @@ A minimum 2-second interval is enforced between any two consecutive commands (`M
 
 ### RS485 Echo Suppression
 
+The RS485 transceiver used is the **THVD1406** (Texas Instruments), which features automatic direction control — no explicit DE/RE pin toggling is required. However, per the THVD1406 datasheet, due to the auto-direction control timing (`tdevice-auto-dir`), the receiver is briefly re-enabled after a transmission and will echo the TX data back onto RX. This is the hardware root cause of the self-echo problem.
+
 Because RS485 is half-duplex, the ESP32 sees its own transmissions. Two suppression mechanisms prevent self-echo from being processed:
 - **General command echo**: packets matching the last sent control packet within a 900 ms window are silently discarded.
 - **Announce echo**: the fixed 10-byte announce packet is suppressed for 5 seconds after transmission.
