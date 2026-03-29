@@ -337,6 +337,9 @@ void commandScheduler(const String& params) {
     return;
   }
 
+  time_t now = time(nullptr);
+  struct tm *localTime = localtime(&now);
+  telnet.printf("Current time:     %s", asctime(localTime));
   telnet.printf("Schedule enabled: %s\n", scheduler->enabled() ? "Yes" : "No");
   telnet.printf("Current state:    %s\n", FakeGatoScheduler::getSchedulerState(scheduler->getCurrentState()).c_str());
 

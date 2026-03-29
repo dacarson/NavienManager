@@ -64,8 +64,8 @@ FakeGatoScheduler::FakeGatoScheduler()
     
     WEBLOG("SCHEDULER Loaded Program State");
       // Restore scheduleActive from its own key.
-      // prog_send_data.schedule_state.schedule_on is always stored as 0 (fake state
-      // reported to Eve), so it cannot be used to restore the real user intent.
+      // SCHED_ACTIVE is the authoritative persisted source; fall back to
+      // prog_send_data.schedule_state.schedule_on for backwards compatibility.
     uint8_t savedScheduleActive = 0;
     if (nvs_get_u8(savedData, "SCHED_ACTIVE", &savedScheduleActive) == ESP_OK) {
       scheduleActive = (savedScheduleActive != 0);
@@ -297,26 +297,26 @@ void FakeGatoScheduler::parseProgramData(uint8_t *data, int len) {
       case SCHEDULE_STATE:
       {
         PROG_CMD_SCHEDULE_STATE *schedule_state = (PROG_CMD_SCHEDULE_STATE *)(&data[byte_offset]);
-        // Update the current state to what the user wants
+        // Update the current state to what the user wants.
+        // We report schedule_on=1 only during Active/Override, and 0 during Inactive.
+        // Eve writes back whatever it last read, so a schedule_on=0 arriving while we are
+        // Inactive is just Eve echoing our own 0 — not a genuine user disable request.
+        // A genuine disable can only arrive when Eve was showing 1, i.e. Active/Override.
         if (schedule_state->schedule_on) {
           scheduleActive = true;
           Serial.println("Schedule: On");
+          nvs_set_u8(savedData, "SCHED_ACTIVE", 1);
           if (isInitialized) initializeCurrentState();
-        } else {
+        } else if (currentState == SchedulerBase::Active || currentState == SchedulerBase::Override) {
           scheduleActive = false;
           Serial.println("Schedule: Off");
+          nvs_set_u8(savedData, "SCHED_ACTIVE", 0);
+        } else {
+          Serial.println("Schedule: Off ignored (Inactive write-back from Eve)");
         }
-        nvs_set_u8(savedData, "SCHED_ACTIVE", scheduleActive ? 1 : 0);
-        // Now set the fake state, because the Eve app attempts to turn on the heat if the 
-        // current temperature is less that the target and the schedule is on. So...
-        // If the scheduler is either off or not active then report that the schedule is turned off
-        if (!scheduleActive || (currentState != SchedulerBase::Active && currentState != SchedulerBase::Override)) {
-          schedule_state->schedule_on = 0;
-        }
-        // If the user turned it on, but our current state is inactive, then show it as off
-        if (scheduleActive && (currentState == SchedulerBase::Active || currentState == SchedulerBase::Override)) {
-          schedule_state->schedule_on = 0;
-        }
+        // Report 1 only when a slot is currently active, so Eve doesn't try to change
+        // the set point during Inactive periods between slots.
+        schedule_state->schedule_on = (scheduleActive && (currentState == SchedulerBase::Active || currentState == SchedulerBase::Override)) ? 1 : 0;
         memcpy(&prog_send_data.schedule_state, schedule_state, sizeof(PROG_CMD_SCHEDULE_STATE));
         byte_offset += sizeof(PROG_CMD_SCHEDULE_STATE);
         storeData = true;
