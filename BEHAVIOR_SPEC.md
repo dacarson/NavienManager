@@ -186,6 +186,45 @@ The Eve app's thermostat schedule is parsed and stored in NVS (`SAVED_DATA` / `P
 
 **Temperature intercept:** The Eve app's temperature schedule only supports up to 30°C. The firmware silently replaces the comfort and default temperature values with the heater's actual set-point before storing them, preserving the user's set-point while satisfying the protocol.
 
+### Hot Water Switch (Override Trigger)
+
+A second HomeKit accessory named **"Hot Water"** is exposed as a `Service::Switch`. Its sole purpose is to allow Siri voice commands ("Hey Siri, turn on hot water") to trigger the recirculation override.
+
+#### Accessory Structure
+
+```
+SpanAccessory("Hot Water")
+├── Service::AccessoryInformation
+│   └── Characteristic::Name("Hot Water")
+└── Service::Switch (DEV_HotWaterSwitch)
+    └── Characteristic::On (Read/Write boolean)
+```
+
+#### Switch On Behavior
+
+When the switch is set **On**, the same guard logic as `TargetHeatingCoolingState = HEAT` is applied:
+
+- If the scheduler is **disabled**, or the scheduler is enabled but **not currently in Active state**: call `scheduler->activateOverride()` to start a 5-minute recirculation override.
+- If the scheduler is enabled and already in **Active state** (recirculation is already running via schedule): do nothing — the override is redundant.
+- If the scheduler is already in **Override state**: do nothing — a second simultaneous override is ignored.
+
+#### Switch Off Behavior
+
+Setting the switch **Off** has no effect. The switch cannot be used to stop recirculation. The switch turns off automatically when the override expires or the heater becomes idle (see State Reflection below).
+
+#### Switch State Reflection
+
+The switch `On` characteristic is kept in sync with the actual heater state in the `loop()` method:
+
+- Switch is **On** when recirculation is active (`recirculation_active`) **or** gas is currently burning (`current_gas_usage > 0`).
+- Switch is **Off** otherwise.
+
+This ensures the switch automatically turns off in HomeKit when an override expires or the scheduled slot ends — without requiring any user action.
+
+#### Relationship to Thermostat
+
+The Hot Water switch and the thermostat `TargetHeatingCoolingState` characteristic are independent HomeKit controls that both drive the same underlying override mechanism. They will reflect identical states: when one shows heating active, the other will also show its active state.
+
 ### OTA Updates
 
 OTA is enabled (HomeSpan `enableOTA(false, false)`) without requiring a password and without forcing a reboot.

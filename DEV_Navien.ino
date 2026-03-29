@@ -290,6 +290,44 @@ struct DEV_Navien : Service::Thermostat {
   }
 };
 
+struct DEV_HotWaterSwitch : Service::Switch {
+
+  Characteristic::On *switchOn;
+
+  DEV_HotWaterSwitch()
+    : Service::Switch() {
+    Serial.printf("\n*** Creating Hot Water Switch ***\n");
+    switchOn = new Characteristic::On(false);
+  }
+
+  boolean update() override {
+    if (switchOn->updated() && switchOn->getNewVal()) {
+      // Turning off is a no-op; sole purpose is to trigger override
+      if (!scheduler->enabled() || (scheduler->enabled() && !scheduler->isActive())) {
+        if (scheduler->getCurrentState() != SchedulerBase::Override) {
+          scheduler->activateOverride();
+          WEBLOG("Hot Water Switch: Requesting Heat NOW for 5 mins");
+        } else {
+          Serial.println("Hot Water Switch: Override already active, ignoring");
+        }
+      } else {
+        WEBLOG("Hot Water Switch: Already running via schedule, ignoring");
+      }
+    }
+    return true;
+  }
+
+  void loop() override {
+    bool navienActivelyMaintainingTemp =
+      navienSerial.currentState()->water[0].recirculation_active ||
+      navienSerial.currentState()->gas.current_gas_usage > 0;
+
+    if (switchOn->getVal<bool>() != navienActivelyMaintainingTemp) {
+      switchOn->setVal(navienActivelyMaintainingTemp);
+    }
+  }
+};
+
 // Fetch the fused MAC address as WiFi object may not be connected yet, and it's value will be zero
 // Use the mac address without colons as the device serial number.
 String getSerialNumber() {
@@ -319,4 +357,13 @@ void setupHomeSpanAccessories() {
   new Characteristic::SerialNumber(getSerialNumber().c_str());
 
   new DEV_Navien();
+
+  new SpanAccessory();
+  new Service::AccessoryInformation();
+  new Characteristic::Identify();
+  new Characteristic::Name("Hot Water");
+  new Characteristic::Manufacturer("Navien");
+  new Characteristic::Model("NPE-240A");
+  new Characteristic::SerialNumber((getSerialNumber() + "-SW").c_str());
+  new DEV_HotWaterSwitch();
 }
