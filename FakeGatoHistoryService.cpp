@@ -253,7 +253,7 @@ void FakeGatoHistoryService::eraseHistory() {
     if (currentEntry == 0)
         currentEntry = 1;
     
-    uint8_t historySendBuffer[960];  // Max HomeKit response size
+    uint8_t historySendBuffer[256];  // 11 entries max (10 data + 1 time ref) × 21 bytes = 231 bytes worst case
     int sendBufferLen = 0;
     
     //WEBLOG("Send History currentEntry %d store.lastEntry %d\n", currentEntry, store.lastEntry);
