@@ -185,7 +185,7 @@ The Eve app's thermostat schedule is parsed and stored in NVS (`SAVED_DATA` / `P
 
 **State transitions:** When a scheduled transition time arrives, `initializeCurrentState()` is called to evaluate the current time against the week schedule and determine the correct state. This uses `isTimeWithinSlot()` (which uses `>=` for the slot start boundary), ensuring that a transition firing at exactly the slot start time correctly enters `Active`. When an override expires, `initializeCurrentState()` is similarly called to revert to the correct scheduled state immediately rather than waiting for the next scheduled transition.
 
-**Schedule format:** Up to 4 time slots per day, Monday–Sunday (Eve convention), converted internally to Sunday–Saturday (C `tm_wday` convention). Each slot is encoded as 10-minute-resolution offsets (value / 6 = hour, value % 6 × 10 = minute).
+**Schedule format:** Up to **3 time slots per day** (Eve's hard limit), Monday–Sunday (Eve convention), converted internally to Sunday–Saturday (C `tm_wday` convention). Each slot is encoded as 10-minute-resolution offsets (value / 6 = hour, value % 6 × 10 = minute). Although the `CMD_DAY_SCHEDULE` wire struct technically has room for 4 slots, Eve silently truncates any 4th slot when it reads the schedule and writes back only 3 slots. Sending 4 real slots causes Eve's write-back to differ from the device schedule (slot 4 becomes `0xFF`), breaking the HTTP-lock auto-clear comparison and causing Eve to ignore EV notifications for the characteristic. All schedule sources (HTTP POST, wire struct, learner) must therefore cap at 3 slots per day.
 
 **Empty/unused slot sentinel:** `0xFF` is the sentinel value for an unused slot in both the Eve wire format and the internal representation:
 - In the Eve `CMD_DAY_SCHEDULE` struct, `slot[i].offset_start == 0xFF` marks slot `i` (and all following slots) as unused. The conversion loop in `updateSchedulerWeekSchedule()` stops at the first `0xFF` offset.
@@ -198,7 +198,7 @@ The Eve app's thermostat schedule is parsed and stored in NVS (`SAVED_DATA` / `P
 - When `controlAvailable()` becomes `true` (NaviLink disappears) and the scheduler state is known, `takeControl()` is called once. It sends the appropriate power and recirculation commands to match the current scheduler state.
 - When `controlAvailable()` becomes `false` (NaviLink reappears), the firmware stops controlling the unit and yields back to the NaviLink.
 
-**ProgramData refresh:** The full `PROG_DATA_FULL_DATA` blob (containing current time, temperatures, schedule state, vacation, and week schedule) is refreshed to the HomeKit characteristic either when the Eve app updates it or every 60 seconds. The current time field is kept up to date by adding the elapsed milliseconds since the last sync.
+**ProgramData refresh:** The full `PROG_DATA_FULL_DATA` blob (containing current time, temperatures, schedule state, vacation, and week schedule) is refreshed to the HomeKit characteristic either when the Eve app updates it or every 60 seconds. The current time field is kept up to date by adding the elapsed milliseconds since the last sync. When the schedule genuinely changes (HTTP POST, Eve write, vacation change), the characteristic is updated with `notify=true` so all paired Eve instances receive an EV notification and update their local caches. Periodic time-only refreshes use `notify=false`.
 
 **Temperature intercept:** The Eve app's temperature schedule only supports up to 30°C. The firmware silently replaces the comfort and default temperature values with the heater's actual set-point before storing them, preserving the user's set-point while satisfying the protocol.
 
@@ -442,7 +442,7 @@ The endpoint is started in `setupScheduleEndpoint()` (called from `onWifiConnect
 ```
 
 - `schedule` is an array of exactly **7** day objects, index **0 = Sunday** through **6 = Saturday** (matching `SchedulerBase`'s `tm_wday` convention).
-- Each day object has a `slots` array of 0–4 slot objects.
+- Each day object has a `slots` array of 0–3 slot objects (Eve's hard limit; a 4th slot would be silently truncated by Eve).
 - Each slot has `startHour` (0–23), `startMinute` (0–59), `endHour` (0–23), `endMinute` (0–59).
 - Out-of-range values or a missing/wrong-length `schedule` array produce a 400 response.
 
@@ -453,7 +453,7 @@ The endpoint is started in `setupScheduleEndpoint()` (called from `onWifiConnect
 1. **Eve binary format** (`prog_send_data.weekSchedule`): days are re-ordered from Sunday-first (JSON) to Monday-first (Eve), and times are encoded as 10-minute offsets (`hour × 6 + minute / 10`). Unused slots are set to `0xFF`.
 2. **SchedulerBase format** (`weekSchedule[7]`): populated by calling `updateSchedulerWeekSchedule()`, which converts the Eve offsets back to `{startHour, startMinute, endHour, endMinute}` structs and handles the Monday→Sunday to Sunday→Saturday index shift.
 
-The full `PROG_DATA_FULL_DATA` blob is then committed to NVS (`SAVED_DATA` / `PROG_SEND_DATA`), `initializeCurrentState()` is called to apply the new schedule immediately, and `refreshProgramData` is set so the Eve app sees the updated schedule on its next poll.
+Slots beyond the third in any day are silently dropped. The full `PROG_DATA_FULL_DATA` blob is then committed to NVS (`SAVED_DATA` / `PROG_SEND_DATA`), `initializeCurrentState()` is called to apply the new schedule immediately, and `refreshProgramData` is set so all paired Eve instances receive an EV notification with the updated schedule.
 
 ### config.py
 
@@ -503,7 +503,7 @@ For each day, dominant activity peaks are found using:
 2. Find local maxima with a minimum `min_peak_separation` (default 45) minute separation.
 3. Greedy non-maximum suppression: accept peaks by descending score, reject those within `min_peak_separation` of an already-accepted peak.
 
-An **adaptive threshold** loop starts at `min_weighted_score` (default 6.0) and steps down by 1.0 until `MAX_SLOTS_PER_DAY` (4) peaks are found or `min_score_floor` (default 3.0) is reached. A second pass also relaxes `min_occurrences` by 1 if needed.
+An **adaptive threshold** loop starts at `min_weighted_score` (default 6.0) and steps down by 1.0 until `MAX_SLOTS_PER_DAY` (3) peaks are found or `min_score_floor` (default 3.0) is reached. A second pass also relaxes `min_occurrences` by 1 if needed.
 
 Around each accepted peak, a ± `peak_half_width` (default 30) minute window is built. The window start is shifted back by `preheat_minutes` (default = `COLD_PIPE_DRAIN_MINUTES` = 3.0 min from config.py). All boundaries are rounded to the nearest 10-minute increment to match the firmware's 10-minute-resolution encoding.
 
