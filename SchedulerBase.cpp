@@ -85,7 +85,7 @@ bool SchedulerBase::loadScheduleFromStorage() {
   
     // Validate what we loaded.
   for (int i = 0; i < 7; i++) {
-    for (int x = 0; x < 4; x++) {
+    for (int x = 0; x < 3; x++) {
       if (weekSchedule[i].slots[x].startHour != 0xFF && (weekSchedule[i].slots[x].startHour < 0 || weekSchedule[i].slots[x].startHour > 23)) {
         Serial.println(F("Schedule corrupt in NVS."));
         return false;
@@ -159,7 +159,7 @@ SchedulerBase::State SchedulerBase::getNextState(time_t *nextStateTime) const {
     int endMinute = end_tm->tm_min;
     int endDay = end_tm->tm_wday;
     
-    for (int slot = 0; slot < 4 && weekSchedule[endDay].slots[slot].startHour != 0xFF; slot++) {
+    for (int slot = 0; slot < 3 && weekSchedule[endDay].slots[slot].startHour != 0xFF; slot++) {
       if (isTimeWithinSlot(endHour, endMinute, weekSchedule[endDay].slots[slot])) {
         return State::Active;  // We'll transition from Vacation -> Active
       }
@@ -180,7 +180,7 @@ SchedulerBase::State SchedulerBase::getNextState(time_t *nextStateTime) const {
   
   for (int dayoffset = 0; dayoffset < 7; dayoffset++) {
     int day = (currentDay + dayoffset) % 7;
-    for (int slot = 0; slot < 4 && weekSchedule[day].slots[slot].startHour != 0xFF; slot++) {
+    for (int slot = 0; slot < 3 && weekSchedule[day].slots[slot].startHour != 0xFF; slot++) {
       int startMin = dayoffset * 24 * 60 + weekSchedule[day].slots[slot].startHour * 60 + weekSchedule[day].slots[slot].startMinute;
       if (startMin > currentTimeInMinutes) {
           // Calculate start time of next item
@@ -392,7 +392,7 @@ void SchedulerBase::initializeCurrentState() {
     int currentMinute = tm_struct->tm_min;
     int currentDay = tm_struct->tm_wday;
     
-    for (int i = 0; i < 4 && weekSchedule[currentDay].slots[i].startHour != 0xFF; i++) {
+    for (int i = 0; i < 3 && weekSchedule[currentDay].slots[i].startHour != 0xFF; i++) {
       if (isTimeWithinSlot(currentHour, currentMinute, weekSchedule[currentDay].slots[i])) {
         newState = State::Active;
         break;

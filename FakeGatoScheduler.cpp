@@ -245,7 +245,7 @@ void FakeGatoScheduler::updateSchedulerWeekSchedule() {
 
   for (int day = 0; day < 7; day++) { // Monday - Sunday
     CMD_DAY_SCHEDULE *daySchedule = &(prog_send_data.weekSchedule.day[day]);
-    for (int i = 0; i < 4 && daySchedule->slot[i].offset_start != 0xFF; i++) {
+    for (int i = 0; i < 3 && daySchedule->slot[i].offset_start != 0xFF; i++) {
       weekSchedule[(day + 1) % 7].slots[i].startHour = (uint8_t)(daySchedule->slot[i].offset_start / 6);
       weekSchedule[(day + 1) % 7].slots[i].startMinute = (uint8_t)(daySchedule->slot[i].offset_start % 6) * 10;
       weekSchedule[(day + 1) % 7].slots[i].endHour = (uint8_t)(daySchedule->slot[i].offset_end / 6);
@@ -512,7 +512,7 @@ bool FakeGatoScheduler::setWeekScheduleFromJSON(const String &json) {
     int slotIdx = 0;
     if (slots) {
       for (JsonObject slot : slots) {
-        if (slotIdx >= 4) break;
+        if (slotIdx >= 3) break;
         uint8_t sh = slot["startHour"]   | 0xFF;
         uint8_t sm = slot["startMinute"] | 0xFF;
         uint8_t eh = slot["endHour"]     | 0xFF;
@@ -563,7 +563,7 @@ void FakeGatoScheduler::loop() {
     addMilliseconds(&prog_send_data.currentTime, millis() - clockOffset);
     clockOffset = millis();
     // Don't announce when there is new program data, Eve app will fetch it when it wants it.
-    programData->setData((const uint8_t *)&prog_send_data, sizeof(PROG_DATA_FULL_DATA), false);
+    programData->setData((const uint8_t *)&prog_send_data, sizeof(PROG_DATA_FULL_DATA), refreshProgramData);
     refreshProgramData = false;
   }
 }

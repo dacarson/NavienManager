@@ -81,7 +81,7 @@ DEFAULT_MIN_WEIGHTED_SCORE = 6.0         # Starting score threshold — strong/r
 DEFAULT_MIN_SCORE_FLOOR    = 3.0         # Lowest score the adaptive threshold will relax to
 # A floor of 3.0 = one hit per year at weight ×3 (current year only), the weakest
 # signal worth scheduling for. Below this the pattern is too sparse to be useful.
-MAX_SLOTS_PER_DAY       = 4              # SchedulerBase hard limit
+MAX_SLOTS_PER_DAY       = 3              # Eve app hard limit (silently truncates a 4th slot)
 # Recency weights: list of multipliers applied to each year, most-recent first.
 # e.g. [3, 2] means current year ×3, last year ×2.
 # Add more entries if you have more years of data (e.g. [3, 2, 1] for 3 years).

@@ -95,7 +95,7 @@ protected:
   } CMD_TIME_SLOT;
   
   typedef struct {
-    CMD_TIME_SLOT slot[4];
+    CMD_TIME_SLOT slot[4];  // Eve wire format always sends 4 slots; 4th is always 0xFF (UI limit is 3)
   } CMD_DAY_SCHEDULE;
   
   void addMilliseconds(PROG_CMD_CURRENT_TIME *timeStruct, uint32_t milliseconds);

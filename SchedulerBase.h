@@ -74,7 +74,7 @@ protected:
 
     struct DaySchedule {
       // 0xFF for times indicates unused slots
-      TimeSlot slots[4];
+      TimeSlot slots[3];
     };
 
   // Derived class can override to get

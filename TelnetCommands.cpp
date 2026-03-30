@@ -361,7 +361,7 @@ void commandScheduler(const String& params) {
   for (int day = 0; day < 7; day++) {
     telnet.printf("  %s:", dayNames[day]);
     bool hasSlots = false;
-    for (int slot = 0; slot < 4; slot++) {
+    for (int slot = 0; slot < 3; slot++) {
       uint8_t sh, sm, eh, em;
       if (scheduler->getTimeSlot(day, slot, sh, sm, eh, em)) {
         telnet.printf(" %02d:%02d-%02d:%02d", sh, sm, eh, em);
