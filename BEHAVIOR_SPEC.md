@@ -455,17 +455,105 @@ The endpoint is started in `setupScheduleEndpoint()` (called from `onWifiConnect
 
 The full `PROG_DATA_FULL_DATA` blob is then committed to NVS (`SAVED_DATA` / `PROG_SEND_DATA`), `initializeCurrentState()` is called to apply the new schedule immediately, and `refreshProgramData` is set so the Eve app sees the updated schedule on its next poll.
 
+### config.py
+
+`Logger/config.py` is a shared configuration module imported by `navien_schedule_learner.py` and any other Logger-side scripts. It defines:
+
+| Constant | Value | Description |
+|---|---|---|
+| `INFLUX_HOST` | `"localhost"` | InfluxDB hostname |
+| `INFLUX_PORT` | `8086` | InfluxDB port |
+| `INFLUX_DB` | `"navien"` | InfluxDB database name |
+| `GAS_RATE_USD_PER_KCAL` | `0.41601 / 29308` | Gas cost (~$0.00001420/kcal) |
+| `WATER_RATE_USD_PER_L` | `11.40 / (748 × 3.785)` | Water cost (~$0.004024/L) |
+| `COLD_PIPE_DRAIN_MINUTES` | `3.0` | Assumed drain time when recirc hasn't recently run |
+| `RECIRC_WINDOW_MINUTES` | `15.0` | How long after a recirc cycle pipes stay hot |
+| `SAMPLE_INTERVAL_SECONDS` | `5` | InfluxDB polling interval |
+| `OUTPUT_MEASUREMENT` | `"navien_efficiency"` | InfluxDB measurement name for scored output |
+| `OUTPUT_TAG_DEVICE` | `"navien"` | InfluxDB tag value for scored output |
+
 ### navien_schedule_learner.py
 
-`Logger/navien_schedule_learner.py` is the reference client. It:
+`Logger/navien_schedule_learner.py` learns a recirculation schedule from InfluxDB history and pushes it to the ESP32. It runs in five steps:
 
-1. Queries an **InfluxDB** database for historical `consumption_active` and `recirculation_running` data at 10-second resolution.
-2. Identifies **cold-start events** — the first tap-on after ≥ 10 minutes of inactivity — as the moments where pre-heating recirculation is most valuable.
-3. Bins cold-starts into per-day-of-week, 5-minute buckets and applies **recency weighting** (current year × 3, previous year × 2, etc.) so recent habits dominate the learned schedule.
-4. Finds activity **peaks** using a smoothed local-maximum algorithm with a minimum 45-minute peak separation, then builds ± 20-minute windows around each peak and shifts the window start back by a configurable preheat margin (default 3 minutes).
-5. POSTs the resulting schedule (up to 4 slots per day) to `http://<esp32_host>:8080/schedule`.
+**Step 1 — Fetch cold-start events**
 
-The script defaults to `navien.local:8080` and is designed to run as a weekly cron job (e.g., Sunday at 2 am). Run with `--dry_run` to preview the schedule without pushing. Run with `--verbose` to see per-day peak-finding detail.
+Queries InfluxDB for `MAX(consumption_active)` and `MAX(recirculation_running)` from the `water` measurement at **10-second resolution** (`GROUP BY time(10s) FILL(none)`). Queries cover a **rolling ±`window_weeks` (default 4) seasonal band** around today's calendar date in each configured year, so only seasonally relevant data is used.
+
+For each year, cold-start events are extracted: the first active bucket after ≥ `cold_gap_minutes` (default 10) of inactivity. Each event is assigned a **combined weight** = `recency_weight × demand_weight × cost_multiplier`:
+
+- `demand_weight` depends on whether recirculation was running at the cold-start and the run duration (measured in 10-second buckets):
+  - `recirculation_running=0`, duration < 6 buckets (< 1 min): `0.5` (short/accidental tap)
+  - `recirculation_running=0`, duration ≥ 6 buckets: `1.0` (genuine cold-pipe demand)
+  - `recirculation_running=1`, duration < 3 buckets (< 30s): `0.0` (discarded)
+  - `recirculation_running=1`, duration ≥ 3 buckets: `1.0` (genuine demand, pipes already hot)
+- `cost_multiplier` is normalised to [0, 1] using `COLD_START_WASTE_USD` (≈ $0.097 per cold-start at 8 L/min × 3 min × water rate) as the reference ceiling. Short cold-pipe taps get a halved cost multiplier.
+- `recency_weight`: per-year multipliers, most-recent first (default `[3, 2]` — current year ×3, previous year ×2). Configurable via `--recency_weights`.
+
+**Step 2 — Bin into per-day buckets**
+
+Cold-start events are binned into two parallel structures keyed by day-of-week (0 = Sunday … 6 = Saturday) and 5-minute bucket:
+- `raw_counts[dow][bucket]` — unweighted hit count (used for `min_occurrences` filter)
+- `weighted_scores[dow][bucket]` — sum of combined weights (used for score threshold)
+
+**Step 3 — Peak-finding and window construction**
+
+For each day, dominant activity peaks are found using:
+1. Smooth per-bucket scores with a ±2-bucket sliding average.
+2. Find local maxima with a minimum `min_peak_separation` (default 45) minute separation.
+3. Greedy non-maximum suppression: accept peaks by descending score, reject those within `min_peak_separation` of an already-accepted peak.
+
+An **adaptive threshold** loop starts at `min_weighted_score` (default 6.0) and steps down by 1.0 until `MAX_SLOTS_PER_DAY` (4) peaks are found or `min_score_floor` (default 3.0) is reached. A second pass also relaxes `min_occurrences` by 1 if needed.
+
+Around each accepted peak, a ± `peak_half_width` (default 30) minute window is built. The window start is shifted back by `preheat_minutes` (default = `COLD_PIPE_DRAIN_MINUTES` = 3.0 min from config.py). All boundaries are rounded to the nearest 10-minute increment to match the firmware's 10-minute-resolution encoding.
+
+**Step 4 — Print / estimate**
+
+Always prints the learned schedule. With `--verbose`:
+- Shows per-day peak-finding detail.
+- Prints a **slot width comparison** table (±25 min vs ±30 min) showing efficiency % for each option.
+- Prints an **expected efficiency table** for the coming week: of schedulable cold-starts (those falling inside a slot or within `RECIRC_WINDOW_MINUTES` = 15 min after slot end), what fraction are covered; missed-water-waste and wasted-gas-cycle costs in USD.
+
+`--debug_day <DayName>` shows a detailed per-bucket breakdown for one day including all bucket hit counts, scores, filtering, and peak-selection results, then exits.
+
+**Step 5 — Push**
+
+Pass `--push` to POST the schedule to `http://<esp32_host>:<esp32_port>/schedule`. By default the script is a dry run and prints the JSON that would be sent without pushing.
+
+**Timezone handling:** The script reads the system timezone from `/etc/timezone` (Debian/Raspberry Pi OS). Falls back to the `/etc/localtime` symlink target, then UTC with a warning.
+
+**Defaults and CLI flags:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--influxdb_host` | `config.INFLUX_HOST` | InfluxDB hostname |
+| `--influxdb_port` | `config.INFLUX_PORT` | InfluxDB port |
+| `--influxdb_db` | `config.INFLUX_DB` | InfluxDB database |
+| `--esp32_host` | `navien.local` | ESP32 mDNS name or IP |
+| `--esp32_port` | `8080` | ESP32 HTTP port |
+| `--window_weeks` | `4` | Half-width of rolling seasonal window (±weeks) |
+| `--recency_weights` | `3 2` | Per-year multipliers, most-recent first |
+| `--cold_gap_minutes` | `10` | Inactivity gap (min) that defines a cold-start |
+| `--min_duration_genuine` | `6` | Min 10s buckets (cold pipes) for full weight |
+| `--min_duration_recirc` | `3` | Min 10s buckets (recirc on) to count at all |
+| `--preheat_minutes` | `3` | Start recirc this many minutes before predicted demand |
+| `--gap_minutes` | `10` | Merge events closer than this into one window |
+| `--min_occurrences` | `3` | Minimum raw hits to pass noise filter |
+| `--min_weighted_score` | `6.0` | Starting score threshold for adaptive filter |
+| `--min_score_floor` | `3.0` | Lowest score the adaptive threshold relaxes to |
+| `--peak_half_width` | `30` | Half-width (min) of window built around each peak |
+| `--min_peak_separation` | `45` | Minimum minutes between two accepted peaks |
+| `--push` | off | Push schedule to ESP32 (default: dry run) |
+| `--dry_run` | — | Explicit dry-run flag (same as omitting `--push`) |
+| `--debug_day` | — | Show per-bucket detail for one day and exit |
+| `-v` / `--verbose` | off | Per-day peak detail, slot comparison, efficiency table |
+
+The script is designed to run as a weekly cron job (e.g., Sunday at 2 am):
+```
+0 2 * * 0  /home/pi/navien/venv/bin/python3 /home/pi/navien_schedule_learner.py --influxdb_host localhost --esp32_host navien.local --push
+```
+
+Dependencies: `pip3 install influxdb requests`
 
 ---
 
