@@ -24,6 +24,7 @@
 #define CUSTOM_CHAR_HEADER
 #include "FakeGatoScheduler.h"
 #include "Navien.h"
+#include <ArduinoJson.h>
 
 extern Navien navienSerial;
 
@@ -475,6 +476,70 @@ void FakeGatoScheduler::updateCurrentScheduleIfNeeded(bool force) {
     memcpy(&prog_send_data.currentSchedule.current,
            &prog_send_data.weekSchedule.day[currentScheduleDay], sizeof(PROG_CMD_CURRENT_SCHEDULE));
   }
+}
+
+bool FakeGatoScheduler::setWeekScheduleFromJSON(const String &json) {
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, json);
+  if (err) {
+    Serial.printf("setWeekScheduleFromJSON: JSON parse error: %s\n", err.c_str());
+    return false;
+  }
+
+  JsonArray schedule = doc["schedule"];
+  if (!schedule || schedule.size() != 7) {
+    Serial.println("setWeekScheduleFromJSON: 'schedule' must be an array of 7 days");
+    return false;
+  }
+
+  // Clear all Eve week schedule slots to 0xFF (unused)
+  memset(&prog_send_data.weekSchedule.day, 0xFF, sizeof(prog_send_data.weekSchedule.day));
+
+  // JSON index:  0=Sunday .. 6=Saturday  (SchedulerBase order)
+  // Eve storage: 0=Monday .. 6=Sunday
+  // Mapping:  Eve day = (SchedulerBase day + 6) % 7
+  for (int dow = 0; dow < 7; dow++) {
+    JsonObject dayObj = schedule[dow];
+    if (dayObj.isNull()) {
+      Serial.printf("setWeekScheduleFromJSON: day %d is not an object\n", dow);
+      return false;
+    }
+    JsonArray slots = dayObj["slots"];
+
+    int eveDay = (dow + 6) % 7;
+    CMD_DAY_SCHEDULE *eveDaySchedule = &prog_send_data.weekSchedule.day[eveDay];
+
+    int slotIdx = 0;
+    if (slots) {
+      for (JsonObject slot : slots) {
+        if (slotIdx >= 4) break;
+        uint8_t sh = slot["startHour"]   | 0xFF;
+        uint8_t sm = slot["startMinute"] | 0xFF;
+        uint8_t eh = slot["endHour"]     | 0xFF;
+        uint8_t em = slot["endMinute"]   | 0xFF;
+
+        if (sh > 23 || sm > 59 || eh > 23 || em > 59) {
+          Serial.printf("setWeekScheduleFromJSON: invalid time in day %d slot %d\n", dow, slotIdx);
+          return false;
+        }
+        eveDaySchedule->slot[slotIdx].offset_start = sh * 6 + sm / 10;
+        eveDaySchedule->slot[slotIdx].offset_end   = eh * 6 + em / 10;
+        slotIdx++;
+      }
+    }
+  }
+
+  // Sync weekSchedule[] (SchedulerBase format) from the updated Eve data
+  updateSchedulerWeekSchedule();
+  updateCurrentScheduleIfNeeded(true);
+
+  // Persist to NVS
+  nvs_set_blob(savedData, "PROG_SEND_DATA", &prog_send_data, sizeof(prog_send_data));
+  nvs_commit(savedData);
+  refreshProgramData = true;
+
+  Serial.println("Schedule updated from HTTP POST");
+  return true;
 }
 
 int FakeGatoScheduler::begin() {

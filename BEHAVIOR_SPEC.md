@@ -4,6 +4,15 @@
 
 NavienManager is an ESP32-based bridge between a Navien tankless water heater and the Apple HomeKit ecosystem. It connects to the Navien RS485 bus via UART2, parses proprietary binary packets from the heater, and exposes the heater's state and controls through four interfaces: HomeKit (via HomeSpan), a Telnet CLI, a web status page, and a UDP broadcast stream.
 
+### Flash and Memory Constraints
+
+The ESP32 module used in this project has limited flash storage. Flash is a **premium resource** and must be conserved throughout the firmware:
+
+- **Avoid new libraries.** Every additional library can cost tens of kilobytes. Before adding a dependency, verify it is not already available or that the same result cannot be achieved with primitives already in the project (e.g., raw socket APIs instead of a higher-level HTTP server framework).
+- **Reuse existing library costs.** Libraries that are already linked (HomeSpan, ArduinoJson, ESPTelnet) incur their flash cost once. Additional use of those libraries is effectively free. Prefer extending existing interfaces over introducing new ones.
+- **Use raw ESP-IDF / Arduino core APIs when a library would be overkill.** For example, `WiFiServer` (part of `<WiFi.h>`, already included) provides a raw TCP socket listener at zero additional flash cost; the `WebServer` library layered on top of it adds ~30–50 KB and is unnecessary when the protocol surface is small and fully controlled.
+- **Keep handlers small and purpose-specific.** Do not add error-handling paths, generic routing layers, or abstractions for scenarios that will never occur in this deployment.
+
 The firmware operates in one of two modes depending on whether a NaviLink control unit is detected on the RS485 bus:
 
 - **Monitor mode** — A NaviLink is present. The ESP32 passively observes all traffic and reports state but does not transmit any commands, to avoid interfering with the NaviLink.
@@ -404,6 +413,62 @@ All packets include a `"debug"` field containing the raw packet as a hex string 
 
 ---
 
+## External Schedule Configuration
+
+The scheduler time slots can be configured from outside the device in two ways: through the **Eve app** (via HomeKit `ProgramCommand`, described in the HomeKit section), or through an **HTTP POST** pushed by an external script. The HTTP interface exists so that a data-driven tool running on another machine (e.g., a Raspberry Pi or home server) can push a learned schedule derived from historical usage data.
+
+### HTTP Endpoint
+
+The firmware listens for HTTP POST requests on **port 8080**. HomeSpan owns port 80 and provides no public API for custom POST handlers, so a raw `WiFiServer` (part of `<WiFi.h>`, zero additional flash cost) is used instead of a separate HTTP server library.
+
+- **Path:** `POST /schedule`
+- **Content-Type:** `application/json`
+- **Response 200:** schedule was valid and applied.
+- **Response 400:** JSON was malformed or contained out-of-range values.
+
+The endpoint is started in `setupScheduleEndpoint()` (called from `onWifiConnected`) and polled in `loopScheduleEndpoint()` (called from the main loop). It uses a fixed 2 KB static buffer for the request body and a 1-second read timeout — sufficient for a LAN client.
+
+### JSON Format
+
+```json
+{
+  "schedule": [
+    { "slots": [ { "startHour": 6, "startMinute": 57, "endHour": 9, "endMinute": 3 } ] },
+    { "slots": [ { "startHour": 7, "startMinute": 0,  "endHour": 9, "endMinute": 0 },
+                 { "startHour": 18, "startMinute": 0, "endHour": 21, "endMinute": 0 } ] },
+    ...
+  ]
+}
+```
+
+- `schedule` is an array of exactly **7** day objects, index **0 = Sunday** through **6 = Saturday** (matching `SchedulerBase`'s `tm_wday` convention).
+- Each day object has a `slots` array of 0–4 slot objects.
+- Each slot has `startHour` (0–23), `startMinute` (0–59), `endHour` (0–23), `endMinute` (0–59).
+- Out-of-range values or a missing/wrong-length `schedule` array produce a 400 response.
+
+### Internal Mapping
+
+`FakeGatoScheduler::setWeekScheduleFromJSON()` translates the received schedule into both internal representations and persists both:
+
+1. **Eve binary format** (`prog_send_data.weekSchedule`): days are re-ordered from Sunday-first (JSON) to Monday-first (Eve), and times are encoded as 10-minute offsets (`hour × 6 + minute / 10`). Unused slots are set to `0xFF`.
+2. **SchedulerBase format** (`weekSchedule[7]`): populated by calling `updateSchedulerWeekSchedule()`, which converts the Eve offsets back to `{startHour, startMinute, endHour, endMinute}` structs and handles the Monday→Sunday to Sunday→Saturday index shift.
+
+The full `PROG_DATA_FULL_DATA` blob is then committed to NVS (`SAVED_DATA` / `PROG_SEND_DATA`), `initializeCurrentState()` is called to apply the new schedule immediately, and `refreshProgramData` is set so the Eve app sees the updated schedule on its next poll.
+
+### navien_schedule_learner.py
+
+`Logger/navien_schedule_learner.py` is the reference client. It:
+
+1. Queries an **InfluxDB** database for historical `consumption_active` and `recirculation_running` data at 10-second resolution.
+2. Identifies **cold-start events** — the first tap-on after ≥ 10 minutes of inactivity — as the moments where pre-heating recirculation is most valuable.
+3. Bins cold-starts into per-day-of-week, 5-minute buckets and applies **recency weighting** (current year × 3, previous year × 2, etc.) so recent habits dominate the learned schedule.
+4. Finds activity **peaks** using a smoothed local-maximum algorithm with a minimum 45-minute peak separation, then builds ± 20-minute windows around each peak and shifts the window start back by a configurable preheat margin (default 3 minutes).
+5. POSTs the resulting schedule (up to 4 slots per day) to `http://<esp32_host>:8080/schedule`.
+
+The script defaults to `navien.local:8080` and is designed to run as a weekly cron job (e.g., Sunday at 2 am). Run with `--dry_run` to preview the schedule without pushing. Run with `--verbose` to see per-day peak-finding detail.
+
+---
+
 ## Startup Sequence
 
 1. UART2 initialized for Navien RS485 at 19200 baud.
@@ -413,5 +478,6 @@ All packets include a `"debug"` field containing the raw packet as a hex string 
 5. On WiFi connect:
    - `setupNavienBroadcaster()`: registers Navien packet callbacks; starts UDP broadcast.
    - `setupTelnetCommands()`: registers all commands; starts Telnet server on port 23.
-6. Main loop runs: `telnet.loop()`, `navienSerial.loop()`, `homeSpan.poll()`.
+   - `setupScheduleEndpoint()`: starts raw `WiFiServer` on port 8080 for pushed schedule updates.
+6. Main loop runs: `telnet.loop()`, `loopScheduleEndpoint()`, `navienSerial.loop()`, `homeSpan.poll()`.
 7. Once a timezone is available (`TZ` env var set) and SNTP sync is confirmed, `homeSpan.assumeTimeAcquired()` is called to unlock time-dependent HomeKit features.

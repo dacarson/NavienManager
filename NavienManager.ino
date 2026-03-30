@@ -40,6 +40,8 @@ extern void setupTelnetCommands();   // TelnetCommands.ino
 extern void setupNavienBroadcaster();  // NavienBroadcaster.ino
 extern void setupHomeSpanWeb(); // HomeSpanWeb.ino
 extern void setupHomeSpanAccessories();
+extern void setupScheduleEndpoint(); // ScheduleEndpoint.ino
+extern void loopScheduleEndpoint();
 
 void myWiFiBegin(const char *s, const char *p) {
   WiFi.begin(s, p);
@@ -50,6 +52,9 @@ void myWiFiBegin(const char *s, const char *p) {
 void onWifiConnected(int connection) {
   // Setup callbacks for UDP broadcast
   setupNavienBroadcaster();
+
+  // Start schedule HTTP endpoint on port 8080
+  setupScheduleEndpoint();
 
   // Start Telnet server on port 23
   setupTelnetCommands();
@@ -69,6 +74,7 @@ void setup() {
   //homeSpan.setWifiCredentials(ssid, password);
   homeSpan.setWifiBegin(myWiFiBegin);
   homeSpan.setConnectionCallback(onWifiConnected);
+  homeSpan.setHostNameSuffix("Controller");
   homeSpan.begin(Category::Thermostats,"Navien Manager");
   homeSpan.enableOTA(false, false);
 
@@ -80,7 +86,8 @@ void setup() {
 
 void loop() {
   if (wifiConnected) {
-  telnet.loop();
+    telnet.loop();
+    loopScheduleEndpoint();
   }
 
   // Check for system clock setup, which the SchedulerBase class does

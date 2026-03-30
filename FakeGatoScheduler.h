@@ -44,6 +44,12 @@ public:
   // When the Service recieves Eve Program Data,
   // this function is called to process it.
   void parseProgramData(uint8_t *data, int len);
+
+  // Accept a JSON schedule pushed via HTTP POST /schedule.
+  // JSON format: {"schedule":[{"slots":[{"startHour":H,"startMinute":M,"endHour":H,"endMinute":M},...]},...]}
+  // Array index 0=Sunday .. 6=Saturday (matches SchedulerBase day numbering).
+  // Returns true on success, false if the JSON is malformed or contains invalid values.
+  bool setWeekScheduleFromJSON(const String &json);
   
   
 protected:
