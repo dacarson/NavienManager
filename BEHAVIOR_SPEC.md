@@ -185,7 +185,7 @@ The Eve app's thermostat schedule is parsed and stored in NVS (`SAVED_DATA` / `P
 
 **State transitions:** When a scheduled transition time arrives, `initializeCurrentState()` is called to evaluate the current time against the week schedule and determine the correct state. This uses `isTimeWithinSlot()` (which uses `>=` for the slot start boundary), ensuring that a transition firing at exactly the slot start time correctly enters `Active`. When an override expires, `initializeCurrentState()` is similarly called to revert to the correct scheduled state immediately rather than waiting for the next scheduled transition.
 
-**Schedule format:** Up to **3 time slots per day** (Eve's hard limit), Monday–Sunday (Eve convention), converted internally to Sunday–Saturday (C `tm_wday` convention). Each slot is encoded as 10-minute-resolution offsets (value / 6 = hour, value % 6 × 10 = minute). Although the `CMD_DAY_SCHEDULE` wire struct technically has room for 4 slots, Eve silently truncates any 4th slot when it reads the schedule and writes back only 3 slots. Sending 4 real slots causes Eve's write-back to differ from the device schedule (slot 4 becomes `0xFF`), breaking the HTTP-lock auto-clear comparison and causing Eve to ignore EV notifications for the characteristic. All schedule sources (HTTP POST, wire struct, learner) must therefore cap at 3 slots per day.
+**Schedule format:** Up to 4 time slots per day on the wire, Monday–Sunday (Eve convention), converted internally to Sunday–Saturday (C `tm_wday` convention). Each slot is encoded as 10-minute-resolution offsets (value / 6 = hour, value % 6 × 10 = minute). The `CMD_DAY_SCHEDULE` wire struct always carries 4 slots (8 bytes per day); Eve's app UI limits the user to configuring 3 comfort periods, so the 4th slot is always `0xFF` (unused) in practice. The internal `DaySchedule` (SchedulerBase) and the HTTP POST endpoint cap at **3 slots** to match the Eve UI limit, and the schedule learner uses `MAX_SLOTS_PER_DAY = 3` for the same reason.
 
 **Empty/unused slot sentinel:** `0xFF` is the sentinel value for an unused slot in both the Eve wire format and the internal representation:
 - In the Eve `CMD_DAY_SCHEDULE` struct, `slot[i].offset_start == 0xFF` marks slot `i` (and all following slots) as unused. The conversion loop in `updateSchedulerWeekSchedule()` stops at the first `0xFF` offset.
@@ -442,7 +442,7 @@ The endpoint is started in `setupScheduleEndpoint()` (called from `onWifiConnect
 ```
 
 - `schedule` is an array of exactly **7** day objects, index **0 = Sunday** through **6 = Saturday** (matching `SchedulerBase`'s `tm_wday` convention).
-- Each day object has a `slots` array of 0–3 slot objects (Eve's hard limit; a 4th slot would be silently truncated by Eve).
+- Each day object has a `slots` array of 0–3 slot objects (matching Eve's UI limit of 3 comfort periods per day).
 - Each slot has `startHour` (0–23), `startMinute` (0–59), `endHour` (0–23), `endMinute` (0–59).
 - Out-of-range values or a missing/wrong-length `schedule` array produce a 400 response.
 
