@@ -12,7 +12,7 @@ Usage:
     python3 navien_schedule_learner.py [options]
 
 Scheduling (cron example — run every Sunday at 2am):
-    0 2 * * 0  /usr/bin/python3 /home/pi/navien_schedule_learner.py --influxdb_host localhost --esp32_host navien.local --push
+    0 2 * * 0  /home/pi/navien/venv/bin/python3 /home/pi/navien_schedule_learner.py --influxdb_host localhost --esp32_host navien.local --push
 
 Dependencies:
     pip3 install influxdb requests
