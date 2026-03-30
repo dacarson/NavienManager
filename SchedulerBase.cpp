@@ -256,7 +256,7 @@ bool SchedulerBase::isTimeWithinSlot(int currentHour, int currentMinute, TimeSlo
   int slotStartInMinutes = slot.startHour * 60 + slot.startMinute;
   int slotEndInMinutes = slot.endHour * 60 + slot.endMinute;
   
-  return currentTimeInMinutes >= slotStartInMinutes && currentTimeInMinutes <= slotEndInMinutes;
+  return currentTimeInMinutes >= slotStartInMinutes && currentTimeInMinutes < slotEndInMinutes;
 }
 
 bool SchedulerBase::setTz(String timezone) {
