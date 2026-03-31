@@ -36,6 +36,8 @@ NavienLearner::NavienLearner()
       _runBucket(0),
       _recircAtStart(false),
       _coldStartQueue(nullptr),
+      _taskHandle(nullptr),
+      _recomputeRequested(false),
       _measuredHead(0),
       _learnerDisabled(false)
 {
@@ -57,6 +59,27 @@ bool NavienLearner::begin() {
     if (!_store.begin()) {
         Serial.println("NavienLearner: BucketStore init failed — learner disabled");
         _learnerDisabled = true;
+        // Queue was created above but is left live; same intentional tradeoff
+        // as the task-create failure path below.
+        return false;
+    }
+
+    BaseType_t taskRet = xTaskCreatePinnedToCore(
+        NavienLearner::learnerTask,
+        "NavienLearner",
+        8192,   // stack: headroom for LittleFS internals during file writes
+        this,
+        1,      // priority 1 on Core 0 — yields readily to higher-priority tasks
+        &_taskHandle,
+        0       // Core 0
+    );
+    if (taskRet != pdPASS) {
+        Serial.println("NavienLearner: task create failed — learner disabled");
+        _learnerDisabled = true;
+        // Note: the queue and BucketStore are already initialised at this point.
+        // They are left live but unreachable — onNavienState() bails on
+        // _learnerDisabled, so no further writes occur. Not a realistic field
+        // concern since task create failure requires severe heap exhaustion.
         return false;
     }
 
@@ -134,6 +157,41 @@ void NavienLearner::onNavienState(bool consumption_active,
 void NavienLearner::advanceMeasuredWeek() {
     _measuredHead = (_measuredHead + 1) % 4;
     memset(&_measured[_measuredHead], 0, sizeof(WeekMeasured));
+}
+
+// ---------------------------------------------------------------------------
+// learnerTask() — Core 0 background task
+// ---------------------------------------------------------------------------
+
+void NavienLearner::learnerTask(void *pvParam) {
+    NavienLearner *self = static_cast<NavienLearner *>(pvParam);
+
+    for (;;) {
+        // IDLE: consume any pending cold-start event from Core 1.
+        // xQueueReceive with timeout 0 is non-blocking — if the queue is
+        // empty we fall through immediately and sleep for 500ms.
+        PendingColdStart cs;
+        if (xQueueReceive(self->_coldStartQueue, &cs, 0) == pdTRUE) {
+            // Update the in-RAM bucket and persist atomically to LittleFS.
+            // Combined weight matches Python: recency_weight × demand_weight.
+            if (!self->_store.updateBucket(cs.dow, cs.bucket,
+                                           /*raw_delta=*/1,
+                                           cs.demand_weight * cs.recency_weight)) {
+                Serial.printf("NavienLearner: bucket write failed (dow=%d b=%d)\n",
+                              cs.dow, cs.bucket);
+            }
+        }
+
+        // Phase 5 will replace this stub with a full RECOMPUTE_LOAD transition.
+        if (self->_recomputeRequested) {
+            self->_recomputeRequested = false;
+            // TODO Phase 5: trigger RECOMPUTE_LOAD
+        }
+
+        // Phase 6 will add the midnight + 2min check → DECAY_CHECK → RECOMPUTE_LOAD.
+
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
 }
 
 // ---------------------------------------------------------------------------

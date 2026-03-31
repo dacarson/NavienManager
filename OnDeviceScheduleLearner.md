@@ -349,11 +349,12 @@ All other `NavienLearner` operations (bucket reads/writes to LittleFS, peak-find
 
 | Location | Change |
 |---|---|
+| `NavienManager.ino` | Global `NavienLearner *learner`; instantiated and `begin()` called early in `setup()`, independent of HomeSpan/HomeKit |
 | `FakeGatoScheduler.h` | Add `SemaphoreHandle_t _scheduleHandoffMutex` |
 | `FakeGatoScheduler.cpp` — `parseProgramData()` | No mutex change needed — `setWeekScheduleFromJSON()` is already Core 1 only |
-| `NavienManager.ino` — `setup()` | Construct global `NavienLearner` and call `learner->begin()` **before** any HomeSpan/HomeKit setup; learner lifecycle is independent and always-on |
+| `FakeGatoScheduler.cpp` — `begin()` | Create `_scheduleHandoffMutex` |
 | `FakeGatoScheduler.cpp` — `loop()` | Non-blocking `xSemaphoreTake(_scheduleHandoffMutex, 0)`; if acquired and `_newScheduleReady`, copy JSON, clear flag, release mutex, call `setWeekScheduleFromJSON(localCopy)` — sole apply path; no pre-lock flag check |
-| RS485 packet callbacks (`setupNavienBroadcaster()`) | Register water packet callback to call `_learner->onNavienState(consumption_active, recirc_running, now)` |
+| `NavienBroadcaster.ino` — `onWaterPacket()` | Calls `learner->onNavienState(water->consumption_active, water->recirculation_running, time(nullptr))` at the top of the callback |
 | HTTP `POST /schedule` (port 8080, raw `WiFiServer`) | No change — receives finished schedule from `navien_bootstrap.py` (Step 1) |
 | HTTP `POST /buckets` (port 8080, raw `WiFiServer`) | New path in existing `loopScheduleEndpoint()` dispatcher — calls `_learner->ingestBucketPayload(json)`; uses its own 6KB static buffer; triggers immediate recompute |
 | Telnet `learnerStatus` command | New command in existing `setupTelnetCommands()` — prints bucket fill, last recompute, and per-day predicted/measured/gap table |
@@ -1037,3 +1038,5 @@ Constraints derived from `BEHAVIOR_SPEC.md` that govern how this feature is impl
 | 9 | `POST /buckets` endpoint | ESP32 ingest handler: parse sparse JSON, merge/replace `_buckets`, write LittleFS, trigger recompute. |
 | 10 | `navien_bootstrap.py` | Pi Step 1: full-history peak-finding → push finished schedule via `POST /schedule`. |
 | 11 | `navien_bucket_export.py` | Pi Step 2: full-history bucket extraction → push raw bucket data via `POST /buckets`. Then disable Pi cron. |
+
+**Phase 1 Note:** Phase 1 introduced `BucketStore` as a standalone class (`BucketStore.h` / `BucketStore.cpp`) that encapsulates all LittleFS file I/O. `NavienLearner` owns a `BucketStore _store` member rather than managing LittleFS directly.

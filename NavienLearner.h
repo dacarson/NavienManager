@@ -26,6 +26,7 @@ SOFTWARE.
 #include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/task.h"
 #include "BucketStore.h"
 
 // ---------------------------------------------------------------------------
@@ -82,6 +83,12 @@ public:
     // Advance the rolling window to a new week (called at Sunday midnight).
     void advanceMeasuredWeek();
 
+    // Signal the Core 0 task to run a recompute immediately (e.g. after
+    // POST /buckets seeds new bucket data).  Safe to call from any core.
+    // The flag is read and cleared in learnerTask(); the RECOMPUTE_LOAD
+    // transition it triggers is implemented in Phase 5.
+    void requestRecompute() { _recomputeRequested = true; }
+
     bool isDisabled() const { return _learnerDisabled; }
 
     // Cold-start detection thresholds (seconds)
@@ -91,6 +98,9 @@ public:
 
     // Recency weight for live (current-year) data, matching Python [3, 2]
     static constexpr float RECENCY_WEIGHT_CURRENT = 3.0f;
+
+    // Core 0 task entry point — launched by begin().
+    static void learnerTask(void *pvParam);
 
 private:
     // Compute demand_weight from run characteristics.
@@ -108,6 +118,10 @@ private:
 
     // --- Cross-core queue (capacity 1, Core 1 writes, Core 0 reads) ---
     QueueHandle_t _coldStartQueue;
+
+    // --- Core 0 task ---
+    TaskHandle_t _taskHandle;
+    volatile bool _recomputeRequested;  // set from any core, cleared on Core 0
 
     // --- Measured efficiency rolling window (Core 1 writes) ---
     WeekMeasured _measured[4];
