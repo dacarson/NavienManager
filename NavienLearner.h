@@ -26,8 +26,14 @@ SOFTWARE.
 #include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "BucketStore.h"
+#include "PeakFinder.h"
+
+// Arduino String (WString.h) — forward declare so this header does not depend
+// on Arduino.h; translation units that call checkNewSchedule() must include it.
+class String;
 
 // ---------------------------------------------------------------------------
 // Cold-start event transported from Core 1 → Core 0
@@ -38,6 +44,8 @@ struct PendingColdStart {
     int   bucket;          // 5-minute bucket index at tap-open time (0–287)
     float demand_weight;   // 0.5 (short cold-pipe tap) or 1.0 (genuine demand)
     float recency_weight;  // current year's recency weight multiplier (3.0)
+    bool  recircAtStart;   // was recirc running when the run started?
+    //                        (used by Core 0 to update measured-efficiency counters)
 };
 
 // ---------------------------------------------------------------------------
@@ -85,9 +93,12 @@ public:
 
     // Signal the Core 0 task to run a recompute immediately (e.g. after
     // POST /buckets seeds new bucket data).  Safe to call from any core.
-    // The flag is read and cleared in learnerTask(); the RECOMPUTE_LOAD
-    // transition it triggers is implemented in Phase 5.
     void requestRecompute() { _recomputeRequested = true; }
+
+    // Called from FakeGatoScheduler::loop() on Core 1.  Non-blocking: returns
+    // false immediately if no new schedule is ready or the mutex is held.
+    // Returns true and fills out_json with the schedule JSON if ready.
+    bool checkNewSchedule(String &out_json);
 
     bool isDisabled() const { return _learnerDisabled; }
 
@@ -103,9 +114,16 @@ public:
     static void learnerTask(void *pvParam);
 
 private:
+    // Task state machine states (Core 0).
+    enum TaskState { IDLE, RECOMPUTE_LOAD, RECOMPUTING, RECOMPUTE_WRITE };
+
     // Compute demand_weight from run characteristics.
     // Returns 0.0 if the event should be discarded.
     float computeDemandWeight(bool recircAtStart, uint32_t durationSec) const;
+
+    // Core 0 state machine helpers.
+    void idleStep();       // called every IDLE tick: queue drain, midnight check
+    void recomputeWrite(); // builds JSON and hands off to Core 1 via mutex
 
     // --- Cold-start detector state (Core 1 only) ---
     time_t   _lastActiveTime;    // last time consumption_active was true
@@ -120,10 +138,30 @@ private:
     QueueHandle_t _coldStartQueue;
 
     // --- Core 0 task ---
-    TaskHandle_t _taskHandle;
+    TaskHandle_t  _taskHandle;
     volatile bool _recomputeRequested;  // set from any core, cleared on Core 0
+    TaskState     _taskState;
+    int           _recomputeDay;        // 0–6; current day being processed in RECOMPUTING
+    int           _lastRecomputeYday;   // tm_yday of last midnight recompute trigger (-1 = never)
 
-    // --- Measured efficiency rolling window (Core 1 writes) ---
+    // Capacity for the schedule JSON buffer.
+    // Worst case: 7 days × 3 slots, fully expanded ≈ 1309 bytes; 1400 gives margin.
+    static constexpr int SCHEDULE_JSON_CAPACITY = 1400;
+
+    // --- Schedule handoff (Core 0 writes, Core 1 reads — guarded by mutex) ---
+    SemaphoreHandle_t _scheduleHandoffMutex;
+    char              _pendingScheduleJSON[SCHEDULE_JSON_CAPACITY];
+    bool              _newScheduleReady;
+
+    // --- Recompute results (Core 0 only) ---
+    TimeSlot _weekSlots[7][MAX_SLOTS_PER_DAY];  // slots per day from last recompute
+    int      _weekSlotCount[7];                  // slot count per day (0–MAX_SLOTS_PER_DAY)
+    float    _predictedEfficiency[7];            // per-day predicted efficiency (Phase 7)
+
+    // --- Measured efficiency rolling window (Core 0 writes only) ---
+    // Updated in idleStep() when consuming cold-start events from the queue.
+    // Phase 7 Telnet/UI readers on Core 1 should treat these as coarse stats
+    // (no lock needed for read-only display, but values may be mid-update).
     WeekMeasured _measured[4];
     uint8_t      _measuredHead;  // index of current week slot (0–3)
 

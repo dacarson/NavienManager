@@ -23,10 +23,12 @@
 
 #define CUSTOM_CHAR_HEADER
 #include "FakeGatoScheduler.h"
+#include "NavienLearner.h"
 #include "Navien.h"
 #include <ArduinoJson.h>
 
 extern Navien navienSerial;
+extern NavienLearner *learner;
 
 // Unfortunately, ESP32 doesn't have the timegm() function, so implement one here
 time_t timegm(struct tm *tm) {
@@ -557,7 +559,17 @@ int FakeGatoScheduler::begin() {
 
 void FakeGatoScheduler::loop() {
   SchedulerBase::loop();
-  
+
+  // Apply any new schedule produced by NavienLearner on Core 0.
+  // checkNewSchedule() is non-blocking; it returns false immediately if no
+  // new schedule is ready.  setWeekScheduleFromJSON() must only run on Core 1.
+  if (learner && !learner->isDisabled()) {
+    String newScheduleJson;
+    if (learner->checkNewSchedule(newScheduleJson)) {
+      setWeekScheduleFromJSON(newScheduleJson);
+    }
+  }
+
   if (isInitialized && (refreshProgramData || programData->timeVal() > 60000) ){
     updateCurrentScheduleIfNeeded(false);
     addMilliseconds(&prog_send_data.currentTime, millis() - clockOffset);

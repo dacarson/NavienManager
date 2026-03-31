@@ -244,7 +244,7 @@ RECOMPUTE_WRITE
   └─ → IDLE
 ```
 
-`FakeGatoScheduler::loop()` on Core 1 is the **sole** applier of the schedule. Core 0 never calls `setWeekScheduleFromJSON()` directly. The flag `_newScheduleReady` is only ever read or written while holding `_scheduleHandoffMutex` — there is no pre-lock check. `hasNewSchedule()` does not exist as a public method.
+`FakeGatoScheduler::loop()` on Core 1 is the **sole** applier of the schedule. Core 0 never calls `setWeekScheduleFromJSON()` directly. The flag `_newScheduleReady` is only ever read or written while holding `_scheduleHandoffMutex` — there is no pre-lock check. The public method `checkNewSchedule(String &out_json)` encapsulates the non-blocking mutex take, JSON copy, and flag clear; it returns `true` only when a complete (non-truncated) schedule is ready.
 
 ```
 FakeGatoScheduler::loop() (Core 1):
