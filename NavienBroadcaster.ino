@@ -26,6 +26,7 @@ SOFTWARE.
 #include <AsyncUDP.h>
 #include <ArduinoJson.h>
 #include "Navien.h"
+#include "NavienLearner.h"
 
 const unsigned long broadcastDuplicatePacketThrottle = 5000;  // 5 seconds in milliseconds (5000 ms)
 const int udpBroadcastPort = 2025;
@@ -33,6 +34,7 @@ const int udpBroadcastPort = 2025;
 extern Navien navienSerial;
 extern ESPTelnet telnet;
 extern String trace;
+extern NavienLearner *learner;
 
 AsyncUDP udp;
 
@@ -117,6 +119,12 @@ String waterToJSON(const Navien::NAVIEN_STATE_WATER *water, String rawhexstring 
 }
 
 void onWaterPacket(Navien::NAVIEN_STATE_WATER *water) {
+  if (learner) {
+    learner->onNavienState(water->consumption_active,
+                           water->recirculation_running,
+                           time(nullptr));
+  }
+
   resetPreviousValues();
 
   const Navien::PACKET_BUFFER *recv_buffer = navienSerial.rawPacketData();

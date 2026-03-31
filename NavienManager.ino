@@ -27,11 +27,13 @@ SOFTWARE.
 #include "HomeSpan.h"
 
 #include "Navien.h"
+#include "NavienLearner.h"
 
 bool wifiConnected = false;
 bool timeInit = false;
 
 Navien navienSerial(2);
+NavienLearner *learner = nullptr;
 #define RXD2 16
 #define TXD2 17
 
@@ -68,6 +70,10 @@ void setup() {
   // Start Serial 2 for Navien
   navienSerial.begin(RXD2, TXD2);
   Serial.println(F("Navien Serial Started"));
+
+  // Learner is independent of HomeSpan/HomeKit and starts unconditionally.
+  learner = new NavienLearner();
+  learner->begin();
 
   // setup HomeSpan. It needs to own WiFi setup so
   // that it can do the pairing.
