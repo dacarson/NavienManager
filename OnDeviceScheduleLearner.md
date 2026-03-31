@@ -349,9 +349,9 @@ All other `NavienLearner` operations (bucket reads/writes to LittleFS, peak-find
 
 | Location | Change |
 |---|---|
-| `FakeGatoScheduler.h` | Add `NavienLearner *_learner` pointer; add `SemaphoreHandle_t _scheduleHandoffMutex` |
+| `FakeGatoScheduler.h` | Add `SemaphoreHandle_t _scheduleHandoffMutex` |
 | `FakeGatoScheduler.cpp` — `parseProgramData()` | No mutex change needed — `setWeekScheduleFromJSON()` is already Core 1 only |
-| `FakeGatoScheduler.cpp` — `begin()` | Create `_scheduleHandoffMutex`; call `_learner->begin()` |
+| `NavienManager.ino` — `setup()` | Construct global `NavienLearner` and call `learner->begin()` **before** any HomeSpan/HomeKit setup; learner lifecycle is independent and always-on |
 | `FakeGatoScheduler.cpp` — `loop()` | Non-blocking `xSemaphoreTake(_scheduleHandoffMutex, 0)`; if acquired and `_newScheduleReady`, copy JSON, clear flag, release mutex, call `setWeekScheduleFromJSON(localCopy)` — sole apply path; no pre-lock flag check |
 | RS485 packet callbacks (`setupNavienBroadcaster()`) | Register water packet callback to call `_learner->onNavienState(consumption_active, recirc_running, now)` |
 | HTTP `POST /schedule` (port 8080, raw `WiFiServer`) | No change — receives finished schedule from `navien_bootstrap.py` (Step 1) |
