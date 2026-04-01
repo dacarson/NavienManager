@@ -23,6 +23,11 @@ SOFTWARE.
 #include "NavienLearner.h"
 #include <Arduino.h>
 #include <stdarg.h>
+#include <AsyncUDP.h>
+#include <ArduinoJson.h>
+
+extern AsyncUDP udp;  // defined in NavienBroadcaster.ino
+static constexpr int UDP_BROADCAST_PORT = 2025;
 
 // ---------------------------------------------------------------------------
 // safeAppend() — file-private snprintf helper with truncation protection.
@@ -467,9 +472,79 @@ void NavienLearner::recomputeWrite() {
     _newScheduleReady = true;
     xSemaphoreGive(_scheduleHandoffMutex);
 
-    // Phase 8 will call broadcastUDP() here.
+    broadcastUDP();
 
     Serial.println("NavienLearner: recompute complete, new schedule ready");
+}
+
+// ---------------------------------------------------------------------------
+// broadcastUDP() — private; emits a "type":"learner" JSON packet over UDP.
+// Called from recomputeWrite() on Core 0 after mutex handoff.
+// Uses ArduinoJson (same pattern as NavienBroadcaster.ino).
+// ---------------------------------------------------------------------------
+
+void NavienLearner::broadcastUDP() {
+    // 3-letter day prefixes used to build flat field names (e.g. "sun_slots").
+    // Flat top-level keys allow navien_listener.py to pass payload['fields'] = data
+    // directly to InfluxDB without any flattening — nested arrays/objects would
+    // fail InfluxDB line protocol.
+    static const char *dayPfx[] = {
+        "sun","mon","tue","wed","thu","fri","sat"
+    };
+
+    JsonDocument doc;
+    doc["type"] = "learner";
+    doc["last_recompute"] = (long)_lastRecomputeTime;
+    doc["bucket_fill_pct"] = serialized(
+        String(_store.nonZeroCount() * 100.0f / (BUCKET_DAYS * BUCKET_PER_DAY), 1));
+
+    char key[32];
+    for (int dow = 0; dow < BUCKET_DAYS; dow++) {
+        // Encode slots as compact string "HH:MM-HH:MM,..." (empty if no slots).
+        char slotStr[64] = "";
+        int  spos = 0;
+        for (int s = 0; s < _weekSlotCount[dow]; s++) {
+            spos += snprintf(slotStr + spos, (int)sizeof(slotStr) - spos,
+                             "%s%02d:%02d-%02d:%02d",
+                             s > 0 ? "," : "",
+                             _weekSlots[dow][s].start_min / 60,
+                             _weekSlots[dow][s].start_min % 60,
+                             _weekSlots[dow][s].end_min   / 60,
+                             _weekSlots[dow][s].end_min   % 60);
+        }
+        snprintf(key, sizeof(key), "%s_slots", dayPfx[dow]);
+        doc[key] = slotStr;  // ArduinoJson v7 copies both key and value
+
+        float pred = _predictedEfficiency[dow];
+        if (!isnan(pred)) {
+            snprintf(key, sizeof(key), "%s_predicted_pct", dayPfx[dow]);
+            doc[key] = serialized(String(pred, 1));
+        }
+
+        uint32_t measTotal = 0, measCovered = 0;
+        for (int w = 0; w < 4; w++) {
+            measTotal   += _measured[w].total[dow];
+            measCovered += _measured[w].covered[dow];
+        }
+        if (measTotal > 0) {
+            float meas = measCovered * 100.0f / measTotal;
+            snprintf(key, sizeof(key), "%s_measured_pct", dayPfx[dow]);
+            doc[key] = serialized(String(meas, 1));
+            if (!isnan(pred)) {
+                snprintf(key, sizeof(key), "%s_gap_pct", dayPfx[dow]);
+                doc[key] = serialized(String(pred - meas, 1));
+            }
+        }
+
+        snprintf(key, sizeof(key), "%s_cold_starts_4wk", dayPfx[dow]);
+        doc[key] = (int)measTotal;
+    }
+
+    doc["debug"] = "";
+
+    String json;
+    serializeJson(doc, json);
+    udp.broadcastTo(json.c_str(), UDP_BROADCAST_PORT);
 }
 
 // ---------------------------------------------------------------------------

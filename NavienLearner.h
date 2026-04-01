@@ -133,9 +133,10 @@ private:
     float computeDemandWeight(bool recircAtStart, uint32_t durationSec) const;
 
     // Core 0 state machine helpers.
-    void idleStep();       // called every IDLE tick: queue drain, midnight check
-    void decayCheck();     // apply annual weighted_score decay if year has rolled over
-    void recomputeWrite(); // builds JSON and hands off to Core 1 via mutex
+    void idleStep();        // called every IDLE tick: queue drain, midnight check
+    void decayCheck();      // apply annual weighted_score decay if year has rolled over
+    void recomputeWrite();  // builds JSON and hands off to Core 1 via mutex
+    void broadcastUDP();    // broadcasts learner JSON packet over UDP (Phase 8)
 
     // --- Cold-start detector state (Core 1 only) ---
     time_t   _lastActiveTime;    // last time consumption_active was true

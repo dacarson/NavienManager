@@ -235,12 +235,13 @@ RECOMPUTE_DAY_0 .. RECOMPUTE_DAY_6
 
 RECOMPUTE_WRITE
   ├─ Build JSON string in setWeekScheduleFromJSON() format
+  ├─ Compute predicted efficiency → cache in _predictedEfficiency[7]
+  ├─ Set _lastRecomputeTime = time(nullptr)
   ├─ Acquire _scheduleHandoffMutex
   ├─ Copy JSON string into _pendingScheduleJSON
   ├─ Set _newScheduleReady = true
   ├─ Release _scheduleHandoffMutex
-  ├─ Compute predicted efficiency → cache in _predictedEfficiency[7]
-  ├─ Call broadcastUDP()
+  ├─ broadcastUDP()  // private; reads _predictedEfficiency and _measured built above
   └─ → IDLE
 ```
 
@@ -299,7 +300,8 @@ The Python `_find_peaks()` and `buckets_to_windows()` functions port cleanly. Al
 
 - 288 smoothed floats = 1,152 bytes — use a static buffer, not heap
 - Peak candidate list: fixed array of 10 structs, ~80 bytes
-- No dynamic allocation anywhere in the recompute path
+- No dynamic allocation in the recompute path itself (PeakFinder, schedule JSON buffer, efficiency calculation)
+- `broadcastUDP()` called at the end of `RECOMPUTE_WRITE` uses ArduinoJson (`JsonDocument`) and a transient `String` for serialisation — same pattern as all other UDP broadcast functions
 
 ### Parameters (matching Python defaults)
 
@@ -358,7 +360,7 @@ All other `NavienLearner` operations (bucket reads/writes to LittleFS, peak-find
 | HTTP `POST /schedule` (port 8080, raw `WiFiServer`) | No change — receives finished schedule from `navien_bootstrap.py` (Step 1) |
 | HTTP `POST /buckets` (port 8080, raw `WiFiServer`) | New path in existing `loopScheduleEndpoint()` dispatcher — calls `_learner->ingestBucketPayload(json)`; uses its own 6KB static buffer; triggers immediate recompute |
 | Telnet `learnerStatus` command | New command in existing `setupTelnetCommands()` — prints bucket fill, last recompute, and per-day predicted/measured/gap table |
-| UDP broadcast (port 2025, existing `AsyncUDP`) | Call `_learner->broadcastUDP()` after `RECOMPUTE_WRITE`; emits a `"type":"learner"` JSON packet consistent with existing packet types |
+| UDP broadcast (port 2025, existing `AsyncUDP`) | `recomputeWrite()` calls private `broadcastUDP()` after mutex handoff; emits a `"type":"learner"` JSON packet consistent with existing packet types |
 | Web status page (`navienStatus` callback) | Call `_learner->appendStatusHTML(page)` within existing `navienStatus` callback to append the Learner Status section |
 
 ---
@@ -513,11 +515,12 @@ After every `RECOMPUTE_WRITE` the device broadcasts the new schedule and efficie
 
 ### Trigger Points
 
-The UDP broadcast fires exactly once per nightly recompute cycle, immediately after `RECOMPUTE_WRITE` completes. The `learnerStatus` Telnet command displays the same data locally but does not trigger a broadcast.
+The UDP broadcast fires at the end of every `RECOMPUTE_WRITE`, immediately after the mutex handoff to Core 1. This includes both the nightly midnight recompute and any manual recompute triggered by `requestRecompute()` (e.g. after seeding buckets via `POST /buckets`). The `learnerStatus` Telnet command displays the same data locally but does not trigger a broadcast.
 
 | Trigger | What is sent |
 |---|---|
-| `RECOMPUTE_WRITE` completes (nightly, midnight + 2min) | Full schedule + predicted + measured efficiency snapshot |
+| `RECOMPUTE_WRITE` completes (nightly, midnight + 2 min) | Full schedule + predicted + measured efficiency snapshot |
+| `RECOMPUTE_WRITE` completes (manual, after `requestRecompute()`) | Same — the logger stays aligned after a seed or manual trigger |
 
 ### JSON Packet Format
 
@@ -528,32 +531,17 @@ A new packet type `"learner"` consistent with the existing packet types. The Pi'
   "type": "learner",
   "last_recompute": 1743292920,
   "bucket_fill_pct": 7.0,
-  "schedule": [
-    {
-      "dow": 0,
-      "dow_name": "Sunday",
-      "slots": [
-        { "start_min": 360, "end_min": 480 },
-        { "start_min": 1080, "end_min": 1170 }
-      ],
-      "predicted_pct": 72.3,
-      "measured_pct": 68.1,
-      "gap_pct": -4.2,
-      "cold_starts_4wk": 23
-    },
-    {
-      "dow": 1,
-      "dow_name": "Monday",
-      "slots": [
-        { "start_min": 390, "end_min": 510 },
-        { "start_min": 1110, "end_min": 1200 }
-      ],
-      "predicted_pct": 88.5,
-      "measured_pct": 91.2,
-      "gap_pct": 2.7,
-      "cold_starts_4wk": 31
-    }
-  ],
+  "sun_slots": "06:00-08:00,18:00-19:30",
+  "sun_predicted_pct": 72.3,
+  "sun_measured_pct": 68.1,
+  "sun_gap_pct": -4.2,
+  "sun_cold_starts_4wk": 23,
+  "mon_slots": "06:30-08:30,18:30-20:00",
+  "mon_predicted_pct": 88.5,
+  "mon_measured_pct": 91.2,
+  "mon_gap_pct": 2.7,
+  "mon_cold_starts_4wk": 31,
+  "... (tue through sat follow same pattern) ...": "",
   "debug": ""
 }
 ```
@@ -563,35 +551,31 @@ Fields:
 | Field | Type | Description |
 |---|---|---|
 | `last_recompute` | int | Unix timestamp of last recompute |
-| `bucket_fill_pct` | float | Percentage of 2016 buckets that are non-zero |
-| `schedule[].dow` | int | Day of week, 0=Sunday .. 6=Saturday |
-| `schedule[].dow_name` | string | Human-readable day name |
-| `schedule[].slots[].start_min` | int | Slot start in minutes since midnight |
-| `schedule[].slots[].end_min` | int | Slot end in minutes since midnight |
-| `schedule[].predicted_pct` | float | Predicted efficiency % from bucket analysis |
-| `schedule[].measured_pct` | float | Measured efficiency % from rolling 4-week window; omitted if no data yet |
-| `schedule[].gap_pct` | float | `predicted - measured`; omitted if measured not yet available |
-| `schedule[].cold_starts_4wk` | int | Cold-starts observed in rolling 4-week window for this day |
+| `bucket_fill_pct` | float | Percentage of 2016 buckets that are non-zero (1 decimal place) |
+| `{pfx}_slots` | string | Slots for that day as `"HH:MM-HH:MM,..."` (empty string if no slots); `{pfx}` is `sun`/`mon`/`tue`/`wed`/`thu`/`fri`/`sat` |
+| `{pfx}_predicted_pct` | float | Predicted efficiency % from bucket analysis (1 decimal place); omitted if insufficient data |
+| `{pfx}_measured_pct` | float | Measured efficiency % from rolling 4-week window (1 decimal place); omitted if no cold-starts yet |
+| `{pfx}_gap_pct` | float | `predicted - measured` (1 decimal place); omitted if either value is unavailable |
+| `{pfx}_cold_starts_4wk` | int | Cold-starts observed in rolling 4-week window for this day; always present |
 | `debug` | string | Empty string (satisfies existing packet contract) |
 
-All 7 days are always present in the `schedule` array. Days with no schedule slots have an empty `slots` array. `measured_pct` and `gap_pct` are omitted for days with no cold-starts in the rolling window rather than sent as zero, preventing false readings in Grafana before data accumulates. Slot times in minutes since midnight are unambiguous integers, directly queryable without string parsing.
+All 7 days are always present. `{pfx}_measured_pct` and `{pfx}_gap_pct` are omitted rather than zero for days with no cold-starts yet, preventing false readings in Grafana before data accumulates. The flat structure means `navien_listener.py` can pass `payload['fields'] = data` directly to InfluxDB without any custom flattening — no listener changes needed.
 
 ### Total Payload Size
 
-A complete `learner` packet with 7 days and up to 3 slots per day is approximately **900–1,100 bytes** — well within a single UDP datagram.
+A complete `learner` packet with 7 days is approximately **600–750 bytes** — smaller than the previous nested format and well within a single UDP datagram.
 
-### Suggested InfluxDB Measurements (Pi Logger)
+### InfluxDB Storage (Pi Logger)
 
-The Pi logger handles the new `learner` packet type and writes two measurements per packet:
-
-| Measurement | Tags | Fields |
-|---|---|---|
-| `navien_schedule` | `dow` | `slot1_start`, `slot1_end`, `slot2_start`, `slot2_end`, `slot3_start`, `slot3_end` |
-| `navien_efficiency` | `dow` | `predicted`, `measured`, `gap`, `cold_starts` |
+The existing `navien_listener.py` requires no changes. When it receives a `learner` packet it calls `influxdb_publish("learner", data)`, which sets `measurement = "learner"` and `fields = data`. Because all fields are flat scalars (int, float, or string), the InfluxDB Python client writes them directly as line protocol fields. This produces one measurement `learner` per recompute with all per-day efficiency and slot data as individual fields.
 
 ### Memory Impact
 
-No additional heap allocation. The JSON payload is built into a transient `String` on the Core 0 task stack during `broadcastUDP()` and released immediately after transmission.
+`broadcastUDP()` allocates a transient `JsonDocument` and `String` on the heap during serialisation and releases them immediately after `udp.broadcastTo()` returns — the same pattern used by `waterToJSON()`, `gasToJSON()`, and other broadcast functions in NavienBroadcaster.ino. No persistent heap growth.
+
+### On-Wire Types
+
+Float fields (`bucket_fill_pct`, `{pfx}_predicted_pct`, etc.) are serialised using `serialized(String(x, 1))`. `serialized()` inserts its argument verbatim into the JSON output without quoting, so these appear as **bare JSON numbers** with 1 decimal place (e.g. `"bucket_fill_pct":7.0`), not strings. Python's `json.loads()` parses them as floats, and InfluxDB stores them as float fields — directly graphable in Grafana. This is the same pattern used by the `flow_lpm`, `set_temp`, and other float fields in water/gas packets.
 
 ---
 
@@ -1034,7 +1018,7 @@ Constraints derived from `BEHAVIOR_SPEC.md` that govern how this feature is impl
 | 5 | Full recompute integration | Wire RECOMPUTE states; Core 0 writes `_pendingScheduleJSON` + sets `_newScheduleReady`; Core 1 `loop()` is sole applier via `setWeekScheduleFromJSON()`. |
 | 6 | Annual decay | Year-check on startup and midnight transition. |
 | 7 | Efficiency tracking | Predicted efficiency in `RECOMPUTE_WRITE`; measured rolling window updated on Core 0 in `idleStep()` (via `recircAtStart` field in `PendingColdStart`); `learnerStatus` Telnet command. |
-| 8 | UDP broadcast | `broadcastUDP()` called after `RECOMPUTE_WRITE` only (nightly); emits `"type":"learner"` JSON packet; verify receipt in InfluxDB. |
+| 8 | UDP broadcast | `broadcastUDP()` called after every `RECOMPUTE_WRITE` (nightly and manual); emits `"type":"learner"` JSON packet; verify receipt in InfluxDB. |
 | 9 | `POST /buckets` endpoint | ESP32 ingest handler: parse sparse JSON, merge/replace `_buckets`, write LittleFS, trigger recompute. |
 | 10 | `navien_bootstrap.py` | Pi Step 1: full-history peak-finding → push finished schedule via `POST /schedule`. |
 | 11 | `navien_bucket_export.py` | Pi Step 2: full-history bucket extraction → push raw bucket data via `POST /buckets`. Then disable Pi cron. |

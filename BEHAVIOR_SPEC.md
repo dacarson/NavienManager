@@ -353,7 +353,7 @@ Each packet type maintains a "previous raw hex" string. A broadcast is only sent
 
 ### JSON Packet Formats
 
-All packets include a `"debug"` field containing the raw packet as a hex string (uppercase, space-separated bytes).
+RS485-derived packets (`water`, `gas`, `command`, `announce`) include a `"debug"` field containing the raw packet as a hex string (uppercase, space-separated bytes). The `learner` packet also includes `"debug"` but it is always an empty string — it is a computed packet with no corresponding raw RS485 bytes.
 
 **Water packet** (`"type": "water"`):
 
@@ -410,6 +410,25 @@ All packets include a `"debug"` field containing the raw packet as a hex string 
 | Field | Type | Description |
 |---|---|---|
 | `navilink_present` | int (0/1) | Whether a NaviLink was detected |
+
+**Learner packet** (`"type": "learner"`):
+
+Emitted by `NavienLearner::broadcastUDP()` at the end of every `RECOMPUTE_WRITE` — both the nightly midnight recompute and any manual recompute triggered by `requestRecompute()` (e.g. after seeding buckets via `POST /buckets`). Not subject to the raw-hex duplicate throttle used by RS485-derived packets.
+
+All per-day fields use a 3-letter day prefix: `sun`, `mon`, `tue`, `wed`, `thu`, `fri`, `sat`. The structure is fully flat so that `navien_listener.py` can pass `payload['fields'] = data` directly to InfluxDB without custom flattening.
+
+| Field | Type | Description |
+|---|---|---|
+| `last_recompute` | int | Unix timestamp of the completed recompute |
+| `bucket_fill_pct` | float (1 dp) | Percentage of 2016 buckets (7 days × 288 five-minute slots) that have at least one cold-start recorded |
+| `{pfx}_slots` | string | Recirculation schedule slots for that day, encoded as `"HH:MM-HH:MM,..."` (empty string if no slots were found) |
+| `{pfx}_predicted_pct` | float (1 dp) | Predicted efficiency: fraction of demand buckets that fall inside or within 15 min after a slot; omitted if bucket data is insufficient |
+| `{pfx}_measured_pct` | float (1 dp) | Measured efficiency from the rolling 4-week cold-start window; omitted if no cold-starts have been observed yet for that day |
+| `{pfx}_gap_pct` | float (1 dp) | `predicted - measured`; omitted if either value is unavailable |
+| `{pfx}_cold_starts_4wk` | int | Cold-starts observed for that day across the rolling 4-week window; always present |
+| `debug` | string | Always empty (`""`) |
+
+Float fields (`bucket_fill_pct`, `{pfx}_predicted_pct`, etc.) use `serialized(String(x, 1))` and appear as bare JSON numbers (e.g. `7.0`), not quoted strings. Python's `json.loads()` parses them as floats; InfluxDB stores them as float fields.
 
 ---
 
