@@ -70,6 +70,7 @@ NavienLearner::NavienLearner()
       _recomputeDay(0),
       _lastRecomputeYday(-1),
       _startupDecayDone(false),
+      _lastRecomputeTime(0),
       _scheduleHandoffMutex(nullptr),
       _newScheduleReady(false),
       _measuredHead(0),
@@ -78,8 +79,12 @@ NavienLearner::NavienLearner()
     memset(_measured,            0, sizeof(_measured));
     memset(_weekSlots,           0, sizeof(_weekSlots));
     memset(_weekSlotCount,       0, sizeof(_weekSlotCount));
-    memset(_predictedEfficiency, 0, sizeof(_predictedEfficiency));
     memset(_pendingScheduleJSON, 0, sizeof(_pendingScheduleJSON));
+    // NAN cannot be set via memset (its bit pattern is not 0); loop instead.
+    // This ensures N/A is displayed before the first recompute completes.
+    for (int i = 0; i < BUCKET_DAYS; i++) {
+        _predictedEfficiency[i] = NAN;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -307,7 +312,8 @@ void NavienLearner::idleStep() {
     // the new schedule is computed.
     time_t now = time(nullptr);
     if (now > 0) {
-        struct tm *t = localtime(&now);
+        struct tm tm_buf;
+        struct tm *t = localtime_r(&now, &tm_buf);
         if (t->tm_hour == 0 && t->tm_min >= 2 &&
             t->tm_yday != _lastRecomputeYday) {
             _lastRecomputeYday = t->tm_yday;
@@ -343,7 +349,8 @@ void NavienLearner::decayCheck() {
         return;
     }
 
-    struct tm *t        = localtime(&now);
+    struct tm  tm_buf;
+    struct tm *t        = localtime_r(&now, &tm_buf);
     uint16_t  this_year = (uint16_t)(t->tm_year + 1900);
     uint16_t  stored_year = _store.data().current_year;
 
@@ -415,7 +422,41 @@ void NavienLearner::recomputeWrite() {
         return;
     }
 
-    // Phase 7 will compute _predictedEfficiency[] here.
+    // Compute predicted efficiency from the new schedule and bucket data.
+    // A bucket with raw_count > 0 is "schedulable" if it falls inside a slot
+    // or within HOT_WINDOW_MIN minutes after a slot ends (the pipe stays hot
+    // briefly after recirculation stops).
+    // predicted% = covered_schedulable / total_schedulable × 100
+    static constexpr int HOT_WINDOW_MIN = 15;
+    for (int dow = 0; dow < BUCKET_DAYS; dow++) {
+        int covered = 0, schedulable = 0;
+        for (int b = 0; b < BUCKET_PER_DAY; b++) {
+            if (_store.data().buckets[dow][b].raw_count == 0) continue;
+            int  bucket_min = b * 5;  // minute-of-day for this bucket
+            bool in_slot    = false;
+            bool near_after = false;
+            for (int s = 0; s < _weekSlotCount[dow]; s++) {
+                int start = (int)_weekSlots[dow][s].start_min;
+                int end   = (int)_weekSlots[dow][s].end_min;
+                if (bucket_min >= start && bucket_min < end) {
+                    in_slot = true;
+                    break;  // slots don't overlap; no need to check further
+                }
+                if (bucket_min >= end && bucket_min < end + HOT_WINDOW_MIN) {
+                    near_after = true;
+                    // keep checking — bucket might fall inside a later slot
+                }
+            }
+            if (in_slot || near_after) {
+                schedulable++;
+                if (in_slot) covered++;
+            }
+        }
+        _predictedEfficiency[dow] = (schedulable > 0)
+            ? (covered * 100.0f / schedulable)
+            : NAN;
+    }
+    _lastRecomputeTime = time(nullptr);
 
     // Hand off to Core 1 under mutex.  portMAX_DELAY is safe: Core 1 holds
     // this mutex only for a string copy (a few µs), never during NVS writes.
@@ -429,6 +470,132 @@ void NavienLearner::recomputeWrite() {
     // Phase 8 will call broadcastUDP() here.
 
     Serial.println("NavienLearner: recompute complete, new schedule ready");
+}
+
+// ---------------------------------------------------------------------------
+// appendStatusHTML() — build Learner Status section for the web status page.
+// Called from navienStatus() on Core 1; reads _measured[] as coarse stats
+// without locking (see header comment on _measured).
+// ---------------------------------------------------------------------------
+
+void NavienLearner::appendStatusHTML(String &page) const {
+    static const char *dayNames[] = {
+        "Sunday","Monday","Tuesday","Wednesday",
+        "Thursday","Friday","Saturday"
+    };
+
+    page += "<h2>Learner Status</h2>";
+
+    // Last recompute timestamp and age.
+    if (_lastRecomputeTime > 0) {
+        char tbuf[32];
+        struct tm  tm_buf;
+        struct tm *t = localtime_r(&_lastRecomputeTime, &tm_buf);
+        strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M", t);
+        time_t elapsed = time(nullptr) - _lastRecomputeTime;
+        char abuf[32];
+        if (elapsed >= 3600) {
+            snprintf(abuf, sizeof(abuf), "%dh ago", (int)(elapsed / 3600));
+        } else {
+            snprintf(abuf, sizeof(abuf), "%dmin ago", (int)(elapsed / 60));
+        }
+        page += "<p>Last recompute: ";
+        page += tbuf;
+        page += " (";
+        page += abuf;
+        page += ")</p>";
+    } else {
+        page += "<p>Last recompute: never</p>";
+    }
+
+    // Bucket fill.
+    int nonZero = _store.nonZeroCount();
+    int total   = BUCKET_DAYS * BUCKET_PER_DAY;
+    {
+        char fbuf[64];
+        snprintf(fbuf, sizeof(fbuf),
+                 "<p>Bucket fill: %d / %d non-zero (%.1f%%)</p>",
+                 nonZero, total, nonZero * 100.0f / total);
+        page += fbuf;
+    }
+
+    // Per-day efficiency table.
+    page += "<table style='margin:auto;border-collapse:collapse;color:white;font-size:14px'>"
+            "<tr>"
+            "<th style='padding:4px 12px;text-align:left'>Day</th>"
+            "<th style='padding:4px 12px'>Predicted</th>"
+            "<th style='padding:4px 12px'>Measured</th>"
+            "<th style='padding:4px 12px'>Gap</th>"
+            "<th style='padding:4px 12px'>Cold-starts (4wk)</th>"
+            "</tr>";
+
+    float sumPred = 0.0f, sumMeas = 0.0f;
+    int   cntPred = 0,    cntMeas = 0;
+
+    for (int dow = 0; dow < BUCKET_DAYS; dow++) {
+        uint32_t tot = 0, cov = 0;
+        for (int w = 0; w < 4; w++) {
+            tot += _measured[w].total[dow];
+            cov += _measured[w].covered[dow];
+        }
+        float measPct = (tot > 0) ? (cov * 100.0f / tot) : NAN;
+        float predPct = _predictedEfficiency[dow];
+
+        char predStr[12], measStr[12], gapStr[16];
+        const char *gapColor = "white";
+
+        if (!isnan(predPct)) {
+            snprintf(predStr, sizeof(predStr), "%.1f%%", predPct);
+            sumPred += predPct;
+            cntPred++;
+        } else {
+            snprintf(predStr, sizeof(predStr), "N/A");
+        }
+        if (!isnan(measPct)) {
+            snprintf(measStr, sizeof(measStr), "%.1f%%", measPct);
+            sumMeas += measPct;
+            cntMeas++;
+        } else {
+            snprintf(measStr, sizeof(measStr), "N/A");
+        }
+        if (!isnan(predPct) && !isnan(measPct)) {
+            float gap = predPct - measPct;
+            snprintf(gapStr, sizeof(gapStr), "%+.1f%%", gap);
+            float absGap = fabsf(gap);
+            gapColor = (absGap < 10.0f) ? "#28a745"
+                     : (absGap < 25.0f) ? "#ffc107"
+                                        : "#dc3545";
+        } else {
+            snprintf(gapStr, sizeof(gapStr), "N/A");
+        }
+
+        page += "<tr><td style='padding:4px 12px;text-align:left'>";
+        page += dayNames[dow];
+        page += "</td><td style='padding:4px 12px;text-align:center'>";
+        page += predStr;
+        page += "</td><td style='padding:4px 12px;text-align:center'>";
+        page += measStr;
+        page += "</td><td style='padding:4px 12px;text-align:center;color:";
+        page += gapColor;
+        page += "'>";
+        page += gapStr;
+        page += "</td><td style='padding:4px 12px;text-align:center'>";
+        page += String((uint32_t)tot);
+        page += "</td></tr>";
+    }
+
+    // Weekly average row.
+    char avgPred[12] = "N/A", avgMeas[12] = "N/A";
+    if (cntPred > 0) snprintf(avgPred, sizeof(avgPred), "%.1f%%", sumPred / cntPred);
+    if (cntMeas > 0) snprintf(avgMeas, sizeof(avgMeas), "%.1f%%", sumMeas / cntMeas);
+    page += "<tr style='border-top:1px solid #555'>"
+            "<td style='padding:4px 12px;text-align:left'><b>Weekly avg</b></td>"
+            "<td style='padding:4px 12px;text-align:center'><b>";
+    page += avgPred;
+    page += "</b></td><td style='padding:4px 12px;text-align:center'><b>";
+    page += avgMeas;
+    page += "</b></td><td></td><td></td></tr>";
+    page += "</table>";
 }
 
 // ---------------------------------------------------------------------------

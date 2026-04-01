@@ -100,6 +100,17 @@ public:
     // Returns true and fills out_json with the schedule JSON if ready.
     bool checkNewSchedule(String &out_json);
 
+    // Wall time of the last completed RECOMPUTE_WRITE (0 = never).
+    time_t lastRecomputeTime() const { return _lastRecomputeTime; }
+
+    // Per-day predicted efficiency from the last recompute (NAN if insufficient
+    // bucket data).  Index 0=Sunday .. 6=Saturday.
+    const float *predictedEfficiency() const { return _predictedEfficiency; }
+
+    // Append a Learner Status HTML section to page.  Called from the web status
+    // callback on Core 1; reads _measured[] as coarse stats without locking.
+    void appendStatusHTML(String &page) const;
+
     bool isDisabled() const { return _learnerDisabled; }
 
     // Cold-start detection thresholds (seconds)
@@ -145,6 +156,7 @@ private:
     int           _recomputeDay;        // 0–6; current day being processed in RECOMPUTING
     int           _lastRecomputeYday;   // tm_yday of last midnight recompute trigger (-1 = never)
     bool          _startupDecayDone;    // true once the one-shot startup decay check has run
+    time_t        _lastRecomputeTime;   // wall time of last RECOMPUTE_WRITE (0 = never)
 
     // Capacity for the schedule JSON buffer.
     // Worst case: 7 days × 3 slots, fully expanded ≈ 1309 bytes; 1400 gives margin.

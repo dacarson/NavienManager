@@ -383,7 +383,7 @@ predicted%          = covered_schedulable / total_schedulable × 100
 
 Tracks what actually happened: of all cold-starts the device observed, what fraction had recirculation already running at the moment the tap opened (i.e. the schedule fired in time).
 
-`onNavienState()` already computes `_recircAtStart` for every cold-start. Measured efficiency requires only incrementing two counters per cold-start — no additional I/O, no flash access.
+The cold-start detector in `onNavienState()` already captures `_recircAtStart` at tap-open time.  That value is forwarded to Core 0 via the `PendingColdStart` queue struct (field `recircAtStart`).  Core 0's `idleStep()` increments the counters when it consumes each event — keeping `_measured[]` and `_measuredHead` written by exactly one core with no synchronisation needed.
 
 **Rolling window storage** — 4 weeks × 7 days × 2 counters:
 
@@ -396,14 +396,14 @@ WeekMeasured _measured[4];  // 112 bytes total, lives in RAM
 uint8_t      _measuredHead; // index of current week (0–3), rotates Sunday midnight
 ```
 
-On every qualifying cold-start in `onNavienState()`:
+On Core 0, in `idleStep()`, after consuming each `PendingColdStart` from the queue:
 ```cpp
-// Use _runDow (tap-open day), not localtime(&now) (tap-close day).
-// Consistent with _runBucket — demand timestamp semantics are always anchored
+// Use cs.dow (tap-open day), not localtime(&now) (tap-close day).
+// Consistent with cs.bucket — demand timestamp semantics are always anchored
 // to when the cold-start began, not when the run ended.
-_measured[_measuredHead].total[_runDow]++;
-if (_recircAtStart)
-    _measured[_measuredHead].covered[_runDow]++;
+_measured[_measuredHead].total[cs.dow]++;
+if (cs.recircAtStart)
+    _measured[_measuredHead].covered[cs.dow]++;
 ```
 
 On Sunday midnight (same moment as nightly recompute):
@@ -1033,7 +1033,7 @@ Constraints derived from `BEHAVIOR_SPEC.md` that govern how this feature is impl
 | 4 | Peak-finding C++ port | Port `_find_peaks()` and `buckets_to_windows()`. Validate against known Python output. |
 | 5 | Full recompute integration | Wire RECOMPUTE states; Core 0 writes `_pendingScheduleJSON` + sets `_newScheduleReady`; Core 1 `loop()` is sole applier via `setWeekScheduleFromJSON()`. |
 | 6 | Annual decay | Year-check on startup and midnight transition. |
-| 7 | Efficiency tracking | Predicted efficiency in `RECOMPUTE_WRITE`; measured rolling window in `onNavienState()`; `learnerStatus` Telnet command. |
+| 7 | Efficiency tracking | Predicted efficiency in `RECOMPUTE_WRITE`; measured rolling window updated on Core 0 in `idleStep()` (via `recircAtStart` field in `PendingColdStart`); `learnerStatus` Telnet command. |
 | 8 | UDP broadcast | `broadcastUDP()` called after `RECOMPUTE_WRITE` only (nightly); emits `"type":"learner"` JSON packet; verify receipt in InfluxDB. |
 | 9 | `POST /buckets` endpoint | ESP32 ingest handler: parse sparse JSON, merge/replace `_buckets`, write LittleFS, trigger recompute. |
 | 10 | `navien_bootstrap.py` | Pi Step 1: full-history peak-finding → push finished schedule via `POST /schedule`. |

@@ -23,7 +23,9 @@ SOFTWARE.
 #include "HomeSpan.h"
 
 #include "FakeGatoScheduler.h"
+#include "NavienLearner.h"
 extern FakeGatoScheduler* scheduler;
+extern NavienLearner *learner;
 
 String getNextTransitionTime() {
   time_t nextStateTime;
@@ -159,6 +161,10 @@ void navienStatus(String &html) {
     + statusCard("Next Transition", scheduler->enabled() ? "status-warning" : "status-ok", getNextTransitionTime())
     + statusCard("Next State", "status-ok", getNextTransitionState())
     + "</div>";
+
+    if (learner && !learner->isDisabled()) {
+        learner->appendStatusHTML(html);
+    }
 
     html += "<h2>System Log</h2>"
     "<style>.tab2{margin: 0 auto;width:80%;border-collapse:collapse;background:#2a2a3a;color:white;}</style>";
