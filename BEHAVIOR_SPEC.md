@@ -440,14 +440,29 @@ The scheduler time slots can be configured from outside the device in two ways: 
 
 The firmware listens for HTTP POST requests on **port 8080**. HomeSpan owns port 80 and provides no public API for custom POST handlers, so a raw `WiFiServer` (part of `<WiFi.h>`, zero additional flash cost) is used instead of a separate HTTP server library.
 
-- **Path:** `POST /schedule`
+Two paths are dispatched by `loopScheduleEndpoint()` on the same port:
+
+#### `POST /schedule`
+
 - **Content-Type:** `application/json`
 - **Response 200:** schedule was valid and applied.
 - **Response 400:** JSON was malformed or contained out-of-range values.
+- Uses a fixed 2 KB static body buffer.
 
-The endpoint is started in `setupScheduleEndpoint()` (called from `onWifiConnected`) and polled in `loopScheduleEndpoint()` (called from the main loop). It uses a fixed 2 KB static buffer for the request body and a 1-second read timeout — sufficient for a LAN client.
+#### `POST /buckets` (bootstrap bucket ingest — Phase 9)
 
-### JSON Format
+- **Content-Type:** `application/json`
+- **Response 200:** `{"status":"ok","buckets_written":<n>,"replaced":<bool>}`
+- **Response 400:** schema version mismatch, JSON parse failure, body exceeds 6 KB, or LittleFS write error.
+- **Response 503:** learner object was never instantiated, or `begin()` failed (learner disabled). Both indicate the ingest service is unavailable; the body is `Learner unavailable` in either case.
+- Uses a separate 6 KB static body buffer (never allocated to `/schedule`).
+- **Merge** (`"replace": false`, default): adds `raw` and `score` to existing in-RAM bucket values, then writes once to LittleFS.
+- **Replace** (`"replace": true`): zeros all buckets in RAM first, then applies incoming data and writes once. Safe to re-run if a prior upload was incorrect.
+- Sets `_recomputeRequested` after the write completes so Core 0 runs peak-finding immediately rather than waiting for midnight.
+
+The endpoint is started in `setupScheduleEndpoint()` (called from `onWifiConnected`) and polled in `loopScheduleEndpoint()` (called from the main loop). Both paths share a 1-second read timeout — sufficient for a LAN client.
+
+### JSON Format — `POST /schedule`
 
 ```json
 {
@@ -464,6 +479,34 @@ The endpoint is started in `setupScheduleEndpoint()` (called from `onWifiConnect
 - Each day object has a `slots` array of 0–3 slot objects (matching Eve's UI limit of 3 comfort periods per day).
 - Each slot has `startHour` (0–23), `startMinute` (0–59), `endHour` (0–23), `endMinute` (0–59).
 - Out-of-range values or a missing/wrong-length `schedule` array produce a 400 response.
+
+### JSON Format — `POST /buckets`
+
+```json
+{
+  "schema_version": 1,
+  "current_year": 2025,
+  "replace": false,
+  "days": [
+    {
+      "dow": 0,
+      "buckets": [
+        { "b": 72, "raw": 5,  "score": 12.0 },
+        { "b": 73, "raw": 3,  "score":  7.5 }
+      ]
+    }
+  ]
+}
+```
+
+- `schema_version` must equal `BUCKET_SCHEMA_VERSION` (1) — mismatches produce a 400.
+- `current_year` — optional; if present and non-zero, written into the `BucketFile` header. If omitted or zero: in merge mode the existing header year is left unchanged; in replace mode the year is derived from the system clock (same fallback as `BucketStore::begin()`), so the header is never left at a stale value.
+- `replace` — `false` (default): merge into existing data; `true`: zero all buckets first.
+- `days[].dow` — day of week, 0 = Sunday … 6 = Saturday.
+- `days[].buckets[].b` — 5-minute bucket index (0–287).
+- `days[].buckets[].raw` — unweighted cold-start count to add.
+- `days[].buckets[].score` — weighted score to add.
+- Only non-zero buckets need be included; absent buckets are unchanged (merge) or zero (replace).
 
 ### Internal Mapping
 
@@ -585,6 +628,6 @@ Dependencies: `pip3 install influxdb requests`
 5. On WiFi connect:
    - `setupNavienBroadcaster()`: registers Navien packet callbacks; starts UDP broadcast.
    - `setupTelnetCommands()`: registers all commands; starts Telnet server on port 23.
-   - `setupScheduleEndpoint()`: starts raw `WiFiServer` on port 8080 for pushed schedule updates.
+   - `setupScheduleEndpoint()`: starts raw `WiFiServer` on port 8080 for pushed schedule updates and bucket bootstrap ingest.
 6. Main loop runs: `telnet.loop()`, `loopScheduleEndpoint()`, `navienSerial.loop()`, `homeSpan.poll()`.
 7. Once a timezone is available (`TZ` env var set) and SNTP sync is confirmed, `homeSpan.assumeTimeAcquired()` is called to unlock time-dependent HomeKit features.

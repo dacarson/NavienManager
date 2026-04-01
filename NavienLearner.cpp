@@ -478,6 +478,96 @@ void NavienLearner::recomputeWrite() {
 }
 
 // ---------------------------------------------------------------------------
+// ingestBucketPayload() — public; called from Core 1 during bootstrap only.
+// Parses sparse JSON, merges or replaces _buckets in RAM, writes atomically
+// to LittleFS, then sets _recomputeRequested so Core 0 runs peak-finding
+// immediately rather than waiting for midnight.
+//
+// Returns the number of individual buckets written, or -1 on error.
+// 'replaced' reflects the value of the "replace" field in the payload.
+// ---------------------------------------------------------------------------
+
+int NavienLearner::ingestBucketPayload(const char *json, bool &replaced) {
+    replaced = false;
+
+    if (_learnerDisabled) {
+        Serial.println(F("[learner] POST /buckets: learner disabled — ingest skipped"));
+        return -1;
+    }
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, json);
+    if (err) {
+        Serial.printf("[learner] POST /buckets: JSON parse error: %s\n", err.c_str());
+        return -1;
+    }
+
+    int schema = doc["schema_version"] | -1;
+    if (schema != BUCKET_SCHEMA_VERSION) {
+        Serial.printf("[learner] POST /buckets: schema mismatch %d != %d\n",
+                      schema, BUCKET_SCHEMA_VERSION);
+        return -1;
+    }
+
+    int current_year = doc["current_year"] | 0;
+    replaced = doc["replace"] | false;
+
+    // Apply replace/merge to the in-RAM BucketFile directly, then save once
+    // at the end rather than calling updateBucket() (which would write flash
+    // per bucket — far too slow for a full bootstrap payload).
+    //
+    // Cross-core note: this method runs on Core 1 (Arduino loop) and mutates
+    // _store.data() directly.  Core 0 owns the BucketStore for all normal
+    // operations; no mutex guards this path.  Bootstrap must be run while the
+    // device is quiet — no active recompute and no concurrent cold-start flush
+    // in progress — to avoid a data race on the in-RAM BucketFile.
+    BucketFile &bf = _store.data();
+    if (replaced) {
+        memset(bf.buckets, 0, sizeof(bf.buckets));
+        bf.magic          = BUCKET_MAGIC;
+        bf.schema_version = BUCKET_SCHEMA_VERSION;
+        // Always write an explicit year on replace — same clock fallback as
+        // BucketStore::begin() so the header is never left at a stale value.
+        if (current_year <= 0) {
+            time_t now = time(nullptr);
+            struct tm *t = localtime(&now);
+            current_year = (t && t->tm_year > 100) ? (t->tm_year + 1900) : 2025;
+        }
+        bf.current_year = (uint16_t)current_year;
+    } else if (current_year > 0) {
+        bf.current_year = (uint16_t)current_year;
+    }
+
+    int count = 0;
+    for (JsonObject day : doc["days"].as<JsonArray>()) {
+        int dow = day["dow"] | -1;
+        if (dow < 0 || dow > 6) continue;
+        for (JsonObject bkt : day["buckets"].as<JsonArray>()) {
+            int b = bkt["b"] | -1;
+            if (b < 0 || b >= BUCKET_PER_DAY) continue;
+            uint16_t raw   = (uint16_t)(bkt["raw"]   | 0);
+            float    score = bkt["score"] | 0.0f;
+            bf.buckets[dow][b].raw_count      += raw;
+            bf.buckets[dow][b].weighted_score += score;
+            count++;
+        }
+    }
+
+    if (!_store.save()) {
+        Serial.println(F("[learner] POST /buckets: save failed"));
+        return -1;
+    }
+
+    // Signal Core 0 to run peak-finding immediately with the new data.
+    // Set after save() so Core 0 reads a fully consistent LittleFS image.
+    _recomputeRequested = true;
+
+    Serial.printf("[learner] POST /buckets: wrote %d buckets, replaced=%s\n",
+                  count, replaced ? "true" : "false");
+    return count;
+}
+
+// ---------------------------------------------------------------------------
 // broadcastUDP() — private; emits a "type":"learner" JSON packet over UDP.
 // Called from recomputeWrite() on Core 0 after mutex handoff.
 // Uses ArduinoJson (same pattern as NavienBroadcaster.ino).
@@ -501,7 +591,7 @@ void NavienLearner::broadcastUDP() {
     char key[32];
     for (int dow = 0; dow < BUCKET_DAYS; dow++) {
         // Encode slots as compact string "HH:MM-HH:MM,..." (empty if no slots).
-        char slotStr[64] = "";
+        char slotStr[MAX_SLOTS_PER_DAY * 12] = "";  // "HH:MM-HH:MM," per slot
         int  spos = 0;
         for (int s = 0; s < _weekSlotCount[dow]; s++) {
             spos += snprintf(slotStr + spos, (int)sizeof(slotStr) - spos,

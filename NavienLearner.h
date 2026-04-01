@@ -95,6 +95,14 @@ public:
     // POST /buckets seeds new bucket data).  Safe to call from any core.
     void requestRecompute() { _recomputeRequested = true; }
 
+    // Ingest a sparse bucket payload from POST /buckets (called from Core 1
+    // during bootstrap only).  Parses JSON, merges or replaces _buckets in
+    // RAM, writes atomically to LittleFS, then sets _recomputeRequested.
+    // Returns the number of individual buckets written, or -1 on error
+    // (schema mismatch, parse failure, or save failure).
+    // 'replaced' is set to reflect the value of the "replace" field.
+    int ingestBucketPayload(const char *json, bool &replaced);
+
     // Called from FakeGatoScheduler::loop() on Core 1.  Non-blocking: returns
     // false immediately if no new schedule is ready or the mutex is held.
     // Returns true and fills out_json with the schedule JSON if ready.

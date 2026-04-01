@@ -915,6 +915,8 @@ After writing, sets `_recomputeRequested = true` so the Core 0 task runs peak-fi
 
 After bootstrap the Pi cron job is disabled. The device owns the schedule from this point forward.
 
+> **Timing constraint:** `POST /buckets` runs on Core 1 and mutates the in-RAM `BucketFile` directly. Core 0 owns the `BucketStore` for all normal operations and no mutex guards this path. Run bootstrap only when the device is quiet — no active recompute (avoid the 00:00–00:05 window) and no RS-485 activity that could trigger a concurrent cold-start flush via `updateBucket()`. In practice this means running the Pi scripts mid-morning on a weekday when the heater has been idle for at least 10 minutes.
+
 ---
 
 ## Memory Budget
@@ -995,7 +997,7 @@ Constraints derived from `BEHAVIOR_SPEC.md` that govern how this feature is impl
 
 **`POST /buckets` shares port 8080 via existing `loopScheduleEndpoint()`.** The raw `WiFiServer` on port 8080 already dispatches `POST /schedule`. Path-based dispatch is added to the same handler for `POST /buckets`. The existing 2KB static buffer is sufficient for `/schedule`; `/buckets` uses a separate 6KB static buffer allocated only when that path is matched, avoiding any impact on the existing endpoint.
 
-**UDP broadcast uses existing `AsyncUDP` on port 2025.** The `"learner"` packet type follows the same JSON structure as `"water"`, `"gas"`, `"command"`, and `"announce"` packets. The existing throttle infrastructure (`resetPreviousValues()` every 5 seconds) applies unchanged.
+**UDP broadcast uses existing `AsyncUDP` on port 2025.** The `"learner"` packet type follows the same JSON structure as `"water"`, `"gas"`, `"command"`, and `"announce"` packets. The existing throttle infrastructure (`resetPreviousValues()` every 5 seconds) applies to those RS485-derived packet types unchanged; the `"learner"` packet is not subject to that throttle (it is emitted at most once per recompute, never on every RS485 poll cycle).
 
 **Web status page uses existing `navienStatus` callback.** `NavienLearner::appendStatusHTML()` is called from within the existing `navienStatus` callback, consistent with how other device components contribute to the status page.
 
