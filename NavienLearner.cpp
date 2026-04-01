@@ -69,6 +69,7 @@ NavienLearner::NavienLearner()
       _taskState(IDLE),
       _recomputeDay(0),
       _lastRecomputeYday(-1),
+      _startupDecayDone(false),
       _scheduleHandoffMutex(nullptr),
       _newScheduleReady(false),
       _measuredHead(0),
@@ -217,6 +218,13 @@ void NavienLearner::learnerTask(void *pvParam) {
                 vTaskDelay(pdMS_TO_TICKS(500));
                 break;
 
+            case DECAY_CHECK:
+                // Check for year rollover; apply weighted_score decay if needed.
+                // Always proceeds to RECOMPUTE_LOAD regardless of whether decay ran.
+                self->decayCheck();
+                self->_taskState = RECOMPUTE_LOAD;
+                break;
+
             case RECOMPUTE_LOAD:
                 // Data is already in RAM (BucketStore holds it).
                 // Reset per-day counters and begin processing from day 0.
@@ -253,6 +261,18 @@ void NavienLearner::learnerTask(void *pvParam) {
 // ---------------------------------------------------------------------------
 
 void NavienLearner::idleStep() {
+    // One-shot startup decay: on the first tick where the clock is valid,
+    // call decayCheck() so that year-rollover data is aged before any
+    // recompute or new cold-starts are accumulated.  This handles the case
+    // where the device was powered off over New Year and reboots mid-January.
+    if (!_startupDecayDone) {
+        time_t now = time(nullptr);
+        if (now > 0) {
+            _startupDecayDone = true;
+            decayCheck();  // no-op and no I/O if same year; saves only if year changed
+        }
+    }
+
     // Consume any pending cold-start event from Core 1.
     PendingColdStart cs;
     if (xQueueReceive(_coldStartQueue, &cs, 0) == pdTRUE) {
@@ -274,14 +294,17 @@ void NavienLearner::idleStep() {
     }
 
     // External recompute request (e.g. after POST /buckets).
+    // Routes via DECAY_CHECK so a year-boundary recompute (e.g. seeding new
+    // buckets right after New Year) ages the data before recomputing.
     if (_recomputeRequested) {
         _recomputeRequested = false;
-        _taskState = RECOMPUTE_LOAD;
+        _taskState = DECAY_CHECK;
         return;
     }
 
     // Midnight + 2min check: trigger nightly recompute once per day.
-    // Phase 6 will insert DECAY_CHECK before RECOMPUTE_LOAD.
+    // Goes via DECAY_CHECK first so year-rollover decay is applied before
+    // the new schedule is computed.
     time_t now = time(nullptr);
     if (now > 0) {
         struct tm *t = localtime(&now);
@@ -292,8 +315,62 @@ void NavienLearner::idleStep() {
             if (t->tm_wday == 0) {
                 advanceMeasuredWeek();
             }
-            _taskState = RECOMPUTE_LOAD;
+            _taskState = DECAY_CHECK;
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// decayCheck() — private; apply annual weighted_score decay if needed (Core 0)
+//
+// Compares the year stored in the BucketFile header against the current
+// calendar year.  If they differ, all weighted_scores are multiplied by 2/3
+// to age last-year data from recency weight 3 → 2 (matching Python's
+// recency_weights = [3, 2]).  raw_count is never decayed — it is an
+// occurrence filter that is independent of recency.
+//
+// When the year has changed, current_year in the header is updated and the
+// file is persisted.  If the year matches, the function returns immediately
+// with no I/O.  If the clock is unavailable, the function returns without
+// any change; the startup one-shot check will retry on the next tick, and
+// the midnight path will retry at the next midnight crossing.
+// ---------------------------------------------------------------------------
+
+void NavienLearner::decayCheck() {
+    time_t now = time(nullptr);
+    if (now <= 0) {
+        // Clock not yet set — return without changes; see block comment above.
+        return;
+    }
+
+    struct tm *t        = localtime(&now);
+    uint16_t  this_year = (uint16_t)(t->tm_year + 1900);
+    uint16_t  stored_year = _store.data().current_year;
+
+    if (stored_year == this_year) {
+        return;  // same year — nothing to do
+    }
+
+    if (stored_year != 0) {
+        // Year has rolled over: scale every weighted_score by 2/3.
+        // Derivation: data was accumulated during stored_year at recency ×3;
+        // it is now "last year" data at recency ×2, so divide by 3/2 = ×(2/3).
+        // Multiple-year gaps also apply exactly one decay step (acceptable
+        // simplification for long power-off periods).
+        BucketFile &bf = _store.data();
+        for (int dow = 0; dow < BUCKET_DAYS; dow++) {
+            for (int b = 0; b < BUCKET_PER_DAY; b++) {
+                bf.buckets[dow][b].weighted_score *= (2.0f / 3.0f);
+            }
+        }
+        Serial.printf("NavienLearner: annual decay applied (%u → %u)\n",
+                      stored_year, this_year);
+    }
+
+    // Update the year in the header and persist (with or without decay).
+    _store.data().current_year = this_year;
+    if (!_store.save()) {
+        Serial.println("NavienLearner: decay save failed");
     }
 }
 

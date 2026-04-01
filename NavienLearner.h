@@ -115,7 +115,7 @@ public:
 
 private:
     // Task state machine states (Core 0).
-    enum TaskState { IDLE, RECOMPUTE_LOAD, RECOMPUTING, RECOMPUTE_WRITE };
+    enum TaskState { IDLE, DECAY_CHECK, RECOMPUTE_LOAD, RECOMPUTING, RECOMPUTE_WRITE };
 
     // Compute demand_weight from run characteristics.
     // Returns 0.0 if the event should be discarded.
@@ -123,6 +123,7 @@ private:
 
     // Core 0 state machine helpers.
     void idleStep();       // called every IDLE tick: queue drain, midnight check
+    void decayCheck();     // apply annual weighted_score decay if year has rolled over
     void recomputeWrite(); // builds JSON and hands off to Core 1 via mutex
 
     // --- Cold-start detector state (Core 1 only) ---
@@ -143,6 +144,7 @@ private:
     TaskState     _taskState;
     int           _recomputeDay;        // 0–6; current day being processed in RECOMPUTING
     int           _lastRecomputeYday;   // tm_yday of last midnight recompute trigger (-1 = never)
+    bool          _startupDecayDone;    // true once the one-shot startup decay check has run
 
     // Capacity for the schedule JSON buffer.
     // Worst case: 7 days × 3 slots, fully expanded ≈ 1309 bytes; 1400 gives margin.
