@@ -48,8 +48,9 @@ extern NavienLearner     *learner;
 #define SCHEDULE_BODY_MAX 2048
 static char scheduleBodyBuf[SCHEDULE_BODY_MAX + 1];
 
-// Bucket body buffer: sparse payload; 6 KB covers a full historical bootstrap.
-#define BUCKETS_BODY_MAX (6 * 1024)
+// Bucket body buffer: one day of sparse data at a time (see navien_bucket_export.py).
+// Largest single-day payload is ~12 KB; 14 KB gives headroom.
+#define BUCKETS_BODY_MAX (14 * 1024)
 static char bucketsBodyBuf[BUCKETS_BODY_MAX + 1];
 
 static WiFiServer scheduleServer(8080);

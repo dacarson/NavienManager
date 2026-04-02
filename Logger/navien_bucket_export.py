@@ -72,27 +72,50 @@ def build_bucket_payload(args, local_tz, replace=False):
 
 
 def push_buckets(payload, args):
-    """POST the bucket payload to the ESP32 /buckets endpoint."""
+    """POST the bucket payload to the ESP32 /buckets endpoint one day at a time.
+
+    Sends 7 separate requests (one per day-of-week) to stay within the ESP32's
+    14 KB receive buffer.  The 'replace' flag is forwarded only on the first
+    chunk.  'finalize' is False for all chunks except the last, suppressing a
+    premature recompute on partial data.
+    """
     import requests
 
     url  = f"http://{args.esp32_host}:{args.esp32_port}/buckets"
-    body = json.dumps(payload)
-    print(f"[push] POST {url}  ({len(body)} bytes)")
+    days = payload["days"]
+    total_written = 0
 
-    try:
-        resp = requests.post(url, data=body,
-                             headers={"Content-Type": "application/json"},
-                             timeout=30)
-    except requests.exceptions.RequestException as e:
-        print(f"[push] Connection error: {e}")
-        sys.exit(1)
+    for i, day in enumerate(days):
+        is_last = (i == len(days) - 1)
+        chunk = {
+            "schema_version": payload["schema_version"],
+            "current_year":   payload["current_year"],
+            "replace":        payload["replace"] if i == 0 else False,
+            "finalize":       is_last,
+            "days":           [day],
+        }
+        body = json.dumps(chunk)
+        print(f"[push] POST {url}  day={day['dow']}  ({len(body)} bytes)"
+              f"{'  [finalize]' if is_last else ''}")
 
-    if resp.status_code == 200:
-        print(f"[push] Accepted: {resp.json()}")
-        print("Bootstrap complete. Pi cron job can now be disabled.")
-    else:
-        print(f"[push] Error {resp.status_code}: {resp.text}")
-        sys.exit(1)
+        try:
+            resp = requests.post(url, data=body,
+                                 headers={"Content-Type": "application/json"},
+                                 timeout=30)
+        except requests.exceptions.RequestException as e:
+            print(f"[push] Connection error on day {day['dow']}: {e}")
+            sys.exit(1)
+
+        if resp.status_code == 200:
+            result = resp.json()
+            total_written += result.get("buckets_written", 0)
+            print(f"[push]   -> {result}")
+        else:
+            print(f"[push] Error {resp.status_code} on day {day['dow']}: {resp.text}")
+            sys.exit(1)
+
+    print(f"[push] All days sent. Total buckets written: {total_written}")
+    print("Bootstrap complete. Pi cron job can now be disabled.")
 
 
 def main():
