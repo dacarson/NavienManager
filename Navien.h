@@ -256,7 +256,7 @@ enum CommandActionHotButton {
     uint8_t unknown_45; // 0x00
     uint8_t unknown_46; // 0x01
     uint8_t unknown_47; // 0x00
-    // length is 47, ie 0 - 46
+    // length is 42, ie 0 - 41
   } GAS_DATA;
 
   typedef struct {

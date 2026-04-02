@@ -68,6 +68,7 @@ void setup() {
   Serial.begin(115200);
 
   // Start Serial 2 for Navien
+  navienSerial.setRxBufferSize(1024);  // Expand the receive buffer size to 1024 bytes
   navienSerial.begin(RXD2, TXD2);
   Serial.println(F("Navien Serial Started"));
 
