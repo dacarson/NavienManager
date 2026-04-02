@@ -647,6 +647,8 @@ The `NavienLearner` class autonomously learns and recomputes the recirculation s
 
 **Hardware note — recirc bit clears at tap-open:** When a tap opens while recirculation is running, the Navien heater clears the `recirculation_running` bit in the same RS-485 packet that sets `consumption_active`. The learner therefore tracks the recirc state from the **previous packet** (`_prevRecircRunning`) and uses `recirculation_running || _prevRecircRunning` when capturing `_recircAtStart`, ensuring that a demand that immediately followed recirc is correctly classified as covered.
 
+> **Diagnostic:** if Measured efficiency shows 0.0% for days that have accumulated a significant number of cold-starts (visible in the Cold-starts column), the almost certain cause is that `_prevRecircRunning` is not being maintained — every `_recircAtStart` is being set to false. Verify that `_prevRecircRunning` is updated at the end of every `onNavienState()` call and that `_recircAtStart` is set to `recirculation_running || _prevRecircRunning`, not just `recirculation_running`.
+
 **Queue failure:** If the FreeRTOS cold-start queue cannot be created, `begin()` sets `_learnerDisabled = true` and returns false. All subsequent `onNavienState()` calls return immediately. The rest of the firmware continues normally using the existing NVS/Eve schedule.
 
 ### Background Recompute — Core 0 Task
