@@ -487,10 +487,13 @@ int Navien::send_cmd() {
     return -1;
   }
 
-  // Rate limiting: enforce minimum 2 second interval between any commands
-  // This is needed for commands like recirculation and hotButton that send
-  // two commands in sequence (command + follow-up)
-  if (last_command_sent_time > 0) {
+  // Rate limiting: enforce minimum 2 second interval between consecutive
+  // CONTROL_COMMANDs. This is needed for commands like recirculation and
+  // hotButton that send two commands in sequence (command + follow-up).
+  // Does not apply after an announce, only after a prior control command.
+  if (last_command_sent_time > 0 &&
+      send_buffer.cmd.cmd_type == CONTROL_COMMAND &&
+      last_sent_control_packet.cmd.cmd_type == CONTROL_COMMAND) {
     unsigned long time_since_last = millis() - last_command_sent_time;
     if (time_since_last < MIN_COMMAND_INTERVAL_MS) {
       // Not enough time has passed, re-queue the command
