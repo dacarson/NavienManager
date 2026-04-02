@@ -68,6 +68,7 @@ NavienLearner::NavienLearner()
       _runDow(0),
       _runBucket(0),
       _recircAtStart(false),
+      _prevRecircRunning(false),
       _coldStartQueue(nullptr),
       _taskHandle(nullptr),
       _recomputeRequested(false),
@@ -168,7 +169,11 @@ void NavienLearner::onNavienState(bool consumption_active,
 
             _runStart        = now;
             _runDurationSec  = 0;
-            _recircAtStart   = recirculation_running;
+            // Use the previous packet's recirc state: when the tap opens, the
+            // heater clears the recirc bit in the same packet it sets the
+            // consumption bit, so recirculation_running is already false here
+            // even if recirc was running a moment ago.
+            _recircAtStart   = recirculation_running || _prevRecircRunning;
             _inRun           = true;
             // Event not dispatched yet — duration unknown until run ends.
         } else {
@@ -202,6 +207,8 @@ void NavienLearner::onNavienState(bool consumption_active,
             xQueueOverwrite(_coldStartQueue, &cs);
         }
     }
+
+    _prevRecircRunning = recirculation_running;
 }
 
 // ---------------------------------------------------------------------------
@@ -511,6 +518,11 @@ int NavienLearner::ingestBucketPayload(const char *json, bool &replaced) {
 
     int current_year = doc["current_year"] | 0;
     replaced = doc["replace"] | false;
+    // finalize=true (default) triggers an immediate recompute after ingest.
+    // Set to false by navien_bucket_export.py for all but the last day chunk
+    // so that intermediate POST /buckets requests don't kick off a recompute
+    // on partial data.
+    bool finalize = doc["finalize"] | true;
 
     // Apply replace/merge to the in-RAM BucketFile directly, then save once
     // at the end rather than calling updateBucket() (which would write flash
@@ -560,10 +572,13 @@ int NavienLearner::ingestBucketPayload(const char *json, bool &replaced) {
 
     // Signal Core 0 to run peak-finding immediately with the new data.
     // Set after save() so Core 0 reads a fully consistent LittleFS image.
-    _recomputeRequested = true;
+    // Suppressed for intermediate chunk requests (finalize=false) to avoid
+    // running peak-finding on partial data when bootstrap sends one day at a time.
+    if (finalize)
+        _recomputeRequested = true;
 
-    Serial.printf("[learner] POST /buckets: wrote %d buckets, replaced=%s\n",
-                  count, replaced ? "true" : "false");
+    Serial.printf("[learner] POST /buckets: wrote %d buckets, replaced=%s, finalize=%s\n",
+                  count, replaced ? "true" : "false", finalize ? "true" : "false");
     return count;
 }
 

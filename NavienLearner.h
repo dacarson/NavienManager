@@ -154,6 +154,7 @@ private:
     int      _runDow;            // day-of-week pinned at run start (0=Sun)
     int      _runBucket;         // 5-min bucket index pinned at run start
     bool     _recircAtStart;     // was recirc running when run started?
+    bool     _prevRecircRunning; // recirc state from the previous packet
 
     // --- Cross-core queue (capacity 1, Core 1 writes, Core 0 reads) ---
     QueueHandle_t _coldStartQueue;
