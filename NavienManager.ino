@@ -84,6 +84,11 @@ void setup() {
   homeSpan.setHostNameSuffix("Controller");
   homeSpan.begin(Category::Thermostats,"Navien Manager");
   homeSpan.enableOTA(false, false);
+  homeSpan.setStatusCallback([](HS_STATUS status) {
+    if (status == HS_OTA_STARTED && learner && !learner->isDisabled()) {
+      learner->saveMeasured();
+    }
+  });
 
   setupHomeSpanWeb(); // Setup the homespan webpage
 

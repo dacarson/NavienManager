@@ -245,6 +245,8 @@ The Hot Water switch and the thermostat `TargetHeatingCoolingState` characterist
 
 OTA is enabled (HomeSpan `enableOTA(false, false)`) without requiring a password and without forcing a reboot.
 
+A `setStatusCallback` lambda is registered in `setup()`. When HomeSpan fires `HS_OTA_STARTED` (just before the OTA transfer begins and the device reboots), the callback calls `learner->saveMeasured()` to flush the rolling measured-efficiency window to LittleFS so it survives the update.
+
 ---
 
 ## Telnet Support
@@ -284,6 +286,7 @@ A Telnet server listens on **port 23**. It is started after WiFi connects. All c
 | `eraseHistory` | — | Erases all history entries from LittleFS and memory. |
 | `fsStat` | — | Prints LittleFS partition total, used, and free bytes. |
 | `learnerStatus` | — | Prints on-device schedule learner status: last recompute time, bucket fill percentage, and a per-day table showing predicted efficiency, measured efficiency, gap, and rolling 4-week cold-start count. |
+| `saveLearner` | — | Immediately persists the rolling measured-efficiency window to `/navien/measured.bin` on LittleFS. Useful before a planned reboot that is not triggered through OTA. |
 | `reboot` | — | Disconnects the Telnet client and restarts the ESP32. |
 | `bye` | — | Disconnects the Telnet session. |
 
@@ -696,6 +699,11 @@ Two efficiency metrics are maintained continuously and cached for display.
 
 `measured% = covered / total × 100` summed across all 4 weeks per day. Days with no cold-starts in the window report N/A rather than zero.
 
+**Measured efficiency persistence** — the window (`_measured[4]` + `_measuredHead`) is persisted to `/navien/measured.bin` on LittleFS and reloaded on `begin()`, so it survives reboots and OTA firmware updates. The file uses the same atomic `.tmp` → rename write strategy as `buckets.bin`. It is saved automatically at three points:
+- **Sunday midnight** — when `advanceMeasuredWeek()` rotates the window.
+- **OTA start** — via the `HS_OTA_STARTED` HomeSpan status callback, just before the device reboots to apply the update.
+- **On demand** — via the Telnet `saveLearner` command, for planned reboots not triggered through OTA.
+
 **The gap metric:**
 
 ```
@@ -730,12 +738,13 @@ Both steps must be run in order after first flash. They are also used when `buck
 ## Startup Sequence
 
 1. UART2 initialized for Navien RS485 at 19200 baud.
-2. HomeSpan initialized; WiFi credentials managed by HomeSpan pairing. OTA enabled.
-3. HomeSpan web log configured with custom CSS and the `navienStatus` callback.
-4. HomeKit accessories registered: `DEV_Navien` thermostat with Eve history and scheduler.
-5. On WiFi connect:
+2. `NavienLearner::begin()` — mounts LittleFS, loads `buckets.bin`, loads `measured.bin` (restoring the rolling measured-efficiency window; silently starts from zero if absent), and starts the Core 0 learner task.
+3. HomeSpan initialized; WiFi credentials managed by HomeSpan pairing. OTA enabled. `HS_OTA_STARTED` status callback registered to save the measured window before any OTA reboot.
+4. HomeSpan web log configured with custom CSS and the `navienStatus` callback.
+5. HomeKit accessories registered: `DEV_Navien` thermostat with Eve history and scheduler.
+6. On WiFi connect:
    - `setupNavienBroadcaster()`: registers Navien packet callbacks; starts UDP broadcast.
    - `setupTelnetCommands()`: registers all commands; starts Telnet server on port 23.
    - `setupScheduleEndpoint()`: starts raw `WiFiServer` on port 8080 for pushed schedule updates and bucket bootstrap ingest.
-6. Main loop runs: `telnet.loop()`, `loopScheduleEndpoint()`, `navienSerial.loop()`, `homeSpan.poll()`.
-7. Once a timezone is available (`TZ` env var set) and SNTP sync is confirmed, `homeSpan.assumeTimeAcquired()` is called to unlock time-dependent HomeKit features.
+7. Main loop runs: `telnet.loop()`, `loopScheduleEndpoint()`, `navienSerial.loop()`, `homeSpan.poll()`.
+8. Once a timezone is available (`TZ` env var set) and SNTP sync is confirmed, `homeSpan.assumeTimeAcquired()` is called to unlock time-dependent HomeKit features.

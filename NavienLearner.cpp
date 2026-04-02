@@ -22,6 +22,7 @@ SOFTWARE.
 
 #include "NavienLearner.h"
 #include <Arduino.h>
+#include <LittleFS.h>
 #include <stdarg.h>
 #include <AsyncUDP.h>
 #include <ArduinoJson.h>
@@ -122,6 +123,10 @@ bool NavienLearner::begin() {
         return false;
     }
 
+    // Restore measured efficiency window if a prior save exists; silently
+    // starts from zero if the file is absent (first boot) or corrupt.
+    loadMeasured();
+
     BaseType_t taskRet = xTaskCreatePinnedToCore(
         NavienLearner::learnerTask,
         "NavienLearner",
@@ -218,6 +223,99 @@ void NavienLearner::onNavienState(bool consumption_active,
 void NavienLearner::advanceMeasuredWeek() {
     _measuredHead = (_measuredHead + 1) % 4;
     memset(&_measured[_measuredHead], 0, sizeof(WeekMeasured));
+    saveMeasured();
+}
+
+// ---------------------------------------------------------------------------
+// saveMeasured() / loadMeasured() — LittleFS persistence for _measured[]
+// ---------------------------------------------------------------------------
+
+// On-disk layout for measured.bin
+struct MeasuredFile {
+    uint32_t    magic;           // 0x4D454153 ("MEAS")
+    uint8_t     schema_version;  // bump if struct layout changes
+    uint8_t     head;            // _measuredHead (0–3)
+    uint8_t     pad[2];
+    WeekMeasured measured[4];
+};
+
+static constexpr uint32_t MEASURED_MAGIC          = 0x4D454153u;
+static constexpr uint8_t  MEASURED_SCHEMA_VERSION = 1;
+static constexpr char     MEASURED_FILE[]         = "/navien/measured.bin";
+static constexpr char     MEASURED_TMP_FILE[]     = "/navien/measured.tmp";
+
+bool NavienLearner::saveMeasured() {
+    MeasuredFile mf;
+    mf.magic          = MEASURED_MAGIC;
+    mf.schema_version = MEASURED_SCHEMA_VERSION;
+    mf.head           = _measuredHead;
+    mf.pad[0]         = 0;
+    mf.pad[1]         = 0;
+    memcpy(mf.measured, _measured, sizeof(_measured));
+
+    File f = LittleFS.open(MEASURED_TMP_FILE, "w");
+    if (!f) {
+        Serial.println("NavienLearner: failed to open measured.tmp for writing");
+        return false;
+    }
+    size_t written = f.write(reinterpret_cast<const uint8_t *>(&mf), sizeof(mf));
+    f.close();
+
+    if (written != sizeof(mf)) {
+        Serial.printf("NavienLearner: short write to measured.tmp (%u/%u)\n",
+                      (unsigned)written, (unsigned)sizeof(mf));
+        LittleFS.remove(MEASURED_TMP_FILE);
+        return false;
+    }
+
+    if (!LittleFS.rename(MEASURED_TMP_FILE, MEASURED_FILE)) {
+        Serial.println("NavienLearner: rename measured.tmp -> measured.bin failed");
+        LittleFS.remove(MEASURED_TMP_FILE);
+        return false;
+    }
+
+    Serial.println("NavienLearner: measured window saved");
+    return true;
+}
+
+bool NavienLearner::loadMeasured() {
+    if (!LittleFS.exists(MEASURED_FILE)) {
+        return false;   // first boot — silently start from zero
+    }
+
+    File f = LittleFS.open(MEASURED_FILE, "r");
+    if (!f) {
+        Serial.println("NavienLearner: failed to open measured.bin for reading");
+        return false;
+    }
+
+    MeasuredFile mf;
+    size_t got = f.read(reinterpret_cast<uint8_t *>(&mf), sizeof(mf));
+    f.close();
+
+    if (got != sizeof(mf)) {
+        Serial.printf("NavienLearner: measured.bin size mismatch (%u/%u)\n",
+                      (unsigned)got, (unsigned)sizeof(mf));
+        return false;
+    }
+    if (mf.magic != MEASURED_MAGIC) {
+        Serial.printf("NavienLearner: measured.bin bad magic 0x%08X\n", mf.magic);
+        return false;
+    }
+    if (mf.schema_version != MEASURED_SCHEMA_VERSION) {
+        Serial.printf("NavienLearner: measured.bin schema mismatch (%u)\n",
+                      mf.schema_version);
+        return false;
+    }
+    if (mf.head >= 4) {
+        Serial.printf("NavienLearner: measured.bin bad head %u\n", mf.head);
+        return false;
+    }
+
+    memcpy(_measured, mf.measured, sizeof(_measured));
+    _measuredHead = mf.head;
+    Serial.printf("NavienLearner: measured window loaded (head=%u)\n", mf.head);
+    return true;
 }
 
 // ---------------------------------------------------------------------------

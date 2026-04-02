@@ -108,6 +108,16 @@ public:
     // Returns true and fills out_json with the schedule JSON if ready.
     bool checkNewSchedule(String &out_json);
 
+    // Persist _measured[] and _measuredHead to /navien/measured.bin.
+    // Safe to call from any core (coarse stats, no lock taken).
+    // Returns true on success.
+    bool saveMeasured();
+
+    // Load _measured[] and _measuredHead from /navien/measured.bin.
+    // Called during begin(); silently succeeds (leaves zeroed RAM) if the
+    // file is absent or corrupt.
+    bool loadMeasured();
+
     // Wall time of the last completed RECOMPUTE_WRITE (0 = never).
     time_t lastRecomputeTime() const { return _lastRecomputeTime; }
 

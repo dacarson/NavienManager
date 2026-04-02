@@ -524,6 +524,18 @@ void commandLearnerStatus(const String& params) {
   telnet.printf("  %-11s  %s   %s\n", "Weekly avg", avgPred, avgMeas);
 }
 
+void commandSaveLearner(const String& params) {
+  if (!learner || learner->isDisabled()) {
+    telnet.println(F("Learner is disabled or not initialized."));
+    return;
+  }
+  if (learner->saveMeasured()) {
+    telnet.println(F("Measured efficiency window saved."));
+  } else {
+    telnet.println(F("Failed to save measured efficiency window."));
+  }
+}
+
 void commandReboot(const String& params) {
   telnet.println(F("Rebooting system..."));
   telnet.disconnectClient();
@@ -561,6 +573,7 @@ void setupTelnetCommands() {
   registerCommand(F("erasePgm"), F("Erase all Program State"), commandEraseEve);
 
   registerCommand(F("learnerStatus"), F("Print schedule learner status and efficiency table"), commandLearnerStatus);
+  registerCommand(F("saveLearner"), F("Save measured efficiency window to flash"), commandSaveLearner);
   registerCommand(F("history"), F("Print history entries in CSV format (optional: number of entries)"), commandHistory);
   registerCommand(F("eraseHistory"), F("Erase all history entries"), commandEraseHistory);
   registerCommand(F("fsStat"), F("File system status"), commandfsStat);
