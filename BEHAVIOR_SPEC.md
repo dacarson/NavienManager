@@ -283,6 +283,7 @@ A Telnet server listens on **port 23**. It is started after WiFi connects. All c
 | `history` | `<N>` | Dumps the last N history entries as CSV. |
 | `eraseHistory` | — | Erases all history entries from LittleFS and memory. |
 | `fsStat` | — | Prints LittleFS partition total, used, and free bytes. |
+| `learnerStatus` | — | Prints on-device schedule learner status: last recompute time, bucket fill percentage, and a per-day table showing predicted efficiency, measured efficiency, gap, and rolling 4-week cold-start count. |
 | `reboot` | — | Disconnects the Telnet client and restarts the ESP32. |
 | `bye` | — | Disconnects the Telnet session. |
 
@@ -340,6 +341,8 @@ A units toggle (metric / imperial) is provided in the page header. The preferenc
 The page header firmware version (controller / panel) is displayed as a sub-heading. The first `h2` heading is wrapped as a link to the GitHub repository.
 
 The system log table (HomeSpan's built-in `tab1`) is hidden; only the custom status content is shown.
+
+A **Learner Status** section is appended to the page by `NavienLearner::appendStatusHTML()`. It renders the same data as `learnerStatus` Telnet: last recompute time, bucket fill, and a per-day table with Predicted %, Measured %, Gap, and 4-week cold-start count. The Gap column is colour-coded: green (< 10%), amber (10–25%), red (> 25%). The HTML is built on demand into the existing page buffer and is not cached.
 
 ---
 
@@ -616,6 +619,109 @@ The script is designed to run as a weekly cron job (e.g., Sunday at 2 am):
 ```
 
 Dependencies: `pip3 install influxdb requests`
+
+---
+
+## On-Device Schedule Learner
+
+The `NavienLearner` class autonomously learns and recomputes the recirculation schedule from live RS-485 observations, eliminating the need for a recurring Pi cron job after an initial bootstrap. It detects cold-start events in real time on Core 1, accumulates bucket data on Core 0 via a FreeRTOS queue, recomputes the schedule nightly, and hands the result to `FakeGatoScheduler` exactly as the Pi's `POST /schedule` does.
+
+### Cold-Start Detection
+
+`NavienLearner::onNavienState()` is called from the water packet callback (Core 1) on every RS-485 packet. A cold-start is detected when `consumption_active` transitions 0→1 after at least `cold_gap` of inactivity:
+
+- **`cold_gap`** = 600 seconds (10 minutes) — inactivity window that separates independent demand events.
+- **`min_duration_genuine`** = 60 seconds — minimum tap duration (no recirc) to count at full weight.
+- **`min_duration_recirc`** = 30 seconds — minimum tap duration (recirc was on) to count at all.
+
+**Demand weight rules:**
+
+| Condition | `demand_weight` |
+|---|---|
+| Recirc on at start, duration < 30 s | 0.0 — discard |
+| Recirc on at start, duration ≥ 30 s | 1.0 |
+| Recirc off at start, duration < 60 s | 0.5 (short cold-pipe tap) |
+| Recirc off at start, duration ≥ 60 s | 1.0 |
+
+**Day-of-week and bucket index are pinned to tap-open time**, not tap-close time. A run that opens at 23:58 belongs to the 23:55 bucket of that day, even if it closes after midnight.
+
+**Hardware note — recirc bit clears at tap-open:** When a tap opens while recirculation is running, the Navien heater clears the `recirculation_running` bit in the same RS-485 packet that sets `consumption_active`. The learner therefore tracks the recirc state from the **previous packet** (`_prevRecircRunning`) and uses `recirculation_running || _prevRecircRunning` when capturing `_recircAtStart`, ensuring that a demand that immediately followed recirc is correctly classified as covered.
+
+**Queue failure:** If the FreeRTOS cold-start queue cannot be created, `begin()` sets `_learnerDisabled = true` and returns false. All subsequent `onNavienState()` calls return immediately. The rest of the firmware continues normally using the existing NVS/Eve schedule.
+
+### Background Recompute — Core 0 Task
+
+The learner task runs on Core 0. It triggers a full recompute at **midnight + 2 minutes** local time (the previous day's cold-starts are complete and the day-of-week index has just rolled). The recompute processes **one day per iteration** with a 10 ms `vTaskDelay` between days to yield to other Core 0 work.
+
+Manual recomputes (e.g. triggered by `POST /buckets`) set `_recomputeRequested` and follow the same state machine.
+
+**Schedule handoff:** Core 0 never calls `setWeekScheduleFromJSON()` directly. It writes the JSON to `_pendingScheduleJSON` and sets `_newScheduleReady` under a mutex. `FakeGatoScheduler::loop()` on Core 1 takes the mutex non-blockingly each iteration; if a new schedule is ready it copies the JSON, releases the mutex, then calls `setWeekScheduleFromJSON()`. Missing one check is harmless — the schedule is applied on the next loop pass.
+
+### Annual Decay at Year Rollover
+
+On Jan 1 (detected by a `current_year` mismatch in the `buckets.bin` header):
+
+- All `weighted_score` values are multiplied by **2/3** (scaling data that was accumulated at recency weight ×3 to the "last year" weight ×2).
+- **`raw_count` is NOT decayed** — it represents actual occurrence count used by the noise filter regardless of year.
+
+If the device is powered off over New Year and boots in January, the mismatch is detected on first boot and decay is applied before any new data is written.
+
+### Peak-Finding Parameters
+
+| Parameter | Value |
+|---|---|
+| `peak_half_width` | 30 minutes |
+| `min_peak_separation` | 45 minutes |
+| `preheat_minutes` | 3 minutes |
+| `min_weighted_score` | 6.0 (adaptive start) |
+| `min_score_floor` | 3.0 (adaptive floor) |
+| `smooth_radius` | 2 buckets |
+| `MAX_SLOTS_PER_DAY` | 3 |
+
+**Adaptive threshold:** starts at `min_weighted_score` = 6.0, steps down by 1.0 until `MAX_SLOTS_PER_DAY` peaks are found or `min_score_floor` is reached. If still fewer peaks than needed, `min_occurrences` is relaxed by 1 and the pass repeats.
+
+### Efficiency Tracking
+
+Two efficiency metrics are maintained continuously and cached for display.
+
+**Predicted efficiency** — computed at the end of each recompute from the new schedule and current bucket data. For each day, each bucket is checked against the slot boundaries:
+
+- A bucket is *covered* if it falls inside a slot.
+- A bucket is *schedulable* if it falls inside a slot **or** within 15 minutes after a slot ends (the hot-water window).
+- `predicted% = covered / schedulable × 100`
+
+**Measured efficiency** — rolling 4-week window of actual observations. Each cold-start event records whether recirculation was already running at tap-open time (`recircAtStart`). The counters (`total[dow]` and `covered[dow]`) are updated on Core 0 when each `PendingColdStart` is consumed from the queue. On Sunday midnight the oldest week slot is zeroed and the head advances.
+
+`measured% = covered / total × 100` summed across all 4 weeks per day. Days with no cold-starts in the window report N/A rather than zero.
+
+**The gap metric:**
+
+```
+gap[dow] = predicted[dow] - measured[dow]
+```
+
+| Gap | Interpretation |
+|---|---|
+| < 10% | Schedule and habits are well aligned |
+| 10–25% | Normal drift — nightly recompute should self-correct within days |
+| > 25% | Habits have shifted significantly; consider rerunning bootstrap |
+| Predicted N/A | Insufficient bucket data for this day |
+| Measured N/A | No cold-starts observed yet in the rolling window |
+
+### Bootstrap
+
+Without seeding, the device starts cold: `buckets.bin` is empty and the nightly recompute produces no useful schedule for roughly 2–4 weeks. The bootstrap process eliminates this gap.
+
+**Why two steps are required:**
+
+- **Step 1** (`navien_bootstrap.py --push`): queries full InfluxDB history, runs peak-finding on the Pi, and POSTs a finished schedule to `POST /schedule`. This gives the device a correct working schedule immediately.
+- **Step 2** (`navien_bucket_export.py --push`): extracts the same historical data and seeds `buckets.bin` via `POST /buckets`. Without this step, the first midnight recompute runs against empty buckets and overwrites the Step 1 schedule with an empty one.
+
+Both steps must be run in order after first flash. They are also used when `buckets.bin` is suspected corrupt or after parameter re-tuning.
+
+**When to run bootstrap:** first flash, LittleFS wiped, corrupt `buckets.bin` suspected, or after algorithm parameter changes. Run only when the device is quiet — avoid the 00:00–00:05 recompute window and any time with active cold-start events being processed.
+
+**Fallback without bootstrap:** if bootstrap is skipped, meaningful peaks emerge after ~2 weeks of live data; the schedule stabilizes after ~4 weeks. The existing NVS/Eve schedule (if any) remains active and unchanged until the first successful recompute.
 
 ---
 
