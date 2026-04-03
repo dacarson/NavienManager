@@ -27,11 +27,13 @@ SOFTWARE.
 #include "HomeSpan.h"
 
 #include "Navien.h"
+#include "NavienLearner.h"
 
 bool wifiConnected = false;
 bool timeInit = false;
 
 Navien navienSerial(2);
+NavienLearner *learner = nullptr;
 #define RXD2 16
 #define TXD2 17
 
@@ -66,8 +68,13 @@ void setup() {
   Serial.begin(115200);
 
   // Start Serial 2 for Navien
+  navienSerial.setRxBufferSize(1024);  // Expand the receive buffer size to 1024 bytes
   navienSerial.begin(RXD2, TXD2);
   Serial.println(F("Navien Serial Started"));
+
+  // Learner is independent of HomeSpan/HomeKit and starts unconditionally.
+  learner = new NavienLearner();
+  learner->begin();
 
   // setup HomeSpan. It needs to own WiFi setup so
   // that it can do the pairing.
@@ -77,6 +84,11 @@ void setup() {
   homeSpan.setHostNameSuffix("Controller");
   homeSpan.begin(Category::Thermostats,"Navien Manager");
   homeSpan.enableOTA(false, false);
+  homeSpan.setStatusCallback([](HS_STATUS status) {
+    if (status == HS_OTA_STARTED && learner && !learner->isDisabled()) {
+      learner->saveMeasured();
+    }
+  });
 
   setupHomeSpanWeb(); // Setup the homespan webpage
 

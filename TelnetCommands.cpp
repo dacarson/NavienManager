@@ -29,11 +29,13 @@ SOFTWARE.
 #include "nvs.h"
 #include "FakeGatoHistoryService.h"
 #include "FakeGatoScheduler.h"
+#include "NavienLearner.h"
 
 ESPTelnet telnet;
 extern Navien navienSerial;
 extern FakeGatoHistoryService *historyService;
 extern FakeGatoScheduler *scheduler;
+extern NavienLearner *learner;
 String trace;
 
 // Functions in NavienBroadcaster.ino
@@ -436,6 +438,104 @@ void commandfsStat(const String& params) {
   telnet.printf("Free Space: %u bytes\n", freeBytes);
 }
 
+void commandLearnerStatus(const String& params) {
+  static const char *dayNames[] = {
+    "Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"
+  };
+
+  if (!learner || learner->isDisabled()) {
+    telnet.println(F("Learner is disabled or not initialized."));
+    return;
+  }
+
+  telnet.println(F("Learner Status"));
+
+  // Last recompute time and age.
+  time_t lastRecompute = learner->lastRecomputeTime();
+  if (lastRecompute > 0) {
+    char tbuf[32];
+    struct tm  tm_buf;
+    struct tm *t = localtime_r(&lastRecompute, &tm_buf);
+    strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M", t);
+    time_t elapsed = time(nullptr) - lastRecompute;
+    if (elapsed >= 3600) {
+      telnet.printf("  Last recompute:  %s  (%dh ago)\n", tbuf, (int)(elapsed / 3600));
+    } else {
+      telnet.printf("  Last recompute:  %s  (%dmin ago)\n", tbuf, (int)(elapsed / 60));
+    }
+  } else {
+    telnet.println(F("  Last recompute:  never"));
+  }
+
+  // Bucket fill.
+  int nonZero = learner->bucketStore().nonZeroCount();
+  int total   = BUCKET_DAYS * BUCKET_PER_DAY;
+  telnet.printf("  Bucket fill:     %d / %d non-zero (%.1f%%)\n\n",
+                nonZero, total, nonZero * 100.0f / total);
+
+  // Per-day table header.
+  telnet.println(F("  Day         Predicted  Measured   Gap      Cold-starts (4wk)"));
+  telnet.println(F("  -----------------------------------------------------------------"));
+
+  const float       *pred = learner->predictedEfficiency();
+  const WeekMeasured *mw  = learner->measuredWindow();
+
+  float sumPred = 0.0f, sumMeas = 0.0f;
+  int   cntPred = 0,    cntMeas = 0;
+
+  for (int dow = 0; dow < 7; dow++) {
+    uint32_t tot = 0, cov = 0;
+    for (int w = 0; w < 4; w++) {
+      tot += mw[w].total[dow];
+      cov += mw[w].covered[dow];
+    }
+    float measPct = (tot > 0) ? (cov * 100.0f / tot) : NAN;
+    float predPct = pred[dow];
+
+    char predStr[12], measStr[12], gapStr[12];
+    if (!isnan(predPct)) {
+      snprintf(predStr, sizeof(predStr), "%6.1f%%", predPct);
+      sumPred += predPct;
+      cntPred++;
+    } else {
+      snprintf(predStr, sizeof(predStr), "    N/A");
+    }
+    if (!isnan(measPct)) {
+      snprintf(measStr, sizeof(measStr), "%6.1f%%", measPct);
+      sumMeas += measPct;
+      cntMeas++;
+    } else {
+      snprintf(measStr, sizeof(measStr), "    N/A");
+    }
+    if (!isnan(predPct) && !isnan(measPct)) {
+      snprintf(gapStr, sizeof(gapStr), "%+7.1f%%", predPct - measPct);
+    } else {
+      snprintf(gapStr, sizeof(gapStr), "     N/A");
+    }
+
+    telnet.printf("  %-11s  %s   %s   %s   %u\n",
+                  dayNames[dow], predStr, measStr, gapStr, (unsigned)tot);
+  }
+
+  telnet.println(F("  -----------------------------------------------------------------"));
+  char avgPred[12] = "    N/A", avgMeas[12] = "    N/A";
+  if (cntPred > 0) snprintf(avgPred, sizeof(avgPred), "%6.1f%%", sumPred / cntPred);
+  if (cntMeas > 0) snprintf(avgMeas, sizeof(avgMeas), "%6.1f%%", sumMeas / cntMeas);
+  telnet.printf("  %-11s  %s   %s\n", "Weekly avg", avgPred, avgMeas);
+}
+
+void commandSaveLearner(const String& params) {
+  if (!learner || learner->isDisabled()) {
+    telnet.println(F("Learner is disabled or not initialized."));
+    return;
+  }
+  if (learner->saveMeasured()) {
+    telnet.println(F("Measured efficiency window saved."));
+  } else {
+    telnet.println(F("Failed to save measured efficiency window."));
+  }
+}
+
 void commandReboot(const String& params) {
   telnet.println(F("Rebooting system..."));
   telnet.disconnectClient();
@@ -472,6 +572,8 @@ void setupTelnetCommands() {
   registerCommand(F("time"), F("Print local and gmt time"), commandTime);
   registerCommand(F("erasePgm"), F("Erase all Program State"), commandEraseEve);
 
+  registerCommand(F("learnerStatus"), F("Print schedule learner status and efficiency table"), commandLearnerStatus);
+  registerCommand(F("saveLearner"), F("Save measured efficiency window to flash"), commandSaveLearner);
   registerCommand(F("history"), F("Print history entries in CSV format (optional: number of entries)"), commandHistory);
   registerCommand(F("eraseHistory"), F("Erase all history entries"), commandEraseHistory);
   registerCommand(F("fsStat"), F("File system status"), commandfsStat);

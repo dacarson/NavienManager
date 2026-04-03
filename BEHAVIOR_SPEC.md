@@ -245,6 +245,8 @@ The Hot Water switch and the thermostat `TargetHeatingCoolingState` characterist
 
 OTA is enabled (HomeSpan `enableOTA(false, false)`) without requiring a password and without forcing a reboot.
 
+A `setStatusCallback` lambda is registered in `setup()`. When HomeSpan fires `HS_OTA_STARTED` (just before the OTA transfer begins and the device reboots), the callback calls `learner->saveMeasured()` to flush the rolling measured-efficiency window to LittleFS so it survives the update.
+
 ---
 
 ## Telnet Support
@@ -283,6 +285,8 @@ A Telnet server listens on **port 23**. It is started after WiFi connects. All c
 | `history` | `<N>` | Dumps the last N history entries as CSV. |
 | `eraseHistory` | — | Erases all history entries from LittleFS and memory. |
 | `fsStat` | — | Prints LittleFS partition total, used, and free bytes. |
+| `learnerStatus` | — | Prints on-device schedule learner status: last recompute time, bucket fill percentage, and a per-day table showing predicted efficiency, measured efficiency, gap, and rolling 4-week cold-start count. |
+| `saveLearner` | — | Immediately persists the rolling measured-efficiency window to `/navien/measured.bin` on LittleFS. Useful before a planned reboot that is not triggered through OTA. |
 | `reboot` | — | Disconnects the Telnet client and restarts the ESP32. |
 | `bye` | — | Disconnects the Telnet session. |
 
@@ -341,6 +345,8 @@ The page header firmware version (controller / panel) is displayed as a sub-head
 
 The system log table (HomeSpan's built-in `tab1`) is hidden; only the custom status content is shown.
 
+A **Learner Status** section is appended to the page by `NavienLearner::appendStatusHTML()`. It renders the same data as `learnerStatus` Telnet: last recompute time, bucket fill, and a per-day table with Predicted %, Measured %, Gap, and 4-week cold-start count. The Gap column is colour-coded: green (< 10%), amber (10–25%), red (> 25%). The HTML is built on demand into the existing page buffer and is not cached.
+
 ---
 
 ## UDP Broadcasting
@@ -353,7 +359,7 @@ Each packet type maintains a "previous raw hex" string. A broadcast is only sent
 
 ### JSON Packet Formats
 
-All packets include a `"debug"` field containing the raw packet as a hex string (uppercase, space-separated bytes).
+RS485-derived packets (`water`, `gas`, `command`, `announce`) include a `"debug"` field containing the raw packet as a hex string (uppercase, space-separated bytes). The `learner` packet also includes `"debug"` but it is always an empty string — it is a computed packet with no corresponding raw RS485 bytes.
 
 **Water packet** (`"type": "water"`):
 
@@ -411,6 +417,25 @@ All packets include a `"debug"` field containing the raw packet as a hex string 
 |---|---|---|
 | `navilink_present` | int (0/1) | Whether a NaviLink was detected |
 
+**Learner packet** (`"type": "learner"`):
+
+Emitted by `NavienLearner::broadcastUDP()` at the end of every `RECOMPUTE_WRITE` — both the nightly midnight recompute and any manual recompute triggered by `requestRecompute()` (e.g. after seeding buckets via `POST /buckets`). Not subject to the raw-hex duplicate throttle used by RS485-derived packets.
+
+All per-day fields use a 3-letter day prefix: `sun`, `mon`, `tue`, `wed`, `thu`, `fri`, `sat`. The structure is fully flat so that `navien_listener.py` can pass `payload['fields'] = data` directly to InfluxDB without custom flattening.
+
+| Field | Type | Description |
+|---|---|---|
+| `last_recompute` | int | Unix timestamp of the completed recompute |
+| `bucket_fill_pct` | float (1 dp) | Percentage of 2016 buckets (7 days × 288 five-minute slots) that have at least one cold-start recorded |
+| `{pfx}_slots` | string | Recirculation schedule slots for that day, encoded as `"HH:MM-HH:MM,..."` (empty string if no slots were found) |
+| `{pfx}_predicted_pct` | float (1 dp) | Predicted efficiency: fraction of schedulable demand buckets (those inside a slot OR within 15 min after a slot end) that fall inside a slot; omitted if bucket data is insufficient |
+| `{pfx}_measured_pct` | float (1 dp) | Measured efficiency from the rolling 4-week cold-start window; omitted if no cold-starts have been observed yet for that day |
+| `{pfx}_gap_pct` | float (1 dp) | `predicted - measured`; omitted if either value is unavailable |
+| `{pfx}_cold_starts_4wk` | int | Cold-starts observed for that day across the rolling 4-week window; always present |
+| `debug` | string | Always empty (`""`) |
+
+Float fields (`bucket_fill_pct`, `{pfx}_predicted_pct`, etc.) use `serialized(String(x, 1))` and appear as bare JSON numbers (e.g. `7.0`), not quoted strings. Python's `json.loads()` parses them as floats; InfluxDB stores them as float fields.
+
 ---
 
 ## External Schedule Configuration
@@ -421,14 +446,29 @@ The scheduler time slots can be configured from outside the device in two ways: 
 
 The firmware listens for HTTP POST requests on **port 8080**. HomeSpan owns port 80 and provides no public API for custom POST handlers, so a raw `WiFiServer` (part of `<WiFi.h>`, zero additional flash cost) is used instead of a separate HTTP server library.
 
-- **Path:** `POST /schedule`
+Two paths are dispatched by `loopScheduleEndpoint()` on the same port:
+
+#### `POST /schedule`
+
 - **Content-Type:** `application/json`
 - **Response 200:** schedule was valid and applied.
 - **Response 400:** JSON was malformed or contained out-of-range values.
+- Uses a fixed 2 KB static body buffer.
 
-The endpoint is started in `setupScheduleEndpoint()` (called from `onWifiConnected`) and polled in `loopScheduleEndpoint()` (called from the main loop). It uses a fixed 2 KB static buffer for the request body and a 1-second read timeout — sufficient for a LAN client.
+#### `POST /buckets` (bootstrap bucket ingest — Phase 9)
 
-### JSON Format
+- **Content-Type:** `application/json`
+- **Response 200:** `{"status":"ok","buckets_written":<n>,"replaced":<bool>}`
+- **Response 400:** schema version mismatch, JSON parse failure, body exceeds 6 KB, or LittleFS write error.
+- **Response 503:** learner object was never instantiated, or `begin()` failed (learner disabled). Both indicate the ingest service is unavailable; the body is `Learner unavailable` in either case.
+- Uses a separate 6 KB static body buffer (never allocated to `/schedule`).
+- **Merge** (`"replace": false`, default): adds `raw` and `score` to existing in-RAM bucket values, then writes once to LittleFS.
+- **Replace** (`"replace": true`): zeros all buckets in RAM first, then applies incoming data and writes once. Safe to re-run if a prior upload was incorrect.
+- Sets `_recomputeRequested` after the write completes so Core 0 runs peak-finding immediately rather than waiting for midnight.
+
+The endpoint is started in `setupScheduleEndpoint()` (called from `onWifiConnected`) and polled in `loopScheduleEndpoint()` (called from the main loop). Both paths share a 1-second read timeout — sufficient for a LAN client.
+
+### JSON Format — `POST /schedule`
 
 ```json
 {
@@ -445,6 +485,34 @@ The endpoint is started in `setupScheduleEndpoint()` (called from `onWifiConnect
 - Each day object has a `slots` array of 0–3 slot objects (matching Eve's UI limit of 3 comfort periods per day).
 - Each slot has `startHour` (0–23), `startMinute` (0–59), `endHour` (0–23), `endMinute` (0–59).
 - Out-of-range values or a missing/wrong-length `schedule` array produce a 400 response.
+
+### JSON Format — `POST /buckets`
+
+```json
+{
+  "schema_version": 1,
+  "current_year": 2025,
+  "replace": false,
+  "days": [
+    {
+      "dow": 0,
+      "buckets": [
+        { "b": 72, "raw": 5,  "score": 12.0 },
+        { "b": 73, "raw": 3,  "score":  7.5 }
+      ]
+    }
+  ]
+}
+```
+
+- `schema_version` must equal `BUCKET_SCHEMA_VERSION` (1) — mismatches produce a 400.
+- `current_year` — optional; if present and non-zero, written into the `BucketFile` header. If omitted or zero: in merge mode the existing header year is left unchanged; in replace mode the year is derived from the system clock (same fallback as `BucketStore::begin()`), so the header is never left at a stale value.
+- `replace` — `false` (default): merge into existing data; `true`: zero all buckets first.
+- `days[].dow` — day of week, 0 = Sunday … 6 = Saturday.
+- `days[].buckets[].b` — 5-minute bucket index (0–287).
+- `days[].buckets[].raw` — unweighted cold-start count to add.
+- `days[].buckets[].score` — weighted score to add.
+- Only non-zero buckets need be included; absent buckets are unchanged (merge) or zero (replace).
 
 ### Internal Mapping
 
@@ -557,15 +625,130 @@ Dependencies: `pip3 install influxdb requests`
 
 ---
 
+## On-Device Schedule Learner
+
+The `NavienLearner` class autonomously learns and recomputes the recirculation schedule from live RS-485 observations, eliminating the need for a recurring Pi cron job after an initial bootstrap. It detects cold-start events in real time on Core 1, accumulates bucket data on Core 0 via a FreeRTOS queue, recomputes the schedule nightly, and hands the result to `FakeGatoScheduler` exactly as the Pi's `POST /schedule` does.
+
+### Cold-Start Detection
+
+`NavienLearner::onNavienState()` is called from the water packet callback (Core 1) on every RS-485 packet. A cold-start is detected when `consumption_active` transitions 0→1 after at least `cold_gap` of inactivity:
+
+- **`cold_gap`** = 600 seconds (10 minutes) — inactivity window that separates independent demand events.
+- **`min_duration_genuine`** = 60 seconds — minimum tap duration (no recirc) to count at full weight.
+- **`min_duration_recirc`** = 30 seconds — minimum tap duration (recirc was on) to count at all.
+
+**Demand weight rules:**
+
+| Condition | `demand_weight` |
+|---|---|
+| Recirc on at start, duration < 30 s | 0.0 — discard |
+| Recirc on at start, duration ≥ 30 s | 1.0 |
+| Recirc off at start, duration < 60 s | 0.5 (short cold-pipe tap) |
+| Recirc off at start, duration ≥ 60 s | 1.0 |
+
+**Day-of-week and bucket index are pinned to tap-open time**, not tap-close time. A run that opens at 23:58 belongs to the 23:55 bucket of that day, even if it closes after midnight.
+
+**Use `recirculation_active` with a 15-minute lookback to detect covered demands.** The Navien heater cycles the recirc pump on and off to maintain pipe temperature throughout a scheduled slot — `recirculation_running` (pump physically spinning, `flow_state & 0x08`) oscillates between 1 and 0 while the slot is active. A tap opened during the hot/idle phase between pump cycles will see `recirculation_running = 0` even though the pipes are fully pre-heated. `recirculation_active` (`recirculation_enabled & 0x2`) reflects whether recirc *mode* is on and stays true throughout the slot regardless of pump cycling.
+
+Additionally, pipes stay hot for up to 15 minutes after a recirc slot ends (`RECIRC_HOT_WINDOW_SEC = 900`, matching `config.py RECIRC_WINDOW_MINUTES`). The learner tracks `_lastRecircActiveTime` and sets `_recircAtStart = true` if `recirculation_active` is currently true **or** was true within the last 15 minutes. This matches `navien_efficiency.py`'s lookback window exactly.
+
+`recirculation_active` comes from the `recirculation_enabled` byte, independent of `flow_state`, so it does not clear atomically with `consumption_active` — no previous-packet lookback is needed.
+
+> **Diagnostic:** if Measured efficiency shows 0.0% for days with a significant Cold-starts count, the cause is that `_recircAtStart` is never true. Verify: (1) `onNavienState()` receives `water->recirculation_active` (not `water->recirculation_running`); (2) `_lastRecircActiveTime` is updated whenever `recirculation_active` is true; (3) `_recircAtStart` checks both `recirculation_active` and the 15-minute window.
+
+**Queue failure:** If the FreeRTOS cold-start queue cannot be created, `begin()` sets `_learnerDisabled = true` and returns false. All subsequent `onNavienState()` calls return immediately. The rest of the firmware continues normally using the existing NVS/Eve schedule.
+
+### Background Recompute — Core 0 Task
+
+The learner task runs on Core 0. It triggers a full recompute at **midnight + 2 minutes** local time (the previous day's cold-starts are complete and the day-of-week index has just rolled). The recompute processes **one day per iteration** with a 10 ms `vTaskDelay` between days to yield to other Core 0 work.
+
+Manual recomputes (e.g. triggered by `POST /buckets`) set `_recomputeRequested` and follow the same state machine.
+
+**Schedule handoff:** Core 0 never calls `setWeekScheduleFromJSON()` directly. It writes the JSON to `_pendingScheduleJSON` and sets `_newScheduleReady` under a mutex. `FakeGatoScheduler::loop()` on Core 1 takes the mutex non-blockingly each iteration; if a new schedule is ready it copies the JSON, releases the mutex, then calls `setWeekScheduleFromJSON()`. Missing one check is harmless — the schedule is applied on the next loop pass.
+
+### Annual Decay at Year Rollover
+
+On Jan 1 (detected by a `current_year` mismatch in the `buckets.bin` header):
+
+- All `weighted_score` values are multiplied by **2/3** (scaling data that was accumulated at recency weight ×3 to the "last year" weight ×2).
+- **`raw_count` is NOT decayed** — it represents actual occurrence count used by the noise filter regardless of year.
+
+If the device is powered off over New Year and boots in January, the mismatch is detected on first boot and decay is applied before any new data is written.
+
+### Peak-Finding Parameters
+
+| Parameter | Value |
+|---|---|
+| `peak_half_width` | 30 minutes |
+| `min_peak_separation` | 45 minutes |
+| `preheat_minutes` | 3 minutes |
+| `min_weighted_score` | 6.0 (adaptive start) |
+| `min_score_floor` | 3.0 (adaptive floor) |
+| `smooth_radius` | 2 buckets |
+| `MAX_SLOTS_PER_DAY` | 3 |
+
+**Adaptive threshold:** starts at `min_weighted_score` = 6.0, steps down by 1.0 until `MAX_SLOTS_PER_DAY` peaks are found or `min_score_floor` is reached. If still fewer peaks than needed, `min_occurrences` is relaxed by 1 and the pass repeats.
+
+### Efficiency Tracking
+
+Two efficiency metrics are maintained continuously and cached for display.
+
+**Predicted efficiency** — computed at the end of each recompute from the new schedule and current bucket data. For each day, each bucket is checked against the slot boundaries:
+
+- A bucket is *covered* if it falls inside a slot.
+- A bucket is *schedulable* if it falls inside a slot **or** within 15 minutes after a slot ends (the hot-water window).
+- `predicted% = covered / schedulable × 100`
+
+**Measured efficiency** — rolling 4-week window of actual observations. Each cold-start event records whether recirculation was already running at tap-open time (`recircAtStart`). The counters (`total[dow]` and `covered[dow]`) are updated on Core 0 when each `PendingColdStart` is consumed from the queue. On Sunday midnight the oldest week slot is zeroed and the head advances.
+
+`measured% = covered / total × 100` summed across all 4 weeks per day. Days with no cold-starts in the window report N/A rather than zero.
+
+**Measured efficiency persistence** — the window (`_measured[4]` + `_measuredHead`) is persisted to `/navien/measured.bin` on LittleFS and reloaded on `begin()`, so it survives reboots and OTA firmware updates. The file uses the same atomic `.tmp` → rename write strategy as `buckets.bin`. It is saved automatically at three points:
+- **Sunday midnight** — when `advanceMeasuredWeek()` rotates the window.
+- **OTA start** — via the `HS_OTA_STARTED` HomeSpan status callback, just before the device reboots to apply the update.
+- **On demand** — via the Telnet `saveLearner` command, for planned reboots not triggered through OTA.
+
+**The gap metric:**
+
+```
+gap[dow] = predicted[dow] - measured[dow]
+```
+
+| Gap | Interpretation |
+|---|---|
+| < 10% | Schedule and habits are well aligned |
+| 10–25% | Normal drift — nightly recompute should self-correct within days |
+| > 25% | Habits have shifted significantly; consider rerunning bootstrap |
+| Predicted N/A | Insufficient bucket data for this day |
+| Measured N/A | No cold-starts observed yet in the rolling window |
+
+### Bootstrap
+
+Without seeding, the device starts cold: `buckets.bin` is empty and the nightly recompute produces no useful schedule for roughly 2–4 weeks. The bootstrap process eliminates this gap.
+
+**Why two steps are required:**
+
+- **Step 1** (`navien_bootstrap.py --push`): queries full InfluxDB history, runs peak-finding on the Pi, and POSTs a finished schedule to `POST /schedule`. This gives the device a correct working schedule immediately.
+- **Step 2** (`navien_bucket_export.py --push`): extracts the same historical data and seeds `buckets.bin` via `POST /buckets`. Without this step, the first midnight recompute runs against empty buckets and overwrites the Step 1 schedule with an empty one.
+
+Both steps must be run in order after first flash. They are also used when `buckets.bin` is suspected corrupt or after parameter re-tuning.
+
+**When to run bootstrap:** first flash, LittleFS wiped, corrupt `buckets.bin` suspected, or after algorithm parameter changes. Run only when the device is quiet — avoid the 00:00–00:05 recompute window and any time with active cold-start events being processed.
+
+**Fallback without bootstrap:** if bootstrap is skipped, meaningful peaks emerge after ~2 weeks of live data; the schedule stabilizes after ~4 weeks. The existing NVS/Eve schedule (if any) remains active and unchanged until the first successful recompute.
+
+---
+
 ## Startup Sequence
 
 1. UART2 initialized for Navien RS485 at 19200 baud.
-2. HomeSpan initialized; WiFi credentials managed by HomeSpan pairing. OTA enabled.
-3. HomeSpan web log configured with custom CSS and the `navienStatus` callback.
-4. HomeKit accessories registered: `DEV_Navien` thermostat with Eve history and scheduler.
-5. On WiFi connect:
+2. `NavienLearner::begin()` — mounts LittleFS, loads `buckets.bin`, loads `measured.bin` (restoring the rolling measured-efficiency window; silently starts from zero if absent), and starts the Core 0 learner task.
+3. HomeSpan initialized; WiFi credentials managed by HomeSpan pairing. OTA enabled. `HS_OTA_STARTED` status callback registered to save the measured window before any OTA reboot.
+4. HomeSpan web log configured with custom CSS and the `navienStatus` callback.
+5. HomeKit accessories registered: `DEV_Navien` thermostat with Eve history and scheduler.
+6. On WiFi connect:
    - `setupNavienBroadcaster()`: registers Navien packet callbacks; starts UDP broadcast.
    - `setupTelnetCommands()`: registers all commands; starts Telnet server on port 23.
-   - `setupScheduleEndpoint()`: starts raw `WiFiServer` on port 8080 for pushed schedule updates.
-6. Main loop runs: `telnet.loop()`, `loopScheduleEndpoint()`, `navienSerial.loop()`, `homeSpan.poll()`.
-7. Once a timezone is available (`TZ` env var set) and SNTP sync is confirmed, `homeSpan.assumeTimeAcquired()` is called to unlock time-dependent HomeKit features.
+   - `setupScheduleEndpoint()`: starts raw `WiFiServer` on port 8080 for pushed schedule updates and bucket bootstrap ingest.
+7. Main loop runs: `telnet.loop()`, `loopScheduleEndpoint()`, `navienSerial.loop()`, `homeSpan.poll()`.
+8. Once a timezone is available (`TZ` env var set) and SNTP sync is confirmed, `homeSpan.assumeTimeAcquired()` is called to unlock time-dependent HomeKit features.

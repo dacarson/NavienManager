@@ -17,14 +17,16 @@ A dedicated **Hot Water** switch in HomeKit lets you trigger a 5-minute recircul
 Use the **Eve app** to define a weekly recirculation schedule — morning showers, evening dishes, whatever fits your routine. The scheduler runs recirculation only when you actually need it, keeping gas and water bills in check.
 
 ### Let the system learn your schedule for you
-A companion Python script (`navien_schedule_learner.py`) queries your InfluxDB history, identifies when your household typically turns on hot water after the pipes have gone cold, and pushes a learned recirculation schedule directly to the ESP32. Run it as a weekly cron job and the schedule stays in sync with your evolving habits automatically.
+The ESP32 runs an **on-device schedule learner** that watches your actual hot-water usage in real time, detects cold-start events, and recomputes the recirculation schedule every night — all without needing a Raspberry Pi or a recurring cron job. After a one-time bootstrap to seed it with your existing InfluxDB history, it runs autonomously and self-corrects as your habits change.
+
+The web dashboard and Telnet CLI show live efficiency metrics — what fraction of your hot-water demand was pre-heated by the schedule, how that compares to the schedule's predicted coverage, and a per-day gap that highlights when habits have drifted.
 
 ### Vacation Mode — set it and forget it
 Tell the Eve app you're on vacation. The heater powers off and all recirculation stops. When you're back, re-enable it and the schedule picks up exactly where it left off.
 
 ### Monitor everything in real time
-- A live **web dashboard** shows current temperatures, flow rate, gas usage, recirculation state, scheduler status, and more.
-- A **Telnet CLI** lets you inspect raw packet data, tweak settings, and trace live bus traffic — useful for diagnostics and protocol research.
+- A live **web dashboard** shows current temperatures, flow rate, gas usage, recirculation state, scheduler status, learner efficiency, and more.
+- A **Telnet CLI** lets you inspect raw packet data, tweak settings, trace live bus traffic, and view learner status — useful for diagnostics and protocol research.
 - A **UDP broadcast** stream feeds live JSON data to any listener on your local network, ready to log to InfluxDB and visualize in Grafana.
 
 ---
@@ -66,33 +68,71 @@ A simple on/off switch that triggers a 5-minute recirculation override — perfe
 
 ## Intelligent schedule learning
 
-The included `Logger/navien_schedule_learner.py` script turns your InfluxDB history into a custom recirculation schedule:
+### On-device learner (primary)
 
-1. Queries historical `consumption_active` and `recirculation_running` data at 10-second resolution.
-2. Identifies **cold-start events** — the first hot-water tap after pipes have gone cold — as the moments pre-heating is most valuable.
-3. Weights events by **recency** (this year counts more than last year) and **demand quality** (a long genuine tap counts more than a brief accidental one). Weights are further scaled by the actual dollar cost of a cold-start (wasted water) versus a wasted recirc cycle (wasted gas).
-4. Applies a **rolling seasonal window** (±4 weeks around today's date) so your summer schedule adapts to summer habits and your winter schedule adapts to winter ones.
-5. Finds **activity peaks** using a smoothed local-maximum algorithm and builds ±30-minute windows around each peak, shifted back by a configurable preheat margin.
-6. POSTs the resulting schedule (up to 4 time slots per day, Sunday–Saturday) to the ESP32 over HTTP — no manual entry required.
+The ESP32 itself learns your household's hot-water habits and recomputes the recirculation schedule every night at midnight. No Raspberry Pi, no cron job, no cloud service required after the initial setup.
 
-Run with `--verbose` to see a per-day breakdown of peaks found and an efficiency table showing what fraction of schedulable cold-starts the proposed schedule would cover and the estimated dollar cost of any misses.
+**How it works:**
+
+1. Every RS-485 packet is observed for **cold-start events** — the first hot-water tap after pipes have been cold for at least 10 minutes. These are the moments where pre-heating is most valuable.
+2. Each event is weighted by **demand quality** (a long genuine draw counts more than a brief accidental tap) and stored into a compact per-day, per-5-minute-bucket histogram on flash (`buckets.bin`).
+3. Every night at midnight the device runs a **peak-finding pass** over the histogram, finds up to 3 dominant activity windows per day, and updates the active recirculation schedule immediately.
+4. An **annual decay** (applied on Jan 1) gradually down-weights older data so recent habit changes win over stale history.
+
+**Efficiency metrics** are tracked continuously and visible on the web dashboard and via `learnerStatus` in the Telnet CLI:
+
+| Metric | What it means |
+|---|---|
+| **Predicted** | Fraction of demand buckets that fall inside (or within 15 min after) a scheduled slot |
+| **Measured** | Fraction of actual cold-start events that had recirculation already running — rolling 4-week window |
+| **Gap** | Predicted − Measured: green < 10%, amber 10–25%, red > 25% |
 
 ```
+> learnerStatus
+Learner Status
+  Last recompute:  2026-04-01 00:02  (8h ago)
+  Bucket fill:     1621 / 2016 non-zero (80.4%)
+
+  Day         Predicted  Measured   Gap      Cold-starts (4wk)
+  -----------------------------------------------------------------
+  Sunday         79.1%      76.3%     -2.8%   18
+  Monday         83.3%      81.0%     -2.3%   22
+  ...
+```
+
+### One-time bootstrap
+
+Without seeding, the on-device learner starts cold and needs 2–4 weeks to accumulate enough data for a meaningful schedule. The bootstrap process eliminates this wait:
+
+```bash
+# Step 1 — push a schedule derived from your full InfluxDB history
+python3 Logger/navien_bootstrap.py --push
+
+# Step 2 — seed the on-device bucket histogram with the same history
+python3 Logger/navien_bucket_export.py --push
+```
+
+Run both steps once after first flash (or after a LittleFS wipe). After that, the Pi cron job can be disconnected permanently.
+
+### Pi-based learner (optional / legacy)
+
+The original `Logger/navien_schedule_learner.py` script is still included for reference or for one-off pushes. It queries InfluxDB, runs peak-finding on the Pi, and POSTs the result to the ESP32:
+
+```bash
 # Preview without pushing
-python3 navien_schedule_learner.py --verbose
+python3 Logger/navien_schedule_learner.py --verbose
 
 # Push to the ESP32
-python3 navien_schedule_learner.py --push
-
-# Cron: every Sunday at 2am
-0 2 * * 0  /home/pi/navien/venv/bin/python3 /home/pi/navien_schedule_learner.py --esp32_host navien.local --push
+python3 Logger/navien_schedule_learner.py --push
 ```
+
+Run with `--verbose` to see a per-day breakdown of peaks found and an efficiency table showing estimated dollar cost of any misses.
 
 ---
 
 ## Web dashboard
 
-Visit `http://<esp32-ip-address>` to see a live status page for the heater. Toggle between metric and imperial units with the button at the top. The page auto-refreshes every 60 seconds.
+Visit `http://<esp32-ip-address>` to see a live status page for the heater. Toggle between metric and imperial units with the button at the top. The page auto-refreshes every 60 seconds. A **Learner Status** section at the bottom shows predicted and measured efficiency per day with colour-coded gap indicators.
 
 <img width="1488" alt="Navien Status screen" src="https://github.com/user-attachments/assets/fa161464-81c6-4bcd-b79f-f4b13bdf4a2d" />
 
@@ -100,7 +140,7 @@ Visit `http://<esp32-ip-address>` to see a live status page for the heater. Togg
 
 ## Grafana + InfluxDB logging
 
-The `Logger/` folder contains a script that listens for the UDP broadcast stream and writes all data to InfluxDB, plus a Grafana dashboard template to visualize it. Once set up, you get a full historical record of temperatures, gas usage, flow rates, and recirculation events — the same data the schedule learner uses.
+The `Logger/` folder contains a script that listens for the UDP broadcast stream and writes all data to InfluxDB, plus a Grafana dashboard template to visualize it. Once set up, you get a full historical record of temperatures, gas usage, flow rates, recirculation events, and learner efficiency metrics — the nightly `learner` UDP packet carries the full per-day predicted/measured/gap table so every recompute is logged automatically.
 
 <img width="1496" alt="Grafana status" src="https://github.com/user-attachments/assets/4846a6d5-f917-4f56-9773-adb856c933ff" />
 
@@ -115,6 +155,7 @@ Connect to the ESP32 on port 23 for a full command-line interface:
 | Diagnostics | `gas`, `water`, `trace [gas\|water\|command\|announce]`, `stop` |
 | Control | `power on\|off`, `recirc on\|off`, `setTemp <°C>`, `hotButton` |
 | Scheduler | `scheduler on\|off`, `timezone <tz>` |
+| Learner | `learnerStatus` |
 | System | `wifi`, `memory`, `fsStat`, `time`, `reboot`, `bye` |
 | History | `history [N]`, `eraseHistory`, `erasePgm` |
 
@@ -166,8 +207,9 @@ pip3 install influxdb requests
 | `FakeGatoHistoryService.*` | Eve history protocol |
 | `HomeSpanWeb.*` | Live status web page |
 | `NavienBroadcaster.*` | UDP broadcast of live packet data |
+| `NavienLearner.*` | On-device schedule learner (cold-start detection, peak-finding, efficiency tracking) |
 | `TelnetCommands.*` | Telnet CLI commands |
-| `Logger/` | UDP listener, InfluxDB logger, Grafana templates, schedule learner |
+| `Logger/` | UDP listener, InfluxDB logger, Grafana templates, bootstrap and schedule learner scripts |
 
 ---
 
