@@ -21,7 +21,7 @@ Dependencies:
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -139,6 +139,23 @@ def _year_window_bounds(year, today, window_weeks):
     # Format as RFC3339 for InfluxDB WHERE clause
     return (start_dt.strftime("%Y-%m-%dT00:00:00Z"),
             end_dt.strftime("%Y-%m-%dT23:59:59Z"))
+
+
+# Sub-range size for InfluxDB 1.x queries.  At dense 10s GROUP BY, 7 days is
+# at most 60,480 points, below typical max-select-point limits (e.g. 100_000).
+INFLUX_QUERY_CHUNK_DAYS = 7
+
+
+def _parse_influx_time_utc(s):
+    """Parse RFC3339 timestamp from Influx WHERE clauses (Z suffix)."""
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
+def _format_influx_time_utc(dt):
+    """Format datetime as RFC3339 UTC for Influx WHERE clauses."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _extract_cold_starts(points, local_tz, recency_weight, cold_gap_minutes,
@@ -299,30 +316,52 @@ def fetch_consumption_events(args, local_tz):
         start_str, end_str = _year_window_bounds(year, today, args.window_weeks)
 
         # Fetch consumption_active AND recirculation_running at 10-second resolution.
-        # 10s buckets let us distinguish short accidental taps (< 30s = <3 buckets)
-        # from genuine demand (≥ 1 min = ≥6 buckets), which 1-minute resolution
-        # cannot do (any tap rounds up to 1 minute).
-        # FILL(none) returns only buckets with actual data, keeping results small.
-        query = (
-            f"SELECT MAX(consumption_active) AS consumption_active, "
-            f"MAX(recirculation_running) AS recirculation_running "
-            f"FROM water "
-            f"WHERE time >= '{start_str}' AND time <= '{end_str}' "
-            f"GROUP BY time(10s) "
-            f"FILL(none) "
-            f"ORDER BY time ASC"
-        )
-
+        # Query in short calendar windows so each response stays under InfluxDB's
+        # max-select-point limit; overlap preserves cold-gap / run detection across
+        # chunk boundaries.  Results are merged by timestamp before cold-start extraction.
         if args.verbose:
             print(f"[influx] {year}: {start_str[:10]} → {end_str[:10]}")
 
+        start_dt = _parse_influx_time_utc(start_str)
+        end_dt = _parse_influx_time_utc(end_str)
+        overlap = timedelta(minutes=max(args.cold_gap_minutes, 1) + 15)
+        chunk_span = timedelta(days=INFLUX_QUERY_CHUNK_DAYS)
+
+        points_by_time = {}
+        cur = start_dt
+        chunk_idx = 0
+
         try:
-            result = client.query(query)
-            points = list(result.get_points())
+            while cur <= end_dt:
+                chunk_end = min(cur + chunk_span, end_dt)
+                cs = _format_influx_time_utc(cur)
+                ce = _format_influx_time_utc(chunk_end)
+                query = (
+                    f"SELECT MAX(consumption_active) AS consumption_active, "
+                    f"MAX(recirculation_running) AS recirculation_running "
+                    f"FROM water "
+                    f"WHERE time >= '{cs}' AND time <= '{ce}' "
+                    f"GROUP BY time(10s) "
+                    f"FILL(none) "
+                    f"ORDER BY time ASC"
+                )
+                if args.verbose:
+                    print(f"[influx]   chunk {chunk_idx}: {cs[:19]} → {ce[:19]}")
+                result = client.query(query)
+                for p in result.get_points():
+                    points_by_time[p["time"]] = p
+                chunk_idx += 1
+                if chunk_end >= end_dt:
+                    break
+                nxt = chunk_end - overlap
+                if nxt <= cur:
+                    nxt = cur + timedelta(seconds=10)
+                cur = nxt
         except Exception as e:
             print(f"[influx] Warning: query for {year} failed: {e}")
             continue
 
+        points = sorted(points_by_time.values(), key=lambda p: p["time"])
         active_count = sum(1 for p in points if p.get("consumption_active") == 1)
         cold_starts = _extract_cold_starts(
             points, local_tz, weight,
