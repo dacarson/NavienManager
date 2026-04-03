@@ -223,6 +223,7 @@ Built and tested against a **Navien NPE-240A**. The RS485 protocol is shared acr
 
 - Community members of [Home Assistant](https://community.home-assistant.io/t/navien-esp32-navilink-interface/720567/170) who decoded the Navien RS485 protocol and packet structure
 - [htumanyan](https://github.com/htumanyan/navien) for the well-crafted base Navien C++ class
+- [ificator](https://github.com/ificator/navien_ha) for continued packet structure deciphering 
 - [simont77](https://github.com/simont77/fakegato-history) for decoding the Eve history logging interface
 - [HomeSpan](https://github.com/HomeSpan/HomeSpan) for the HomeKit accessory library for ESP32
 

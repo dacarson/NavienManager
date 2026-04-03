@@ -64,12 +64,36 @@ void Navien::parse_water() {
   state.water[device_number].set_temp = Navien::t2c(recv_buffer.water.set_temp);
   state.water[device_number].outlet_temp = Navien::t2c(recv_buffer.water.outlet_temp);
   state.water[device_number].inlet_temp = Navien::t2c(recv_buffer.water.inlet_temp);
-  state.water[device_number].display_metric = (recv_buffer.water.system_status & 0x8) ? 0x1 : 0x0;
-  state.water[device_number].schedule_active = (recv_buffer.water.system_status & 0x2) ? 0x1 : 0x0;
-  state.water[device_number].hotbutton_active = (recv_buffer.water.system_status & 0x2) ? 0x0 : 0x1;
+  state.water[device_number].display_metric        = (recv_buffer.water.system_status & 0x08) ? true : false;
+  state.water[device_number].internal_recirculation = (recv_buffer.water.system_status & 0x01) ? true : false;
+  state.water[device_number].external_recirculation = (recv_buffer.water.system_status & 0x02) ? true : false;
   state.water[device_number].operating_capacity = 0.5 * recv_buffer.water.operating_capacity;  // 0.5 increments
   state.water[device_number].flow_lpm = Navien::flow2lpm(recv_buffer.water.water_flow);
-  state.water[device_number].recirculation_active = (recv_buffer.water.recirculation_enabled & 0x2) ? 0x1 : 0x0;
+  state.water[device_number].recirculation_active = (recv_buffer.water.recirculation_enabled & 0x2) ? true : false;
+  uint8_t stage = recv_buffer.water.system_stage;
+  state.water[device_number].system_stage = stage;
+
+  uint8_t upper_nibble = stage & 0xF0;
+  state.water[device_number].stage_idle          = (upper_nibble == 0x10);
+  state.water[device_number].stage_starting      = (upper_nibble == 0x20);
+  state.water[device_number].stage_active        = (upper_nibble == 0x30);
+  state.water[device_number].stage_shutting_down = (upper_nibble == 0x40);
+
+  state.water[device_number].stage_standby           = (stage == 0x14);
+  state.water[device_number].stage_demand            = (stage == 0x20);
+  state.water[device_number].stage_pre_purge         = (stage == 0x29);
+  state.water[device_number].stage_ignition          = (stage == 0x2B);
+  state.water[device_number].stage_flame_on          = (stage == 0x2C);
+  state.water[device_number].stage_ramp_up           = (stage == 0x2D);
+  state.water[device_number].stage_active_combustion = (stage == 0x33);
+  state.water[device_number].stage_water_adjustment  = (stage == 0x34);
+  state.water[device_number].stage_flame_off         = (stage == 0x3C);
+  state.water[device_number].stage_post_purge_1     = (stage == 0x46);
+  state.water[device_number].stage_post_purge_2     = (stage == 0x47);
+  state.water[device_number].stage_dhw_wait         = (stage == 0x49);
+
+  state.water[device_number].system_active   = recv_buffer.water.system_active ? true : false;
+  state.water[device_number].operation_time = (uint16_t)recv_buffer.water.operation_time_hi << 8 | recv_buffer.water.operation_time_lo;
 
   // If we see 10+ water packets since the last navilink packet, assume that 
   // it is no longer present.
@@ -99,18 +123,34 @@ void Navien::parse_gas() {
   sprintf(buffer, "%d.%d", recv_buffer.gas.panel_version_hi, recv_buffer.gas.panel_version_lo);
   state.gas.panel_version = atof(buffer);
 
-  // Safely compute accumulated gas usage with overflow protection
-  uint32_t raw_gas = (recv_buffer.gas.cumulative_gas_hi << 8 | recv_buffer.gas.cumulative_gas_lo);
-  state.gas.accumulated_gas_usage = 0.1f * raw_gas;  // Using float multiplication for better precision
-  state.gas.current_gas_usage = recv_buffer.gas.current_gas_hi << 8 | recv_buffer.gas.current_gas_lo;
+  uint32_t raw_gas = ((uint32_t)recv_buffer.gas.cumulative_gas_b3 << 24 |
+                      (uint32_t)recv_buffer.gas.cumulative_gas_b2 << 16 |
+                      (uint32_t)recv_buffer.gas.cumulative_gas_hi << 8  |
+                      recv_buffer.gas.cumulative_gas_lo);
+  state.gas.accumulated_gas_usage = 0.1f * raw_gas;
 
-  // Convert total operating time to minutes using 32-bit arithmetic
-  uint32_t raw_time = (recv_buffer.gas.total_operating_time_hi << 8 | recv_buffer.gas.total_operating_time_lo);
-  state.gas.total_operating_time = 60 * raw_time;  // Safe with uint32_t
+  uint32_t raw_water = ((uint32_t)recv_buffer.gas.cumulative_water_usage_b3 << 24 |
+                        (uint32_t)recv_buffer.gas.cumulative_water_usage_b2 << 16 |
+                        (uint32_t)recv_buffer.gas.cumulative_water_usage_hi << 8  |
+                        recv_buffer.gas.cumulative_water_usage_lo);
+  state.gas.accumulated_water_usage = 0.1f * raw_water;
+
+  state.gas.current_gas_usage = (uint16_t)recv_buffer.gas.current_gas_hi << 8 | recv_buffer.gas.current_gas_lo;
+  state.gas.target_gas_usage = (uint16_t)recv_buffer.gas.target_burner_power_hi << 8 | recv_buffer.gas.target_burner_power_lo;
+
+  uint32_t raw_time = ((uint32_t)recv_buffer.gas.total_operating_time_b3 << 24 |
+                       (uint32_t)recv_buffer.gas.total_operating_time_b2 << 16 |
+                       (uint32_t)recv_buffer.gas.total_operating_time_hi << 8  |
+                       recv_buffer.gas.total_operating_time_lo);
+  state.gas.total_operating_time = 60 * raw_time;  // hours -> minutes
+
+  state.gas.elapsed_install_days = (uint16_t)recv_buffer.gas.elapsed_install_days_hi << 8 | recv_buffer.gas.elapsed_install_days_lo;
 
   // Convert domestic usage count using 32-bit arithmetic
-  uint32_t raw_usage = (recv_buffer.gas.cumulative_domestic_usage_cnt_hi << 8 | recv_buffer.gas.cumulative_domestic_usage_cnt_lo);
-  state.gas.accumulated_domestic_usage_cnt = 10 * raw_usage;  // Safe with uint32_t
+  uint32_t raw_usage = ((uint32_t)recv_buffer.gas.cumulative_domestic_usage_cnt_hi << 8 |
+                        recv_buffer.gas.cumulative_domestic_usage_cnt_lo);
+  state.gas.accumulated_domestic_usage_cnt = 10 * raw_usage;
+  state.gas.recirculation_enabled = recv_buffer.gas.recirculation_enabled ? true : false;
 
   if (on_gas_packet_cb) on_gas_packet_cb(&(state.gas));
 }

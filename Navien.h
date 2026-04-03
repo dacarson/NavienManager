@@ -181,7 +181,7 @@ enum CommandActionHotButton {
     uint8_t unknown_07; // 0x00
     uint8_t flow_state;  // 8 0x20 if Consumption is Active 0x08 if recirculating_running
     uint8_t system_power;  // 9
-    uint8_t unknown_10;    // 0x37
+    uint8_t system_stage;  // 10 system operating stage
     uint8_t set_temp;      // 11
     uint8_t outlet_temp;   // 12
     uint8_t inlet_temp;    // 13
@@ -191,18 +191,18 @@ enum CommandActionHotButton {
     uint8_t operating_capacity;  // 17
     uint8_t water_flow;          // 18
     uint8_t unknown_19; // 0x00
-    uint8_t unknown_20; // 0x88
-    uint8_t unknown_21; // 0xC2
+    uint8_t unknown_20; // 0xA0
+    uint8_t unknown_21; // 0xBE
     uint8_t unknown_22; // 0x00
     uint8_t unknown_23; // 0x20
     uint8_t system_status;  // 24
     uint8_t unknown_25; // 0x00
     uint8_t unknown_26; // 0x00
-    uint8_t unknown_27; // 0x00 0x01 varies
-    uint8_t unknown_28; // Counter A_lo - Seems to match Gas Counter C (* 12.015)
-    uint8_t unknown_29; // Counter A_hi
-    uint8_t unknown_30; // Counter B_lo
-    uint8_t unknown_31; // Counter B_hi
+    uint8_t system_active;  // 27 0x00 = no, 0x01 = yes
+    uint8_t operation_time_lo;  // 28 operation time in hours (lo byte)
+    uint8_t operation_time_hi;  // 29 operation time in hours (hi byte)
+    uint8_t unknown_30; // 0x00
+    uint8_t unknown_31; // 0x01
     uint8_t unknown_32; // 0x00
     uint8_t recirculation_enabled;  // 33
     uint8_t unknown_34; // 0x00
@@ -216,7 +216,7 @@ enum CommandActionHotButton {
   typedef struct {
     uint8_t cmd_type; // Always 0x45 Gas
     uint8_t unknown_07; // 0x00
-    uint8_t unknown_08; // 0x01
+    uint8_t unknown_08; // 0x0B
     uint8_t unknown_09; // 0x01
     uint8_t controller_version_lo;  // 10
     uint8_t controller_version_hi;  // 11
@@ -227,34 +227,34 @@ enum CommandActionHotButton {
     uint8_t inlet_temp;   // 16
     uint8_t unknown_17; // 0x00
     uint8_t unknown_18; // 0x00
-    uint8_t unknown_19; // 0x00
-    uint8_t unknown_20; // Same current_gas_usage * 250, but has some info prefex, also extremely similar to operating_capactiy
+    uint8_t target_burner_power_lo;  // 19 target burner power in kcal (lo byte)
+    uint8_t target_burner_power_hi;  // 20 target burner power in kcal (hi byte)
     uint8_t unknown_21; // 0x01
-    uint8_t current_gas_lo;     // 22
-    uint8_t current_gas_hi;     // 23
-    uint8_t cumulative_gas_lo;  // 24
-    uint8_t cumulative_gas_hi;  // 25
-    uint8_t unknown_26; // 0x00
-    uint8_t unknown_27; // 0x00
-    uint8_t unknown_28; // Counter A_lo
-    uint8_t unknown_29; // Counter A_hi
+    uint8_t current_gas_lo;     // 22 current burner power in kcal (lo byte)
+    uint8_t current_gas_hi;     // 23 current burner power in kcal (hi byte)
+    uint8_t cumulative_gas_lo;  // 24 total gas usage in m3 x0.1 (byte 0)
+    uint8_t cumulative_gas_hi;  // 25 total gas usage in m3 x0.1 (byte 1)
+    uint8_t cumulative_gas_b2;  // 26 total gas usage in m3 x0.1 (byte 2)
+    uint8_t cumulative_gas_b3;  // 27 total gas usage in m3 x0.1 (byte 3)
+    uint8_t elapsed_install_days_lo;  // 28 elapsed time since install in days (lo byte)
+    uint8_t elapsed_install_days_hi;  // 29 elapsed time since install in days (hi byte)
     uint8_t cumulative_domestic_usage_cnt_lo; // 30 Domestic Usage Counter in 10 usage increments
     uint8_t cumulative_domestic_usage_cnt_hi; // 31
-    uint8_t unknown_32; // 0x9E 0x01 0xB7 0x46
-    uint8_t unknown_33; // Counter C_lo - Seems to match Water Counter A (/ 12.015)
-    uint8_t unknown_34; // Counter C_hi
-    uint8_t unknown_35; // 0x00
-    uint8_t total_operating_time_lo;  // 36
-    uint8_t total_operating_time_hi;  // 37
-    uint8_t unknown_38; // 0x00
-    uint8_t unknown_39; // 0x00
+    uint8_t cumulative_water_usage_lo;  // 32 total water usage in L x0.1 (byte 0)
+    uint8_t cumulative_water_usage_hi;  // 33 total water usage in L x0.1 (byte 1)
+    uint8_t cumulative_water_usage_b2;  // 34 total water usage in L x0.1 (byte 2)
+    uint8_t cumulative_water_usage_b3;  // 35 total water usage in L x0.1 (byte 3)
+    uint8_t total_operating_time_lo;    // 36 total operation time in hours (byte 0)
+    uint8_t total_operating_time_hi;    // 37 total operation time in hours (byte 1)
+    uint8_t total_operating_time_b2;    // 38 total operation time in hours (byte 2)
+    uint8_t total_operating_time_b3;    // 39 total operation time in hours (byte 3)
     uint8_t unknown_40; // 0x00
     uint8_t unknown_41; // 0x00
-    uint8_t unknown_42; // 0xA6
-    uint8_t unknown_43; // 0x49
+    uint8_t unknown_42; // 0xAA
+    uint8_t unknown_43; // 0x48
     uint8_t unknown_44; // 0x00
     uint8_t unknown_45; // 0x00
-    uint8_t unknown_46; // 0x01
+    uint8_t recirculation_enabled;  // 46 0x00 = no, 0x01 = yes
     uint8_t unknown_47; // 0x00
     // length is 42, ie 0 - 41
   } GAS_DATA;
@@ -309,15 +309,39 @@ enum CommandActionHotButton {
     float set_temp; // degree C
     float outlet_temp; // degree C
     float inlet_temp; // degree C
-    float flow_lpm; // Water flow velocity, via Recirculation or Tap being on 
+    float flow_lpm; // Water flow velocity, via Recirculation or Tap being on
     bool recirculation_active; // Recirculation mode is current ON
     bool recirculation_running; // Recirculation pump is currently running
     bool display_metric; // True == degree C; False == degree F
-    bool schedule_active;
-    bool hotbutton_active;
+    bool internal_recirculation; // Unit configured for internal recirculation
+    bool external_recirculation; // Unit configured for external recirculation
     float operating_capacity; // Percentage 0.0 - 100.0 %
     bool consumption_active; // Tap is turned on
     uint8_t flow_state;
+    uint8_t system_stage;  // Raw system operating stage value
+
+    // system_stage high-level groups (upper nibble)
+    bool stage_idle;          // 0x1x
+    bool stage_starting;      // 0x2x
+    bool stage_active;        // 0x3x
+    bool stage_shutting_down; // 0x4x
+
+    // system_stage specific sub-states
+    bool stage_standby;           // 0x14
+    bool stage_demand;            // 0x20
+    bool stage_pre_purge;         // 0x29
+    bool stage_ignition;          // 0x2B
+    bool stage_flame_on;          // 0x2C
+    bool stage_ramp_up;           // 0x2D
+    bool stage_active_combustion; // 0x33
+    bool stage_water_adjustment;  // 0x34
+    bool stage_flame_off;         // 0x3C
+    bool stage_post_purge_1;      // 0x46 post-purge 1/2 (15s)
+    bool stage_post_purge_2;      // 0x47 post-purge 2/2 (15s)
+    bool stage_dhw_wait;          // 0x49 dhw-wait (150s)
+
+    bool system_active;       // System is actively running
+    uint16_t operation_time;  // hours
     uint8_t device_number;
   } NAVIEN_STATE_WATER;
 
@@ -328,9 +352,13 @@ enum CommandActionHotButton {
     float controller_version;
     float panel_version;
     float accumulated_gas_usage;    // m^3 (ccf = m^3 / 2.832, Therms = m^3 / 2.832 * 1.02845 )
+    float accumulated_water_usage;  // L (gal = L / 3.78541)
     uint16_t current_gas_usage;     // kcal (btu == kcal * 3.965667)
-    uint32_t total_operating_time;  // minutes 
+    uint16_t target_gas_usage;      // kcal (btu == kcal * 3.965667)
+    uint32_t total_operating_time;  // minutes
+    uint16_t elapsed_install_days;  // days since install
     uint32_t accumulated_domestic_usage_cnt;  // Counter for domestic usage, increments every 10 usages
+    bool recirculation_enabled;     // recirculation is configured/enabled
   } NAVIEN_STATE_GAS;
 
   typedef struct {

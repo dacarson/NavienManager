@@ -50,6 +50,7 @@ unsigned long previousMillis = 0;
 #define JSON_ASSIGN_WATER_FLOAT(field) doc[#field] = serialized(String(water->field, 1))
 #define JSON_ASSIGN_GAS(field) doc[#field] = gas->field;
 #define JSON_ASSIGN_GAS_FLOAT(field) doc[#field] = serialized(String(gas->field, 1))
+#define JSON_ASSIGN_GAS_BOOL_TO_INT(field) doc[#field] = (int)(gas->field)
 #define JSON_ASSIGN_COMMAND(field) doc[#field] = state->command.field;
 #define JSON_ASSIGN_COMMAND_BOOL_TO_INT(field) doc[#field] = (int)(state->command.field);
 #define JSON_ASSIGN_ANNOUNCE_BOOL_TO_INT(field) doc[#field] = (int)(state->announce.field);
@@ -101,17 +102,32 @@ String waterToJSON(const Navien::NAVIEN_STATE_WATER *water, String rawhexstring 
   JSON_ASSIGN_WATER_BOOL_TO_INT(recirculation_active);
   JSON_ASSIGN_WATER_BOOL_TO_INT(recirculation_running);
   JSON_ASSIGN_WATER_BOOL_TO_INT(display_metric);
-  JSON_ASSIGN_WATER_BOOL_TO_INT(schedule_active);
-  JSON_ASSIGN_WATER_BOOL_TO_INT(hotbutton_active);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(internal_recirculation);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(external_recirculation);
   JSON_ASSIGN_WATER_FLOAT(operating_capacity);
   JSON_ASSIGN_WATER_BOOL_TO_INT(consumption_active);
+  JSON_ASSIGN_WATER(system_stage);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(stage_idle);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(stage_starting);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(stage_active);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(stage_shutting_down);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(stage_standby);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(stage_demand);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(stage_pre_purge);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(stage_ignition);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(stage_flame_on);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(stage_ramp_up);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(stage_active_combustion);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(stage_water_adjustment);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(stage_flame_off);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(stage_post_purge_1);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(stage_post_purge_2);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(stage_dhw_wait);
+  JSON_ASSIGN_WATER_BOOL_TO_INT(system_active);
+  JSON_ASSIGN_WATER(operation_time);
   doc["debug"] = rawhexstring;
-  doc["unknown_10"] = navienSerial.rawPacketData()->water.unknown_10;
-  doc["unknown_27"] = navienSerial.rawPacketData()->water.unknown_27;
-  doc["unknown_28"] = navienSerial.rawPacketData()->water.unknown_28;
   doc["unknown_30"] = navienSerial.rawPacketData()->water.unknown_30;
-  doc["counter_a"] = navienSerial.rawPacketData()->water.unknown_29 << 8 | navienSerial.rawPacketData()->water.unknown_28;
-  doc["counter_b"] = navienSerial.rawPacketData()->water.unknown_31 << 8 | navienSerial.rawPacketData()->water.unknown_30;
+  doc["unknown_31"] = navienSerial.rawPacketData()->water.unknown_31;
 
   String json;
   serializeJson(doc, json);
@@ -151,17 +167,14 @@ String gasToJSON(const Navien::NAVIEN_STATE_GAS *gas, String rawhexstring = "") 
   JSON_ASSIGN_GAS_FLOAT(outlet_temp);
   JSON_ASSIGN_GAS_FLOAT(panel_version);
   JSON_ASSIGN_GAS(current_gas_usage);
+  JSON_ASSIGN_GAS(target_gas_usage);
   JSON_ASSIGN_GAS_FLOAT(accumulated_gas_usage);
+  JSON_ASSIGN_GAS_FLOAT(accumulated_water_usage);
   JSON_ASSIGN_GAS(total_operating_time);
+  JSON_ASSIGN_GAS(elapsed_install_days);
   JSON_ASSIGN_GAS(accumulated_domestic_usage_cnt);
+  JSON_ASSIGN_GAS_BOOL_TO_INT(recirculation_enabled);
   doc["debug"] = rawhexstring;
-  doc["unknown_20"] = navienSerial.rawPacketData()->gas.unknown_20;
-  doc["unknown_28"] = navienSerial.rawPacketData()->gas.unknown_28;
-  doc["unknown_32"] = navienSerial.rawPacketData()->gas.unknown_32;
-  doc["unknown_33"] = navienSerial.rawPacketData()->gas.unknown_33;
-  doc["unknown_34"] = navienSerial.rawPacketData()->gas.unknown_34;
-  doc["counter_a"] = navienSerial.rawPacketData()->gas.unknown_29 << 8 | navienSerial.rawPacketData()->gas.unknown_28;
-  doc["counter_c"] = navienSerial.rawPacketData()->gas.unknown_34 << 8 | navienSerial.rawPacketData()->gas.unknown_33;
 
   String json;
   serializeJson(doc, json);

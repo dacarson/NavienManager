@@ -134,14 +134,14 @@ void navienStatus(String &html) {
 
   for (int i = 0; i <= navienSerial.currentState()->max_water_devices_seen; i++) {
     if (i == 0) {
-      html += statusCard("Navien Scheduler", navienSerial.currentState()->water[i].schedule_active ? "status-warning" :"status-ok", navienSerial.currentState()->water[i].schedule_active ? "Active":"Inactive");
+      html += statusCard("Recirculation", navienSerial.currentState()->water[i].external_recirculation || navienSerial.currentState()->water[i].internal_recirculation ? "status-warning" :"status-ok", navienSerial.currentState()->water[i].external_recirculation || navienSerial.currentState()->water[i].internal_recirculation ? "Configured":"Not Configured");
       html += statusCard("Operating Capacity", navienSerial.currentState()->water[i].operating_capacity > 0 ? "status-warning" :"status-ok", (String(navienSerial.currentState()->water[i].operating_capacity) + " %"));
 
       html += statusCard("Recirculation", navienSerial.currentState()->water[i].recirculation_active ? "status-warning" :"status-ok", navienSerial.currentState()->water[i].recirculation_active ? "Active":"Inactive");
       html += statusCard("Recirculation Pump", navienSerial.currentState()->water[i].recirculation_running ? "status-warning" :"status-ok", navienSerial.currentState()->water[i].recirculation_running ? "Running":"Stopped");
     } else {
-      sprintf(buffer, "Navien Scheduler [%d]", i);
-      html += statusCard(buffer, navienSerial.currentState()->water[i].schedule_active ? "status-warning" :"status-ok", navienSerial.currentState()->water[i].schedule_active ? "Active":"Inactive");
+      sprintf(buffer, "Recirculation [%d]", i);
+      html += statusCard(buffer, navienSerial.currentState()->water[i].external_recirculation || navienSerial.currentState()->water[i].internal_recirculation ? "status-warning" :"status-ok", navienSerial.currentState()->water[i].external_recirculation || navienSerial.currentState()->water[i].internal_recirculation ? "Configured":"Not Configured");
       sprintf(buffer, "Operating Capacity [%d]", i);
       html += statusCard(buffer, navienSerial.currentState()->water[i].operating_capacity > 0 ? "status-warning" :"status-ok", (String(navienSerial.currentState()->water[i].operating_capacity) + " %"));
 

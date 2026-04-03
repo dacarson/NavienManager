@@ -186,7 +186,7 @@ struct DEV_Navien : Service::Thermostat {
       valvePosition->setVal(operatingCap);
     }
 
-    if (!scheduler->enabled() &&  !navienSerial.currentState()->water[0].schedule_active) {
+    if (!scheduler->enabled() && !navienSerial.currentState()->water[0].external_recirculation && !navienSerial.currentState()->water[0].internal_recirculation) {
       programMode.setVal(0);
     } else if (scheduler->getCurrentState() == SchedulerBase::Override) {
       programMode.setVal(2);
