@@ -63,7 +63,7 @@ Add a `NavienLearner::onNavienState()` method called from wherever RS-485 packet
 ```cpp
 // Called every time a new RS-485 packet is processed (Core 1)
 void NavienLearner::onNavienState(bool consumption_active,
-                                  bool recirculation_running,
+                                  bool recirculation_active,
                                   time_t now);
 ```
 
@@ -92,7 +92,7 @@ Using elapsed seconds rather than a packet counter makes the thresholds independ
 ```
 consumption_active goes 0→1 AND (now - _lastActiveTime) >= cold_gap:
     → cold-start detected
-    → _recircAtStart = recirculation_running
+    → _recircAtStart = recirculation_active || (now - _lastRecircActiveTime < RECIRC_HOT_WINDOW_SEC)
     → _runStart = now, _runDurationSec = 0, _inRun = true
     → _runDow    = localtime(&now)->tm_wday          // pinned to tap-open time
     → _runBucket = (now_hour * 60 + now_min) / 5     // pinned to tap-open time
@@ -356,7 +356,7 @@ All other `NavienLearner` operations (bucket reads/writes to LittleFS, peak-find
 | `FakeGatoScheduler.cpp` — `parseProgramData()` | No mutex change needed — `setWeekScheduleFromJSON()` is already Core 1 only |
 | `FakeGatoScheduler.cpp` — `begin()` | Create `_scheduleHandoffMutex` |
 | `FakeGatoScheduler.cpp` — `loop()` | Non-blocking `xSemaphoreTake(_scheduleHandoffMutex, 0)`; if acquired and `_newScheduleReady`, copy JSON, clear flag, release mutex, call `setWeekScheduleFromJSON(localCopy)` — sole apply path; no pre-lock flag check |
-| `NavienBroadcaster.ino` — `onWaterPacket()` | Calls `learner->onNavienState(water->consumption_active, water->recirculation_running, time(nullptr))` at the top of the callback |
+| `NavienBroadcaster.ino` — `onWaterPacket()` | Calls `learner->onNavienState(water->consumption_active, water->recirculation_active, time(nullptr))` at the top of the callback |
 | HTTP `POST /schedule` (port 8080, raw `WiFiServer`) | No change — receives finished schedule from `navien_bootstrap.py` (Step 1) |
 | HTTP `POST /buckets` (port 8080, raw `WiFiServer`) | New path in existing `loopScheduleEndpoint()` dispatcher — calls `_learner->ingestBucketPayload(json)`; uses its own 6KB static buffer; triggers immediate recompute |
 | Telnet `learnerStatus` command | New command in existing `setupTelnetCommands()` — prints bucket fill, last recompute, and per-day predicted/measured/gap table |

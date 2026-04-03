@@ -69,7 +69,7 @@ NavienLearner::NavienLearner()
       _runDow(0),
       _runBucket(0),
       _recircAtStart(false),
-      _prevRecircRunning(false),
+      _lastRecircActiveTime(0),
       _coldStartQueue(nullptr),
       _taskHandle(nullptr),
       _recomputeRequested(false),
@@ -155,7 +155,7 @@ bool NavienLearner::begin() {
 // ---------------------------------------------------------------------------
 
 void NavienLearner::onNavienState(bool consumption_active,
-                                   bool recirculation_running,
+                                   bool recirculation_active,
                                    time_t now) {
     if (_learnerDisabled) {
         return;
@@ -174,11 +174,14 @@ void NavienLearner::onNavienState(bool consumption_active,
 
             _runStart        = now;
             _runDurationSec  = 0;
-            // Use the previous packet's recirc state: when the tap opens, the
-            // heater clears the recirc bit in the same packet it sets the
-            // consumption bit, so recirculation_running is already false here
-            // even if recirc was running a moment ago.
-            _recircAtStart   = recirculation_running || _prevRecircRunning;
+            // Pipes are considered hot if recirculation_active is true now
+            // OR was true within the last RECIRC_HOT_WINDOW_SEC (15 min) —
+            // matching navien_efficiency.py's RECIRC_WINDOW_MINUTES lookback.
+            // This covers taps opened shortly after a recirc slot ends.
+            bool recircRecent = recirculation_active ||
+                                (_lastRecircActiveTime > 0 &&
+                                 (now - _lastRecircActiveTime) < (time_t)RECIRC_HOT_WINDOW_SEC);
+            _recircAtStart   = recircRecent;
             _inRun           = true;
             // Event not dispatched yet — duration unknown until run ends.
         } else {
@@ -213,7 +216,9 @@ void NavienLearner::onNavienState(bool consumption_active,
         }
     }
 
-    _prevRecircRunning = recirculation_running;
+    if (recirculation_active) {
+        _lastRecircActiveTime = now;
+    }
 }
 
 // ---------------------------------------------------------------------------

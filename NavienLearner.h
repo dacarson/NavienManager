@@ -74,7 +74,7 @@ public:
     // Detects cold-starts and enqueues PendingColdStart events for Core 0.
     // Returns immediately if the learner is disabled.
     void onNavienState(bool consumption_active,
-                       bool recirculation_running,
+                       bool recirculation_active,
                        time_t now);
 
     // Access to the cross-core cold-start queue (consumed by Core 0 task).
@@ -135,6 +135,7 @@ public:
     static constexpr uint32_t COLD_GAP_SEC             = 600; // 10 min
     static constexpr uint32_t MIN_DURATION_GENUINE_SEC  = 60;  // 6 × 10s
     static constexpr uint32_t MIN_DURATION_RECIRC_SEC   = 30;  // 3 × 10s
+    static constexpr uint32_t RECIRC_HOT_WINDOW_SEC     = 900; // 15 min — matches config.py RECIRC_WINDOW_MINUTES
 
     // Recency weight for live (current-year) data, matching Python [3, 2]
     static constexpr float RECENCY_WEIGHT_CURRENT = 3.0f;
@@ -163,8 +164,8 @@ private:
     uint32_t _runDurationSec;    // elapsed seconds of current run
     int      _runDow;            // day-of-week pinned at run start (0=Sun)
     int      _runBucket;         // 5-min bucket index pinned at run start
-    bool     _recircAtStart;     // was recirc running when run started?
-    bool     _prevRecircRunning; // recirc state from the previous packet
+    bool     _recircAtStart;     // was recirc active (or recently active) when run started?
+    time_t   _lastRecircActiveTime; // last time recirculation_active was true (0 = never)
 
     // --- Cross-core queue (capacity 1, Core 1 writes, Core 0 reads) ---
     QueueHandle_t _coldStartQueue;

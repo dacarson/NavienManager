@@ -121,7 +121,7 @@ String waterToJSON(const Navien::NAVIEN_STATE_WATER *water, String rawhexstring 
 void onWaterPacket(Navien::NAVIEN_STATE_WATER *water) {
   if (learner) {
     learner->onNavienState(water->consumption_active,
-                           water->recirculation_running,
+                           water->recirculation_active,
                            time(nullptr));
   }
 

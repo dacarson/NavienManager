@@ -428,7 +428,7 @@ All per-day fields use a 3-letter day prefix: `sun`, `mon`, `tue`, `wed`, `thu`,
 | `last_recompute` | int | Unix timestamp of the completed recompute |
 | `bucket_fill_pct` | float (1 dp) | Percentage of 2016 buckets (7 days × 288 five-minute slots) that have at least one cold-start recorded |
 | `{pfx}_slots` | string | Recirculation schedule slots for that day, encoded as `"HH:MM-HH:MM,..."` (empty string if no slots were found) |
-| `{pfx}_predicted_pct` | float (1 dp) | Predicted efficiency: fraction of demand buckets that fall inside or within 15 min after a slot; omitted if bucket data is insufficient |
+| `{pfx}_predicted_pct` | float (1 dp) | Predicted efficiency: fraction of schedulable demand buckets (those inside a slot OR within 15 min after a slot end) that fall inside a slot; omitted if bucket data is insufficient |
 | `{pfx}_measured_pct` | float (1 dp) | Measured efficiency from the rolling 4-week cold-start window; omitted if no cold-starts have been observed yet for that day |
 | `{pfx}_gap_pct` | float (1 dp) | `predicted - measured`; omitted if either value is unavailable |
 | `{pfx}_cold_starts_4wk` | int | Cold-starts observed for that day across the rolling 4-week window; always present |
@@ -648,9 +648,13 @@ The `NavienLearner` class autonomously learns and recomputes the recirculation s
 
 **Day-of-week and bucket index are pinned to tap-open time**, not tap-close time. A run that opens at 23:58 belongs to the 23:55 bucket of that day, even if it closes after midnight.
 
-**Hardware note — recirc bit clears at tap-open:** When a tap opens while recirculation is running, the Navien heater clears the `recirculation_running` bit in the same RS-485 packet that sets `consumption_active`. The learner therefore tracks the recirc state from the **previous packet** (`_prevRecircRunning`) and uses `recirculation_running || _prevRecircRunning` when capturing `_recircAtStart`, ensuring that a demand that immediately followed recirc is correctly classified as covered.
+**Use `recirculation_active` with a 15-minute lookback to detect covered demands.** The Navien heater cycles the recirc pump on and off to maintain pipe temperature throughout a scheduled slot — `recirculation_running` (pump physically spinning, `flow_state & 0x08`) oscillates between 1 and 0 while the slot is active. A tap opened during the hot/idle phase between pump cycles will see `recirculation_running = 0` even though the pipes are fully pre-heated. `recirculation_active` (`recirculation_enabled & 0x2`) reflects whether recirc *mode* is on and stays true throughout the slot regardless of pump cycling.
 
-> **Diagnostic:** if Measured efficiency shows 0.0% for days that have accumulated a significant number of cold-starts (visible in the Cold-starts column), the almost certain cause is that `_prevRecircRunning` is not being maintained — every `_recircAtStart` is being set to false. Verify that `_prevRecircRunning` is updated at the end of every `onNavienState()` call and that `_recircAtStart` is set to `recirculation_running || _prevRecircRunning`, not just `recirculation_running`.
+Additionally, pipes stay hot for up to 15 minutes after a recirc slot ends (`RECIRC_HOT_WINDOW_SEC = 900`, matching `config.py RECIRC_WINDOW_MINUTES`). The learner tracks `_lastRecircActiveTime` and sets `_recircAtStart = true` if `recirculation_active` is currently true **or** was true within the last 15 minutes. This matches `navien_efficiency.py`'s lookback window exactly.
+
+`recirculation_active` comes from the `recirculation_enabled` byte, independent of `flow_state`, so it does not clear atomically with `consumption_active` — no previous-packet lookback is needed.
+
+> **Diagnostic:** if Measured efficiency shows 0.0% for days with a significant Cold-starts count, the cause is that `_recircAtStart` is never true. Verify: (1) `onNavienState()` receives `water->recirculation_active` (not `water->recirculation_running`); (2) `_lastRecircActiveTime` is updated whenever `recirculation_active` is true; (3) `_recircAtStart` checks both `recirculation_active` and the 15-minute window.
 
 **Queue failure:** If the FreeRTOS cold-start queue cannot be created, `begin()` sets `_learnerDisabled = true` and returns false. All subsequent `onNavienState()` calls return immediately. The rest of the firmware continues normally using the existing NVS/Eve schedule.
 
