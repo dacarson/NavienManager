@@ -146,6 +146,12 @@ bool NavienLearner::begin() {
         return false;
     }
 
+    // If buckets were loaded from flash, schedule an immediate recompute so
+    // that _predictedEfficiency is populated on startup without waiting for
+    // midnight or a POST /buckets upload.
+    if (_store.nonZeroCount() > 0)
+        _recomputeRequested = true;
+
     Serial.println("NavienLearner: ready");
     return true;
 }
