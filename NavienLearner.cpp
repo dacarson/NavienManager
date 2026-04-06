@@ -146,12 +146,6 @@ bool NavienLearner::begin() {
         return false;
     }
 
-    // If buckets were loaded from flash, schedule an immediate recompute so
-    // that _predictedEfficiency is populated on startup without waiting for
-    // midnight or a POST /buckets upload.
-    if (_store.nonZeroCount() > 0)
-        _recomputeRequested = true;
-
     Serial.println("NavienLearner: ready");
     return true;
 }
@@ -393,9 +387,17 @@ void NavienLearner::idleStep() {
     // where the device was powered off over New Year and reboots mid-January.
     if (!_startupDecayDone) {
         time_t now = time(nullptr);
-        if (now > 0) {
+        // now > 1700000000 = Nov 2023; guards against the RTC returning a small
+        // epoch value (year 1970) before NTP syncs — WiFi must be up first.
+        if (now > 1700000000L) {
             _startupDecayDone = true;
             decayCheck();  // no-op and no I/O if same year; saves only if year changed
+            // Recompute predicted efficiency from persisted buckets so that
+            // _predictedEfficiency is populated on startup without waiting for
+            // midnight or a POST /buckets upload.  Runs after the clock is valid
+            // (WiFi up) so broadcastUDP() in recomputeWrite() is safe.
+            if (_store.nonZeroCount() > 0)
+                _taskState = DECAY_CHECK;
         }
     }
 
