@@ -366,8 +366,10 @@ void Navien::loop() {
           if (recv_buffer.hdr.len == 0xFF) {
             if (on_error_cb)
               on_error_cb(__func__, "Invalid header length, are the 485 wires reversed?");
-          } else if (on_error_cb)
-            on_error_cb(__func__, "Buffer too small for packet length data, dropping packet.");
+          } else if (on_error_cb) {
+            sprintf(errBuffer, "Buffer too small for packet length data, dropping packet. len: %d, size: %d", recv_buffer.hdr.len, sizeof(PACKET_BUFFER) - 1);
+            on_error_cb(__func__, errBuffer);
+          }
           recv_state = INITIAL;
           return;
         }
