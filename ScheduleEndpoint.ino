@@ -148,8 +148,10 @@ void loopScheduleEndpoint() {
     int  bodyLen = 0;
     bool ok = readHttpBody(client, scheduleBodyBuf, SCHEDULE_BODY_MAX, contentLen, &bodyLen)
               && scheduler->setWeekScheduleFromJSON(scheduleBodyBuf);
-    if (ok)
+    if (ok) {
+      Serial.println(F("Schedule updated from HTTP POST"));
       client.print(F("HTTP/1.1 200 OK\r\nContent-Length: 18\r\n\r\nSchedule accepted\n"));
+    }
     else
       client.print(F("HTTP/1.1 400 Bad Request\r\nContent-Length: 22\r\nConnection: close\r\n\r\nInvalid schedule JSON\n"));
 

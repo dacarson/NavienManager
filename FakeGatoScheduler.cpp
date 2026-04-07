@@ -540,7 +540,6 @@ bool FakeGatoScheduler::setWeekScheduleFromJSON(const String &json) {
   nvs_commit(savedData);
   refreshProgramData = true;
 
-  Serial.println("Schedule updated from HTTP POST");
   return true;
 }
 
