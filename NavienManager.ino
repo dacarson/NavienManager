@@ -52,16 +52,25 @@ void myWiFiBegin(const char *s, const char *p) {
 }
 
 void onWifiConnected(int connection) {
-  // Setup callbacks for UDP broadcast
-  setupNavienBroadcaster();
+  // HomeSpan fires this callback on L2 association, before DHCP completes.
+  // Bail out if we don't have a valid IP yet.
+  if (WiFi.localIP() == IPAddress(0, 0, 0, 0)) {
+    return;
+  }
 
-  // Start schedule HTTP endpoint on port 8080
-  setupScheduleEndpoint();
+  // Only run setup once; on reconnects the servers are already running.
+  if (!wifiConnected) {
+    // Setup callbacks for UDP broadcast
+    setupNavienBroadcaster();
 
-  // Start Telnet server on port 23
-  setupTelnetCommands();
+    // Start schedule HTTP endpoint on port 8080
+    setupScheduleEndpoint();
 
-  wifiConnected = true;
+    // Start Telnet server on port 23
+    setupTelnetCommands();
+
+    wifiConnected = true;
+  }
 }
 
 void setup() {
