@@ -34,18 +34,22 @@ A TZ-free `timegm()` equivalent. The current `timegm()` hack in `FakeGatoSchedul
 #pragma once
 #include <time.h>
 time_t proper_timegm(const struct tm *t);
+```
 
-// TimeUtils.cpp
+> **Sketch only — do not implement as shown.** The snippet below uses `30.6001` floating-point, which Phase 1 explicitly rejects in favour of integer arithmetic. Follow Phase 1's implementation guidance; the sketch is retained only to illustrate the algorithm structure.
+
+```cpp
+// TimeUtils.cpp — ILLUSTRATIVE ONLY; use integer Fliegel-Van Flandern arithmetic in practice
 time_t proper_timegm(const struct tm *t) {
     int y = t->tm_year + 1900, m = t->tm_mon + 1;
     if (m <= 2) { y--; m += 12; }
     long days = (long)(365 * y) + (y/4) - (y/100) + (y/400)
-              + (long)(30.6001 * (m + 1)) + t->tm_mday - 719591L;
+              + (long)(30.6001 * (m + 1)) + t->tm_mday - 719591L;  // ← replace with integer
     return (time_t)(days * 86400L + t->tm_hour * 3600L + t->tm_min * 60L + t->tm_sec);
 }
 ```
 
-Use a **unit-tested** calendar→epoch implementation (integer mudane / Fliegel–Van Flandern style is preferable to `30.6001` floating‑point) and validate against known `struct tm` ↔ UTC instants on the ESP32 toolchain; `time_t` is signed 32‑bit on many Arduino builds, so document the supported year range.
+Use a **unit-tested** integer calendar→epoch implementation and validate against known `struct tm` ↔ UTC instants on the ESP32 toolchain; `time_t` is signed 32‑bit on many Arduino builds, so document the supported year range.
 
 Include from `SchedulerBase.cpp` and `FakeGatoScheduler.cpp`.
 
@@ -236,29 +240,138 @@ if (!timeInit) {
 
 ---
 
-## Recommended Implementation Order
+## Implementation Phases
 
-1. Create `TimeUtils.h` / `TimeUtils.cpp` with `proper_timegm()`
-2. `FakeGatoScheduler.cpp` — replace `timegm()` hack; add `_lastKnownUtcOffsetMin`; add `convertEveSlotsToUTC()`; wire into `parseProgramData()`; NVS `schedVersion` + migration reset on `SAVED_DATA` before `updateSchedulerWeekSchedule()` in `begin()`; Eve readback UTC→local
-3. `SchedulerBase.cpp` — `gmtime()` + `proper_timegm()` in firing path; remove TZ guard; relax TZ-missing messaging in `begin()`
-4. `NavienLearner.cpp` / `NavienLearner.h` — `gmtime()` for buckets; 24h elapsed timer
-5. `BucketStore.cpp` / `BucketStore.h` — `gmtime()` for year; bump `BUCKET_SCHEMA_VERSION`
-6. `NavienManager.ino` — epoch-based clock gate
-7. Python: `navien_schedule_learner.py` — UTC bucket path; drop `local_tz`
-8. Python: `navien_bootstrap.py` + `navien_bucket_export.py` — drop `local_tz`; send `schema_version: 2`
+The migration is split into four independently flashable phases. Each phase can be verified before starting the next. Phases 2 and 3 each require a post-flash step; Phase 4 is Python-only and requires no firmware flash.
+
+> **Why this order?** Phase 1 proves `proper_timegm()` before anything depends on it. Phase 2 is self-contained (learner/buckets have no schedule dependency). Phase 3 is the highest-risk change and is tackled last on a proven foundation. Phase 4 must be applied before Phase 2's post-flash step 2 (`navien_bucket_export.py --push --replace`) — the device will reject a `schema_version: 1` payload after `BUCKET_SCHEMA_VERSION` is bumped to 2, and the old script produces local-time bucket indices that would contradict the UTC firmware.
 
 ---
 
-## Post-Flash Checklist
+### Phase 1 — Foundation
+**Goal:** Add `proper_timegm()` with no behavioral change. Independently verifiable.
 
-After flashing new firmware:
-1. Verify device boots and connects to WiFi/NTP normally.
-2. Check weblog for the migration reset message (logged from `FakeGatoScheduler` / `SAVED_DATA` path) — confirms slot reset.
-3. Open Eve app → Programs tab → re-save the week schedule (triggers `parseProgramData()` → `convertEveSlotsToUTC()` → NVS write).
-4. Run `python3 navien_bucket_export.py --push --replace` to re-seed UTC buckets from InfluxDB.
-5. Run `python3 navien_bootstrap.py --push` if you want the computed schedule re-derived from InfluxDB in UTC.
-6. Verify telnet `schedule` command shows correct local times (confirms UTC→local display conversion).
-7. Verify Eve shows correct schedule times.
+**Files:**
+- `TimeUtils.h` *(new)*
+- `TimeUtils.cpp` *(new)*
+
+**Work:**
+- Implement integer-arithmetic `proper_timegm()` (no `30.6001` float; no TZ env touch).
+- Write table-driven test harness covering: epoch=0, 2025-01-01 00:00 UTC, PST/PDT crossover, UTC+9:30 half-hour zone, year 2038 boundary.
+- Document supported `time_t` year range (ESP32 Arduino: signed 32-bit, overflows 2038).
+
+**Post-flash verification:** Compile-only; no flash needed. Run test harness on host or ESP32 serial.
+
+---
+
+### Phase 2 — Learner & Buckets
+**Goal:** Bucket recording and daily recompute become UTC-based. Completely independent of the schedule system.
+
+**Files:**
+- `NavienLearner.cpp`
+- `NavienLearner.h`
+- `BucketStore.cpp`
+- `BucketStore.h`
+
+**Work:**
+- `onNavienState()` line 171: `localtime` → `gmtime` for `_runDow` and `_runBucket`.
+- `idleStep()` lines 436–448: replace `localtime_r` midnight detection with 24h elapsed timer; UTC Sunday check for `advanceMeasuredWeek()`.
+- `decayCheck()` line 476: `localtime_r` → `gmtime_r`.
+- `ingestBucketPayload()` line 656: `localtime` → `gmtime`.
+- `BucketStore::begin()` line 67: `localtime` → `gmtime`.
+- Bump `BUCKET_SCHEMA_VERSION` to 2 (forces `initEmpty()` on first boot).
+- Bump `MEASURED_SCHEMA_VERSION` to 2 (clean reset; 4-week window repopulates within a week).
+- Replace `_lastRecomputeYday` with `_lastRecomputeTime24h` in `NavienLearner.h` and constructor.
+
+> **Mixed-state note:** Between flashing Phase 2 and Phase 3, buckets are UTC-indexed while schedule firing remains local-time. The two are internally consistent within their own subsystems, but bucket timestamps and slot boundaries will not align until Phase 3 is flashed. This is expected and harmless for the interim period.
+
+**Post-flash steps:**
+1. Verify device boots and weblog shows bucket schema reset.
+2. Run `python3 navien_bucket_export.py --push --replace` to re-seed UTC buckets from InfluxDB.
+3. Monitor for 24–48 hours: confirm recompute fires roughly 24h after startup (not at wrong local hour). Note: the first interval is 24h from the first eligible `idleStep()` tick with a valid `now`, not from NTP sync itself — in practice the same order of magnitude but not exact.
+
+---
+
+### Phase 3 — Schedule System
+**Goal:** Schedule slots stored and fired in UTC. Eve write path converts local→UTC; Eve read path converts UTC→local. TZ becomes display-only.
+
+**Must ship as a single flash** — changing the firing path to expect UTC slots and the write path to store UTC slots must be atomic.
+
+**Files:**
+- `TimeUtils.h` / `TimeUtils.cpp` *(Phase 1 prerequisite)*
+- `FakeGatoScheduler.h`
+- `FakeGatoScheduler.cpp`
+- `SchedulerBase.cpp`
+- `NavienManager.ino`
+
+**Work:**
+
+*`FakeGatoScheduler.h`:*
+- Add `int _lastKnownUtcOffsetMin = 0;`
+- Add `void convertEveSlotsToUTC(int utcOffsetMin);`
+
+*`FakeGatoScheduler.cpp`:*
+- Remove `timegm()` TZ-swap hack (lines 34–56); replace all callers with `proper_timegm()`.
+- `parseProgramData()` `CURRENT_TIME` case: compute and store `_lastKnownUtcOffsetMin`; clamp to ±720 min; log warning if out of range.
+- `parseProgramData()` `WEEK_SCHEDULE` case: call `convertEveSlotsToUTC(_lastKnownUtcOffsetMin)` before `updateSchedulerWeekSchedule()`.
+- Packet ordering mitigation: if `WEEK_SCHEDULE` arrives before `CURRENT_TIME` in the same buffer, recompute offset inline from `prog_send_data.currentTime` vs `time(nullptr)` rather than using the stale member. Note: this is only reliable if `prog_send_data.currentTime` was refreshed in the same or a recent session; a stale value from a prior connection is the same residual risk noted elsewhere in the plan.
+- Implement `convertEveSlotsToUTC()` with day-rollover and midnight-truncation logic.
+- `FakeGatoScheduler::begin()`: add `schedVersion` check on `SAVED_DATA` handle before `updateSchedulerWeekSchedule()`; if version != 1, clear slots and write version 1.
+- All Eve readback paths: convert stored UTC slots → local before sending to Eve.
+- `addMilliseconds()`: add comment — intentionally local-time (Eve wire struct).
+- `guessTimeZone()`: add comment — TZ is now display-only.
+- `updateCurrentScheduleIfNeeded()`: add comment — intentionally `localtime()`.
+
+*`SchedulerBase.cpp`:*
+- `initializeCurrentState()` line 390: `localtime` → `gmtime`.
+- `getNextState()` lines 157, 173: `localtime` → `gmtime`.
+- `getNextState()` lines 194, 217: `tm_isdst = -1` → `0`; `mktime` → `proper_timegm`.
+- `loop()` line 434: remove `getenv("TZ") == 0` guard.
+- `begin()`: update TZ-missing log message to reflect display-only status.
+
+*`NavienManager.ino`:*
+- `loop()` lines 114–121: replace TZ+`getLocalTime()` gate with raw epoch check (`time(nullptr) > 1700000000L`).
+
+**Post-flash steps:**
+1. Verify weblog shows `schedVersion` migration reset message.
+2. Open Eve app → Programs tab → re-save the week schedule (triggers `parseProgramData()` → `convertEveSlotsToUTC()` → NVS write).
+3. Verify telnet `schedule` command shows correct local times (confirms UTC→local display conversion).
+4. Verify Eve shows correct schedule times.
+5. Wait for a scheduled recirc event and confirm it fires at the correct local wall-clock time.
+
+---
+
+### Phase 4 — Python Tools
+**Goal:** Bootstrap and bucket-export scripts generate UTC indices; no local timezone dependency.
+
+**No firmware flash required.** Must be applied before Phase 2's post-flash step 2 — `navien_bucket_export.py --push --replace` must send `schema_version: 2` with UTC-indexed buckets or the device will reject the payload. Can otherwise be applied independently of Phase 3.
+
+**Files:**
+- `Logger/navien_schedule_learner.py`
+- `Logger/navien_bootstrap.py`
+- `Logger/navien_bucket_export.py`
+
+**Work:**
+
+*`navien_schedule_learner.py`:*
+- `_extract_cold_starts()`: remove `local_tz` parameter; keep timestamps as UTC `datetime`.
+- `fetch_consumption_events()`: remove `local_tz` parameter.
+- `events_to_minutes()`: `dow` and `minute_of_day` now derived from UTC `datetime`. Update display strings from local-time labels to UTC.
+- `main()`: remove `detect_local_timezone()` call and timezone print.
+
+*`navien_bootstrap.py`:*
+- Remove `nsl.detect_local_timezone()` call (line 101) and print.
+- Update `nsl.fetch_consumption_events(args, local_tz)` → `nsl.fetch_consumption_events(args)`.
+
+*`navien_bucket_export.py`:*
+- Remove `local_tz` from `build_bucket_payload()` signature (line 36).
+- Remove `nsl.detect_local_timezone()` call (line 175) and print.
+- Update `build_bucket_payload(args, local_tz, ...)` → `build_bucket_payload(args, ...)`.
+- Send `schema_version: 2` in payload.
+
+**Post-run verification:**
+- Dry-run `navien_bootstrap.py` and confirm peak times look correct in UTC (SF morning peaks should appear around 14:00–16:00 UTC).
+- Run `navien_bucket_export.py --push --replace` to re-seed with UTC buckets.
 
 ---
 
