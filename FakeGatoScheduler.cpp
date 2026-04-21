@@ -550,6 +550,11 @@ int FakeGatoScheduler::begin() {
     // prog_send_data is the authoritative source for FakeGatoScheduler.
     updateSchedulerWeekSchedule();
     updateCurrentScheduleIfNeeded(true);
+
+    // TODO(Phase 3): check schedVersion in SAVED_DATA here; if slots have been
+    // migrated to UTC, call setScheduleUtcMode(true) to enable the
+    // learner→scheduler handoff path.
+
     return true;
   }
 
@@ -562,7 +567,10 @@ void FakeGatoScheduler::loop() {
   // Apply any new schedule produced by NavienLearner on Core 0.
   // checkNewSchedule() is non-blocking; it returns false immediately if no
   // new schedule is ready.  setWeekScheduleFromJSON() must only run on Core 1.
-  if (learner && !learner->isDisabled()) {
+  // Only apply learner-generated (UTC) schedules once the scheduler firing
+  // path is also UTC-based (Phase 3).  Before that, applying UTC slots to a
+  // localtime-based scheduler would cause firings at the wrong wall-clock time.
+  if (_scheduleIsUtc && learner && !learner->isDisabled()) {
     String newScheduleJson;
     if (learner->checkNewSchedule(newScheduleJson)) {
       setWeekScheduleFromJSON(newScheduleJson);

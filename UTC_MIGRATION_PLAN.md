@@ -130,19 +130,31 @@ Sign: for PST (UTC-8), sysUTC=15:00 and evePseudo=07:00, so `_lastKnownUtcOffset
 
 **`onNavienState()` (line 171)** — `localtime(&now)` → `gmtime(&now)` for `_runDow` and `_runBucket`.
 
-**`idleStep()` (lines 436–448)** — Replace `localtime_r` midnight detection with 24h elapsed timer:
+**`idleStep()` (lines 436–448)** — Replace `localtime_r` midnight detection with 24h elapsed timer (same `now > 1700000000L` guard as startup decay so bogus pre-NTP epochs are not anchored):
 ```cpp
-if (_lastRecomputeTime24h == 0) _lastRecomputeTime24h = now;
-if (now - _lastRecomputeTime24h >= 86400L) {
-    _lastRecomputeTime24h = now;
-    struct tm tm_buf;
-    struct tm *t = gmtime_r(&now, &tm_buf);
-    if (t->tm_wday == 0)          // UTC Sunday
-        advanceMeasuredWeek();
-    _taskState = DECAY_CHECK;
+time_t now = time(nullptr);
+if (now > 1700000000L) {
+    if (_lastRecomputeTime24h == 0) {
+        // First eligible tick — persist immediately so a reboot within the first
+        // 24h window anchors from this point rather than resetting to zero.
+        _lastRecomputeTime24h = now;
+        saveMeasured();
+    }
+    // Guard NTP backward jump: a forward jump fires one recompute early at most.
+    if (_lastRecomputeTime24h > now) _lastRecomputeTime24h = now;
+    if (now - _lastRecomputeTime24h >= 86400L) {
+        _lastRecomputeTime24h = now;
+        struct tm tm_buf;
+        struct tm *t = gmtime_r(&now, &tm_buf);
+        if (t->tm_wday == 0)
+            advanceMeasuredWeek();  // advanceMeasuredWeek() calls saveMeasured()
+        else
+            saveMeasured();         // persist updated 24h anchor between weekly saves
+        _taskState = DECAY_CHECK;
+    }
 }
 ```
-Remove `_lastRecomputeYday` usage.
+Remove `_lastRecomputeYday` usage. `_lastRecomputeTime24h` is persisted in `MeasuredFile` as `int64_t` (future-safe if `time_t` widens; ESP32 platform limit is 2038 regardless) and restored by `loadMeasured()` on boot.
 
 **`decayCheck()` (line 476)** — `localtime_r` → `gmtime_r`.
 
@@ -244,7 +256,7 @@ if (!timeInit) {
 
 The migration is split into four independently flashable phases. Each phase can be verified before starting the next. Phases 2 and 3 each require a post-flash step; Phase 4 is Python-only and requires no firmware flash.
 
-> **Why this order?** Phase 1 proves `proper_timegm()` before anything depends on it. Phase 2 is self-contained (learner/buckets have no schedule dependency). Phase 3 is the highest-risk change and is tackled last on a proven foundation. Phase 4 must be applied before Phase 2's post-flash step 2 (`navien_bucket_export.py --push --replace`) — the device will reject a `schema_version: 1` payload after `BUCKET_SCHEMA_VERSION` is bumped to 2, and the old script produces local-time bucket indices that would contradict the UTC firmware.
+> **Why this order?** Phase 1 proves `proper_timegm()` before anything depends on it. Phase 2 makes learner/buckets UTC-native and gates the learner→scheduler apply path so UTC-indexed slots cannot reach the still-local-time firing path; schedule behavior is unchanged. Phase 3 is the highest-risk change and is tackled last on a proven foundation. Phase 4 must be applied before Phase 2's post-flash step 3 (`navien_bucket_export.py --push --replace`) — the device will reject a `schema_version: 1` payload after `BUCKET_SCHEMA_VERSION` is bumped to 2, and the old script produces local-time bucket indices that would contradict the UTC firmware.
 
 ---
 
@@ -265,30 +277,36 @@ The migration is split into four independently flashable phases. Each phase can 
 ---
 
 ### Phase 2 — Learner & Buckets
-**Goal:** Bucket recording and daily recompute become UTC-based. Completely independent of the schedule system.
+**Goal:** Bucket recording and daily recompute become UTC-based. Schedule firing is unchanged: the learner→scheduler apply path is gated behind `_scheduleIsUtc` (set false until Phase 3) so UTC-indexed learner output cannot reach the still-local-time firing path.
 
 **Files:**
 - `NavienLearner.cpp`
 - `NavienLearner.h`
 - `BucketStore.cpp`
 - `BucketStore.h`
+- `FakeGatoScheduler.h` *(add `_scheduleIsUtc = false` gate)*
+- `FakeGatoScheduler.cpp` *(guard learner handoff on `_scheduleIsUtc`)*
 
 **Work:**
 - `onNavienState()` line 171: `localtime` → `gmtime` for `_runDow` and `_runBucket`.
-- `idleStep()` lines 436–448: replace `localtime_r` midnight detection with 24h elapsed timer; UTC Sunday check for `advanceMeasuredWeek()`.
+- `idleStep()` lines 436–448: replace `localtime_r` midnight detection with 24h elapsed timer; gate the whole block on `now > 1700000000L` (plausible NTP-synced epoch); UTC Sunday check for `advanceMeasuredWeek()`.
 - `decayCheck()` line 476: `localtime_r` → `gmtime_r`.
 - `ingestBucketPayload()` line 656: `localtime` → `gmtime`.
 - `BucketStore::begin()` line 67: `localtime` → `gmtime`.
 - Bump `BUCKET_SCHEMA_VERSION` to 2 (forces `initEmpty()` on first boot).
 - Bump `MEASURED_SCHEMA_VERSION` to 2 (clean reset; 4-week window repopulates within a week).
 - Replace `_lastRecomputeYday` with `_lastRecomputeTime24h` in `NavienLearner.h` and constructor.
+- Add `int64_t last_recompute_24h` to `MeasuredFile`; persist in `saveMeasured()`, restore in `loadMeasured()`.
+- Call `saveMeasured()` whenever the 24h branch fires (non-Sunday path); `advanceMeasuredWeek()` already calls it on Sunday.
+- Add `_scheduleIsUtc = false` and `setScheduleUtcMode(bool)` to `FakeGatoScheduler`; gate learner→`setWeekScheduleFromJSON` handoff on `_scheduleIsUtc` in `loop()`. A `// TODO(Phase 3)` comment in `begin()` marks where to call `setScheduleUtcMode(true)` after the `schedVersion` migration check.
 
-> **Mixed-state note:** Between flashing Phase 2 and Phase 3, buckets are UTC-indexed while schedule firing remains local-time. The two are internally consistent within their own subsystems, but bucket timestamps and slot boundaries will not align until Phase 3 is flashed. This is expected and harmless for the interim period.
+> **Mixed-state note:** Between flashing Phase 2 and Phase 3, buckets are UTC-indexed while schedule firing remains local-time. The learner→scheduler auto-apply path (`FakeGatoScheduler::loop()` → `setWeekScheduleFromJSON()`) is **suppressed** until Phase 3 sets `_scheduleIsUtc = true` — learner recomputes run and produce UTC slots, but those slots are not applied to the firing path until the scheduler is also UTC-aware. This prevents UTC-indexed learner output from being interpreted as local-time and firing at the wrong wall-clock time.
 
 **Post-flash steps:**
 1. Verify device boots and weblog shows bucket schema reset.
-2. Run `python3 navien_bucket_export.py --push --replace` to re-seed UTC buckets from InfluxDB.
-3. Monitor for 24–48 hours: confirm recompute fires roughly 24h after startup (not at wrong local hour). Note: the first interval is 24h from the first eligible `idleStep()` tick with a valid `now`, not from NTP sync itself — in practice the same order of magnitude but not exact.
+2. **Prerequisite: Phase 4 must be applied first.** `navien_bucket_export.py` must send `schema_version: 2` with UTC-indexed buckets. The pre-Phase-4 script sends local-time indices and `schema_version: 1`, which the device will reject (schema mismatch). Apply Phase 4 Python changes before running this step.
+3. Run `python3 navien_bucket_export.py --push --replace` to re-seed UTC buckets from InfluxDB.
+4. Monitor for 24–48 hours: confirm recompute fires roughly 24h after startup (not at wrong local hour). Note: `_lastRecomputeTime24h` is persisted to `measured.bin` whenever the 24h branch fires (and on every `advanceMeasuredWeek()` / OTA / `saveLearner`), so the anchor survives reboots and the first post-reboot interval is at most 24h from the last persisted value.
 
 ---
 
@@ -316,7 +334,7 @@ The migration is split into four independently flashable phases. Each phase can 
 - `parseProgramData()` `WEEK_SCHEDULE` case: call `convertEveSlotsToUTC(_lastKnownUtcOffsetMin)` before `updateSchedulerWeekSchedule()`.
 - Packet ordering mitigation: if `WEEK_SCHEDULE` arrives before `CURRENT_TIME` in the same buffer, recompute offset inline from `prog_send_data.currentTime` vs `time(nullptr)` rather than using the stale member. Note: this is only reliable if `prog_send_data.currentTime` was refreshed in the same or a recent session; a stale value from a prior connection is the same residual risk noted elsewhere in the plan.
 - Implement `convertEveSlotsToUTC()` with day-rollover and midnight-truncation logic.
-- `FakeGatoScheduler::begin()`: add `schedVersion` check on `SAVED_DATA` handle before `updateSchedulerWeekSchedule()`; if version != 1, clear slots and write version 1.
+- `FakeGatoScheduler::begin()`: add `schedVersion` check on `SAVED_DATA` handle before `updateSchedulerWeekSchedule()`; if version != 1, clear slots and write version 1. After confirming slots are UTC-valid, call `setScheduleUtcMode(true)` to enable the learner→scheduler handoff (replaces the `// TODO(Phase 3)` stub from Phase 2).
 - All Eve readback paths: convert stored UTC slots → local before sending to Eve.
 - `addMilliseconds()`: add comment — intentionally local-time (Eve wire struct).
 - `guessTimeZone()`: add comment — TZ is now display-only.
@@ -344,7 +362,7 @@ The migration is split into four independently flashable phases. Each phase can 
 ### Phase 4 — Python Tools
 **Goal:** Bootstrap and bucket-export scripts generate UTC indices; no local timezone dependency.
 
-**No firmware flash required.** Must be applied before Phase 2's post-flash step 2 — `navien_bucket_export.py --push --replace` must send `schema_version: 2` with UTC-indexed buckets or the device will reject the payload. Can otherwise be applied independently of Phase 3.
+**No firmware flash required.** Must be applied before Phase 2's post-flash step 3 — `navien_bucket_export.py --push --replace` must send `schema_version: 2` with UTC-indexed buckets or the device will reject the payload. Can otherwise be applied independently of Phase 3.
 
 **Files:**
 - `Logger/navien_schedule_learner.py`

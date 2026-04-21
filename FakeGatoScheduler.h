@@ -39,6 +39,10 @@ public:
   bool enabled() { return scheduleActive; }
   void setEnabled(bool enable);
 
+  // Phase 3 calls this after the schedVersion NVS migration to indicate that
+  // stored slots are UTC and learner-generated schedules may be applied.
+  void setScheduleUtcMode(bool utc) { _scheduleIsUtc = utc; }
+
   static String getSchedulerState(int state); // Return the state as a string
 
   // When the Service recieves Eve Program Data,
@@ -116,7 +120,14 @@ protected:
   uint8_t temperature_offset = 0;
   int currentScheduleDay = -1;
   
-  bool scheduleActive;
+  bool scheduleActive;  // legacy name; new private members use underscore prefix
+
+  // True once Phase 3 has verified stored slots are UTC.
+  // Learner-generated schedules (which are UTC) must not be applied to the
+  // firing path until the scheduler itself is also UTC-aware.
+  // Set via setScheduleUtcMode(true) from begin() after the schedVersion
+  // migration check in Phase 3.
+  bool _scheduleIsUtc = false;
   
   struct PROG_CMD_SCHEDULE_STATE {
     uint8_t header = SCHEDULE_STATE;

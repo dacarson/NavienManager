@@ -64,7 +64,7 @@ bool BucketStore::begin() {
 
     // File absent or corrupt — start fresh.
     time_t now = time(nullptr);
-    struct tm *tm_info = localtime(&now);
+    struct tm *tm_info = gmtime(&now);
     uint16_t year = (tm_info && tm_info->tm_year > 100)
                     ? (uint16_t)(tm_info->tm_year + 1900)
                     : 2025;
