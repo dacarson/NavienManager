@@ -128,7 +128,15 @@ protected:
   // Set via setScheduleUtcMode(true) from begin() after the schedVersion
   // migration check in Phase 3.
   bool _scheduleIsUtc = false;
-  
+
+  // UTC offset in minutes computed from the Eve CURRENT_TIME TLV vs system UTC.
+  // Sign convention: UTC = Eve_local + _lastKnownUtcOffsetMin
+  // Example: PST (UTC-8) → Eve sends 07:00, sysUTC=15:00 → offset = +480.
+  int _lastKnownUtcOffsetMin = 0;
+  // True once a valid offset has been established from CURRENT_TIME or inline recompute.
+  // convertEveSlotsToUTC is skipped until this is set to avoid treating local as UTC.
+  bool _utcOffsetKnown = false;
+
   struct PROG_CMD_SCHEDULE_STATE {
     uint8_t header = SCHEDULE_STATE;
     uint8_t schedule_on = 0;  // 00 Schedule off, 01 schedule on
@@ -155,7 +163,13 @@ protected:
     uint8_t header = WEEK_SCHEDULE;
     CMD_DAY_SCHEDULE day[7];
   };
-  
+
+  // General slot offset converter: reads 'in', applies offsetMin, writes cleared+filled 'out'.
+  // Use positive offsetMin for local→UTC (UTC = local + offset) and negative for UTC→local.
+  static void convertSlotsOffset(const PROG_CMD_WEEK_SCHEDULE &in,
+                                  PROG_CMD_WEEK_SCHEDULE &out, int offsetMin);
+  void convertEveSlotsToUTC(int utcOffsetMin);
+
   struct PROG_CMD_CURRENT_SCHEDULE {
     uint8_t header = CURRENT_SCHEDULE;
     CMD_DAY_SCHEDULE current;

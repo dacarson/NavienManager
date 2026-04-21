@@ -111,10 +111,9 @@ void loop() {
     loopScheduleEndpoint();
   }
 
-  // Check for system clock setup, which the SchedulerBase class does
-  if (!timeInit && getenv("TZ")){
-    struct tm localTime;
-    if (getLocalTime(&localTime)) { // getLocalTime() returns non-zero if initialized
+  // Gate HomeSpan time on a plausible NTP-synced epoch; TZ is no longer required.
+  if (!timeInit) {
+    if (time(nullptr) > 1700000000L) {
       timeInit = true;
       homeSpan.assumeTimeAcquired();
     }
