@@ -23,41 +23,9 @@ import json
 import sys
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import config   # Navien shared config (rates, InfluxDB connection, timing)
 
-
-# ---------------------------------------------------------------------------
-# Timezone detection
-# ---------------------------------------------------------------------------
-def detect_local_timezone():
-    """
-    Read the system timezone from /etc/timezone (Debian/Raspberry Pi OS standard).
-    Falls back to UTC with a warning if the file is missing or unreadable.
-    """
-    try:
-        with open("/etc/timezone") as f:
-            tz_name = f.read().strip()
-        tz = ZoneInfo(tz_name)
-        return tz, tz_name
-    except (FileNotFoundError, ZoneInfoNotFoundError):
-        pass
-
-    # Fallback: try the /etc/localtime symlink target
-    import os
-    try:
-        link = os.readlink("/etc/localtime")
-        # e.g. /usr/share/zoneinfo/America/Los_Angeles
-        tz_name = "/".join(link.split("/")[-2:])
-        tz = ZoneInfo(tz_name)
-        return tz, tz_name
-    except (OSError, ZoneInfoNotFoundError):
-        pass
-
-    print("[timezone] WARNING: Could not detect system timezone. Defaulting to UTC.")
-    print("[timezone] Set your Pi's timezone with: sudo raspi-config → Localisation Options")
-    return timezone.utc, "UTC"
 
 # ---------------------------------------------------------------------------
 # Configuration defaults  (override via CLI args)
@@ -158,7 +126,7 @@ def _format_influx_time_utc(dt):
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _extract_cold_starts(points, local_tz, recency_weight, cold_gap_minutes,
+def _extract_cold_starts(points, recency_weight, cold_gap_minutes,
                           min_duration_genuine, min_duration_recirc,
                           verbose=False):
     """
@@ -185,7 +153,7 @@ def _extract_cold_starts(points, local_tz, recency_weight, cold_gap_minutes,
     Run duration is measured as the number of consecutive active minutes
     following the cold-start before a gap appears.
 
-    Returns a list of (dt_local, combined_weight) tuples.
+    Returns a list of (dt_utc, combined_weight) tuples.
     """
     from datetime import timedelta
 
@@ -254,25 +222,24 @@ def _extract_cold_starts(points, local_tz, recency_weight, cold_gap_minutes,
 
         combined_weight = recency_weight * demand_weight * cost_multiplier
 
-        ts_str2  = start_ts.rstrip("Z")
-        dt_utc   = datetime.fromisoformat(ts_str2).replace(tzinfo=timezone.utc)
-        dt_local = dt_utc.astimezone(local_tz)
-        cold_starts.append((dt_local, combined_weight))
+        ts_str2 = start_ts.rstrip("Z")
+        dt_utc  = datetime.fromisoformat(ts_str2).replace(tzinfo=timezone.utc)
+        cold_starts.append((dt_utc, combined_weight))
 
         if verbose:
             tag = ("recirc-on" if recirc_on else "cold-pipe")
             dur_sec = duration * 10
             dur_str = f"{dur_sec//60}min{dur_sec%60:02d}s" if dur_sec < 3600 else f"{dur_sec//3600}h{(dur_sec%3600)//60}min"
-            print(f"  cold-start {dt_local.strftime('%Y-%m-%d %H:%M')} "
+            print(f"  cold-start {dt_utc.strftime('%Y-%m-%d %H:%M UTC')} "
                   f"dur={dur_str} {tag} demand_w={demand_weight:.1f} "
                   f"cost_mult={cost_multiplier:.3f} combined_w={combined_weight:.2f}")
 
     return cold_starts
 
 
-def fetch_consumption_events(args, local_tz):
+def fetch_consumption_events(args):
     """
-    Returns a list of (local_datetime, weight) tuples representing cold-start
+    Returns a list of (utc_datetime, weight) tuples representing cold-start
     events: the first tap-on after ≥cold_gap_minutes of inactivity, across
     the rolling ±window_weeks seasonal band for all configured years.
 
@@ -287,7 +254,6 @@ def fetch_consumption_events(args, local_tz):
     dominate the learned schedule.
     """
     from influxdb import InfluxDBClient
-    from datetime import date
 
     client = InfluxDBClient(
         host=args.influxdb_host,
@@ -297,7 +263,7 @@ def fetch_consumption_events(args, local_tz):
         database=args.influxdb_db,
     )
 
-    today        = date.today()
+    today        = datetime.now(timezone.utc).date()
     weights      = args.recency_weights
     current_year = today.year
 
@@ -364,7 +330,7 @@ def fetch_consumption_events(args, local_tz):
         points = sorted(points_by_time.values(), key=lambda p: p["time"])
         active_count = sum(1 for p in points if p.get("consumption_active") == 1)
         cold_starts = _extract_cold_starts(
-            points, local_tz, weight,
+            points, weight,
             cold_gap_minutes=args.cold_gap_minutes,
             min_duration_genuine=args.min_duration_genuine,
             min_duration_recirc=args.min_duration_recirc,
@@ -384,7 +350,7 @@ def fetch_consumption_events(args, local_tz):
 # ---------------------------------------------------------------------------
 def events_to_minutes(events, verbose=False):
     """
-    Convert a list of (local_datetime, weight) tuples into two parallel dicts,
+    Convert a list of (utc_datetime, weight) tuples into two parallel dicts,
     both keyed by day-of-week (0=Sun..6=Sat) then by 5-minute bucket:
 
       raw_counts[dow][bucket]      — unweighted hit count (used for min_occurrences filter)
@@ -407,7 +373,7 @@ def events_to_minutes(events, verbose=False):
         weighted_scores[dow][bucket] += weight
 
     if verbose:
-        print("\n[debug] Raw bucket hit counts per day (local time):")
+        print("\n[debug] Raw bucket hit counts per day (UTC):")
         for dow in range(7):
             hot = sorted((b, c) for b, c in raw_counts.get(dow, {}).items())
             if hot:
@@ -678,8 +644,8 @@ def estimate_schedule_cost(week, raw_counts, weighted_scores,
     For each day of the coming week, compute reframed efficiency.
     Returns a list of 7 dicts (index 0 = Sunday).
     """
-    from datetime import date, timedelta
-    today = date.today()
+    from datetime import timedelta
+    today = datetime.now(timezone.utc).date()
     coming_week = []
     for offset in range(7):
         d      = today + timedelta(days=offset)
@@ -910,13 +876,8 @@ def main():
 
     args = parser.parse_args()
 
-    # Step 0: Detect local timezone
-    local_tz, tz_name = detect_local_timezone()
-    print(f"Using timezone: {tz_name}")
-
     # Step 1: Fetch cold-start events from InfluxDB (rolling window, all years)
-    from datetime import date as _date
-    today = _date.today()
+    today = datetime.now(timezone.utc).date()
     print(f"Querying InfluxDB ({args.influxdb_host}:{args.influxdb_port}/{args.influxdb_db}) "
           f"— rolling ±{args.window_weeks}-week window around "
           f"{today.strftime('%b %d')}, years weighted {args.recency_weights}...")
@@ -925,7 +886,7 @@ def main():
           f"genuine threshold: {args.min_duration_genuine} buckets cold / "
           f"{args.min_duration_recirc} buckets with recirc "
           f"[10s resolution: ×6=min, ×3=30s])...")
-    events = fetch_consumption_events(args, local_tz)
+    events = fetch_consumption_events(args)
 
     if not events:
         print("No cold-start events found. Check your InfluxDB connection and database name.")
@@ -935,8 +896,8 @@ def main():
     print(f"Found {len(events)} cold-start events across "
           f"{len(args.recency_weights)} year(s) of seasonal data.")
     if args.verbose:
-        print(f"  First event (local): {dts[0].strftime('%Y-%m-%d %H:%M %Z')}")
-        print(f"  Last event  (local): {dts[-1].strftime('%Y-%m-%d %H:%M %Z')}")
+        print(f"  First event (UTC): {dts[0].strftime('%Y-%m-%d %H:%M %Z')}")
+        print(f"  Last event  (UTC): {dts[-1].strftime('%Y-%m-%d %H:%M %Z')}")
 
     # Step 2: Bin into per-day-of-week buckets (raw counts + weighted scores)
     raw_counts, weighted_scores = events_to_minutes(events, verbose=args.verbose)
@@ -951,8 +912,7 @@ def main():
         day_raw      = raw_counts.get(dow, {})
         day_weighted = weighted_scores.get(dow, {})
         total_years  = len(args.recency_weights)
-        from datetime import date as _date2
-        _today = _date2.today()
+        _today = datetime.now(timezone.utc).date()
         print(f"\n=== Debug: {day_name} (±{args.window_weeks}wk window around "
               f"{_today.strftime('%b %d')}, {total_years} years, "
               f"weights={args.recency_weights}) ===")
