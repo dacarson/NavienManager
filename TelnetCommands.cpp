@@ -368,6 +368,7 @@ void commandScheduler(const String& params) {
     struct SlotDisplay {
       int lsh, lsm, leh, lem;
       int sh, sm, eh, em;
+      int dayShift;  // -1 = fires previous local day, 0 = same day, +1 = next local day
     } slots[3];
     int slotCount = 0;
 
@@ -376,6 +377,7 @@ void commandScheduler(const String& params) {
       if (!scheduler->getTimeSlot(day, slot, sh, sm, eh, em)) continue;
       SlotDisplay &s = slots[slotCount++];
       s.sh = sh; s.sm = sm; s.eh = eh; s.em = em;
+      s.dayShift = 0;
       if (tzKnown) {
         // Slots are stored in UTC; convert to local using a fixed reference
         // date (Jan 2 1970) so only the hour:min offset matters.
@@ -389,6 +391,10 @@ void commandScheduler(const String& params) {
         time_t te = proper_timegm(&ref);
         struct tm *le = localtime(&te);
         s.leh = le->tm_hour; s.lem = le->tm_min;
+        // Detect midnight rollover: compare local vs UTC start in minutes.
+        int diff = (s.lsh * 60 + s.lsm) - (sh * 60 + sm);
+        if (diff >  720) s.dayShift = -1; // local is previous day (e.g. UTC 04:00 → local 21:00)
+        if (diff < -720) s.dayShift = +1; // local is next day
       }
     }
 
@@ -407,11 +413,13 @@ void commandScheduler(const String& params) {
 
     for (int i = 0; i < slotCount; i++) {
       SlotDisplay &s = slots[i];
-      if (tzKnown)
-        telnet.printf(" %02d:%02d-%02d:%02d (UTC %02d:%02d-%02d:%02d)",
-                      s.lsh, s.lsm, s.leh, s.lem, s.sh, s.sm, s.eh, s.em);
-      else
+      if (tzKnown) {
+        telnet.printf(" %02d:%02d-%02d:%02d (UTC %02d:%02d-%02d:%02d%s)",
+                      s.lsh, s.lsm, s.leh, s.lem, s.sh, s.sm, s.eh, s.em,
+                      s.dayShift == -1 ? ", prev day" : s.dayShift == +1 ? ", next day" : "");
+      } else {
         telnet.printf(" %02d:%02d-%02d:%02d (UTC)", s.sh, s.sm, s.eh, s.em);
+      }
     }
     if (slotCount == 0) telnet.print(" (none)");
     telnet.println();
