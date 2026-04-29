@@ -192,7 +192,23 @@ The Eve app's thermostat schedule is parsed and stored in NVS (`SAVED_DATA` / `P
 - In `SchedulerBase`'s `DaySchedule` struct, `slots[i].startHour == 0xFF` marks slot `i` as unused. All iteration loops (`getNextState`, `getTimeSlot`, `isTimeWithinSlot` callers) stop at the first `0xFF` startHour.
 - The full `weekSchedule[7]` array is initialized to `0xFF` via `memset` at the start of `updateSchedulerWeekSchedule()` so that any slots not populated from Eve data are correctly marked unused rather than left with garbage values.
 
-**Timezone handling:** The Eve app sends the current local time in program data. The scheduler computes the UTC offset by comparing the Eve-supplied local time against the system clock (before any TZ is set) and stores a `UTC±N` string in NVS (`SCHEDULER` / `TZ`). Once set, the TZ is used for all `localtime()` calculations. The timezone can be overridden or cleared via the Telnet `timezone` command.
+**Timezone handling:** The Eve app sends the current local time in the `CURRENT_TIME` packet. The scheduler computes the UTC offset in minutes by comparing the Eve-supplied local time against the system clock and stores it in `_lastKnownUtcOffsetMin` (`_utcOffsetKnown` is set `true`). A human-readable `UTC±N` string is also written to NVS (`SCHEDULER` / `TZ`) for display purposes only. **TZ is display-only:** schedule slots are stored and fired in UTC; a wrong TZ (e.g. written by `guessTimeZone()` when a remote Eve app connects from a different timezone) corrupts the Eve schedule display but cannot cause schedules to fire at the wrong time. `getEffectiveOffsetMin()` is the authoritative source for the UTC↔local offset — it returns `_lastKnownUtcOffsetMin` when `_utcOffsetKnown` is `true`, otherwise falls back to the system TZ derived from `localtime_r`/`gmtime_r`. The timezone string can be overridden or cleared via the Telnet `timezone` command (display only).
+
+**What stays local-time (display only):**
+
+| Location | Data |
+|---|---|
+| `addMilliseconds()` / `prog_send_data.currentTime` | Eve wire time struct sent back to Eve |
+| `updateCurrentScheduleIfNeeded()` | Day-of-week selection for which local day Eve shows |
+| `stateChange()` log message | "Next event scheduled for:" timestamp |
+| `appendStatusHTML()` | Last recompute timestamp on the web page |
+| `TelnetCommands.cpp` (all) | All time displays (local + UTC annotation) |
+| `guessTimeZone()` / NVS `TZ` | TZ string; used to convert UTC slots → local for Eve readback |
+| `HomeSpanWeb.ino` | Status time strings |
+
+**UTC-native storage and Eve conversion paths:** Slots are stored internally and compared at fire-time in UTC. `SchedulerBase::getNextState()` and `initializeCurrentState()` use `gmtime()` and `proper_timegm()` (from `TimeUtils.h`) — never `localtime()` or `mktime()`. When Eve writes `WEEK_SCHEDULE`, `convertEveSlotsToUTC(_lastKnownUtcOffsetMin)` converts the local-time slots to UTC before they are passed to `updateSchedulerWeekSchedule()` and written to NVS. If `_utcOffsetKnown` is false when `WEEK_SCHEDULE` arrives, the schedule is discarded and a warning is logged — Eve will resend after a `CURRENT_TIME` packet establishes the offset. When `prog_send_data` is assembled for Eve readback, `getEffectiveOffsetMin()` converts stored UTC slots back to local time. `proper_timegm()` in `TimeUtils.h` is the TZ-free `timegm()` equivalent (integer arithmetic, no `setenv("TZ")` side effects); use it whenever a UTC `struct tm` must be converted to `time_t`.
+
+**NVS schedule version migration:** A `schedVersion` key (type `uint8_t`) is stored in the `SAVED_DATA` NVS namespace alongside `PROG_SEND_DATA`. `FakeGatoScheduler::begin()` checks this key before applying `prog_send_data` to `weekSchedule[]`. If the version is not `1` (UTC-format), slots are cleared and `schedVersion` is written to `1`. After flashing, the user must re-push the schedule once from the Eve app (or via `navien_bootstrap.py --push`) to repopulate NVS with UTC-converted slots.
 
 **Control handoff:**
 - When `controlAvailable()` becomes `true` (NaviLink disappears) and the scheduler state is known, `takeControl()` is called once. It sends the appropriate power and recirculation commands to match the current scheduler state.
@@ -274,7 +290,7 @@ A Telnet server listens on **port 23**. It is started after WiFi connects. All c
 | `recirc` | (no arg) | Prints current recirculation state for all units. |
 | `recirc` | `on` \| `off` | Enables or disables recirculation. |
 | `hotButton` | — | Sends a hot-button press+release sequence. |
-| `scheduler` | (no arg) | Prints scheduler enabled state, current state, next transition time and target state, and full weekly schedule. |
+| `scheduler` | (no arg) | Prints scheduler enabled state, current state, next transition time and target state, and full weekly schedule. Slots are shown as both local time and UTC (`HH:MM-HH:MM (UTC HH:MM-HH:MM)`); when the UTC day differs from the local day, `prev day` is appended. |
 | `scheduler` | `on` \| `off` | Enables or disables the scheduler (persisted to NVS). |
 | `timezone` | (no arg) | Prints the currently stored timezone. |
 | `timezone` | `<tz string>` | Sets the timezone (e.g. `UTC-8`). |
@@ -490,7 +506,7 @@ The endpoint is started in `setupScheduleEndpoint()` (called from `onWifiConnect
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "current_year": 2025,
   "replace": false,
   "days": [
@@ -505,7 +521,7 @@ The endpoint is started in `setupScheduleEndpoint()` (called from `onWifiConnect
 }
 ```
 
-- `schema_version` must equal `BUCKET_SCHEMA_VERSION` (1) — mismatches produce a 400.
+- `schema_version` must equal `BUCKET_SCHEMA_VERSION` (2) — mismatches produce a 400. Bucket dow/bucket indices are UTC (matching the UTC-native firmware).
 - `current_year` — optional; if present and non-zero, written into the `BucketFile` header. If omitted or zero: in merge mode the existing header year is left unchanged; in replace mode the year is derived from the system clock (same fallback as `BucketStore::begin()`), so the header is never left at a stale value.
 - `replace` — `false` (default): merge into existing data; `true`: zero all buckets first.
 - `days[].dow` — day of week, 0 = Sunday … 6 = Saturday.
@@ -522,6 +538,8 @@ The endpoint is started in `setupScheduleEndpoint()` (called from `onWifiConnect
 2. **SchedulerBase format** (`weekSchedule[7]`): populated by calling `updateSchedulerWeekSchedule()`, which converts the Eve offsets back to `{startHour, startMinute, endHour, endMinute}` structs and handles the Monday→Sunday to Sunday→Saturday index shift.
 
 Slots beyond the third in any day are silently dropped. The full `PROG_DATA_FULL_DATA` blob is then committed to NVS (`SAVED_DATA` / `PROG_SEND_DATA`), `initializeCurrentState()` is called to apply the new schedule immediately, and `refreshProgramData` is set so all paired Eve instances receive an EV notification with the updated schedule.
+
+`setWeekScheduleFromJSON()` receives slots already in UTC (from the on-device learner or a Python push) and stores them verbatim. It does **not** apply `sanitizeScheduleToLocalLimit()` — JSON-pushed schedules are already within the 3-slot-per-UTC-day limit. `sanitizeScheduleToLocalLimit()` is called **only** from `convertEveSlotsToUTC()` (the Eve→device path); calling it on a UTC schedule incorrectly drops valid same-day slots when cross-day UTC slots from adjacent days fill slot positions first.
 
 ### config.py
 
@@ -588,7 +606,7 @@ Always prints the learned schedule. With `--verbose`:
 
 Pass `--push` to POST the schedule to `http://<esp32_host>:<esp32_port>/schedule`. By default the script is a dry run and prints the JSON that would be sent without pushing.
 
-**Timezone handling:** The script reads the system timezone from `/etc/timezone` (Debian/Raspberry Pi OS). Falls back to the `/etc/localtime` symlink target, then UTC with a warning.
+**Timezone handling:** The script has no local timezone dependency. All cold-start events, bucket indices, `dow`, and `minute_of_day` values are derived from UTC datetimes. Schedule output posted to `POST /schedule` contains UTC hours/minutes. SF morning peaks appear around 14:00–16:00 UTC.
 
 **Defaults and CLI flags:**
 
@@ -751,4 +769,4 @@ Both steps must be run in order after first flash. They are also used when `buck
    - `setupTelnetCommands()`: registers all commands; starts Telnet server on port 23.
    - `setupScheduleEndpoint()`: starts raw `WiFiServer` on port 8080 for pushed schedule updates and bucket bootstrap ingest.
 7. Main loop runs: `telnet.loop()`, `loopScheduleEndpoint()`, `navienSerial.loop()`, `homeSpan.poll()`.
-8. Once a timezone is available (`TZ` env var set) and SNTP sync is confirmed, `homeSpan.assumeTimeAcquired()` is called to unlock time-dependent HomeKit features.
+8. Once NTP sync is confirmed (`time(nullptr) > 1700000000L`), `homeSpan.assumeTimeAcquired()` is called to unlock time-dependent HomeKit features. A timezone (`TZ` env var) is no longer required for this gate; TZ is used only for local-time display.
