@@ -326,16 +326,22 @@ The migration is split into four independently flashable phases. Each phase can 
 
 *`FakeGatoScheduler.h`:*
 - Add `int _lastKnownUtcOffsetMin = 0;`
+- Add `bool _utcOffsetKnown = false;`
 - Add `void convertEveSlotsToUTC(int utcOffsetMin);`
+- Add `int getEffectiveOffsetMin() const;`
+- Add `void sanitizeScheduleToLocalLimit(int offsetMin);`
 
 *`FakeGatoScheduler.cpp`:*
 - Remove `timegm()` TZ-swap hack (lines 34–56); replace all callers with `proper_timegm()`.
-- `parseProgramData()` `CURRENT_TIME` case: compute and store `_lastKnownUtcOffsetMin`; clamp to ±720 min; log warning if out of range.
-- `parseProgramData()` `WEEK_SCHEDULE` case: call `convertEveSlotsToUTC(_lastKnownUtcOffsetMin)` before `updateSchedulerWeekSchedule()`.
+- `parseProgramData()` `CURRENT_TIME` case: compute and store `_lastKnownUtcOffsetMin`; set `_utcOffsetKnown = true`; clamp to ±720 min; log warning if out of range.
+- `parseProgramData()` `WEEK_SCHEDULE` case: call `convertEveSlotsToUTC(_lastKnownUtcOffsetMin)` before `updateSchedulerWeekSchedule()`. If `_utcOffsetKnown` is false, discard the received schedule and log a warning — Eve will re-send after a `CURRENT_TIME` packet establishes the offset.
 - Packet ordering mitigation: if `WEEK_SCHEDULE` arrives before `CURRENT_TIME` in the same buffer, recompute offset inline from `prog_send_data.currentTime` vs `time(nullptr)` rather than using the stale member. Note: this is only reliable if `prog_send_data.currentTime` was refreshed in the same or a recent session; a stale value from a prior connection is the same residual risk noted elsewhere in the plan.
-- Implement `convertEveSlotsToUTC()` with day-rollover and midnight-truncation logic.
+- Implement `convertEveSlotsToUTC()` with day-rollover and midnight-truncation logic. Calls `sanitizeScheduleToLocalLimit()` after converting.
+- Add `getEffectiveOffsetMin()` helper: returns `_lastKnownUtcOffsetMin` if `_utcOffsetKnown`, otherwise derives the offset from `localtime_r` / `gmtime_r` on the current epoch (system TZ fallback). Returns `INT_MIN` if neither is available.
+- Add `sanitizeScheduleToLocalLimit(int offsetMin)`: round-trips `prog_send_data.weekSchedule` through UTC→local→UTC via `convertSlotsOffset`. Any UTC slot whose local-time projection would exceed the 3-slot Eve UI limit on its local day is dropped from storage, preventing it from firing silently. **Called only from `convertEveSlotsToUTC()` (the Eve→device path). Never called from `setWeekScheduleFromJSON()`.** See post-implementation note below.
+- `convertSlotsOffset()`: enforce 3-slot cap per output day (Eve UI limit is 3, not 4); round slot offsets to nearest 10-minute boundary (`(val + 5) / 10`) instead of truncating to avoid 1-minute jitter in `_lastKnownUtcOffsetMin` shifting a slot to the wrong 10-minute bucket.
 - `FakeGatoScheduler::begin()`: add `schedVersion` check on `SAVED_DATA` handle before `updateSchedulerWeekSchedule()`; if version != 1, clear slots and write version 1. After confirming slots are UTC-valid, call `setScheduleUtcMode(true)` to enable the learner→scheduler handoff (replaces the `// TODO(Phase 3)` stub from Phase 2).
-- All Eve readback paths: convert stored UTC slots → local before sending to Eve.
+- `loop()` Eve readback: use `getEffectiveOffsetMin()` instead of `_lastKnownUtcOffsetMin` directly. This ensures the device sends correct local-time slots to Eve on first boot before any `CURRENT_TIME` packet has established `_lastKnownUtcOffsetMin` — without the fallback, `_lastKnownUtcOffsetMin` defaults to 0 and Eve receives raw UTC times, which it then double-converts on the next write-back.
 - `addMilliseconds()`: add comment — intentionally local-time (Eve wire struct).
 - `guessTimeZone()`: add comment — TZ is now display-only.
 - `updateCurrentScheduleIfNeeded()`: add comment — intentionally `localtime()`.
@@ -353,9 +359,25 @@ The migration is split into four independently flashable phases. Each phase can 
 **Post-flash steps:**
 1. Verify weblog shows `schedVersion` migration reset message.
 2. Open Eve app → Programs tab → re-save the week schedule (triggers `parseProgramData()` → `convertEveSlotsToUTC()` → NVS write).
-3. Verify telnet `schedule` command shows correct local times (confirms UTC→local display conversion).
+3. Verify telnet `schedule` command shows correct local times with UTC annotation (confirms UTC→local display conversion).
 4. Verify Eve shows correct schedule times.
 5. Wait for a scheduled recirc event and confirm it fires at the correct local wall-clock time.
+
+**Post-Phase-3 additions (not in original plan):**
+
+*Telnet `scheduler` command enhancements (`TelnetCommands.cpp`):*
+- Slots are now displayed as both local time and UTC: `HH:MM-HH:MM (UTC HH:MM-HH:MM)`.
+- When a UTC slot's local time falls on the previous calendar day (e.g. Monday UTC 04:00 = Sunday local 21:00 in PDT), the display appends `prev day` to the UTC annotation. Slots are sorted by local start time for readability.
+
+*Bug fix — `setWeekScheduleFromJSON()` incorrectly called `sanitizeScheduleToLocalLimit()`:*
+
+When `navien_bucket_export.py --push` pushes a JSON schedule, slots are already in UTC with ≤3 per UTC day. The sanitize round-trip (UTC→local→UTC via `convertSlotsOffset`) was nevertheless applied, and it dropped valid same-day UTC slots. The failure mode:
+
+`convertSlotsOffset` iterates Eve days 0→6. A cross-day UTC slot from day N that rolls back into local day N-1 is processed *before* day N-1's own native slots. It fills one of the three available slot positions on local day N-1. When day N-1's native UTC slots are subsequently processed, the 3-slot cap is hit one slot early and the last native slot is silently dropped.
+
+Example: Monday UTC 04:00 → Sunday local 21:00 (PDT). This steals `slot[0]` of Sunday's local view. Sunday's own UTC slots 13:50, 16:40, 18:00 then fill `slot[1]`, `slot[2]`, and attempt `slot[3]` — which is capped. Sunday UTC 18:00-19:00 is dropped from storage and never fires.
+
+**Fix:** `sanitizeScheduleToLocalLimit()` is called only from `convertEveSlotsToUTC()` (the Eve→device path, where Eve sends local-time slots that genuinely require sanitization after UTC conversion). It is never called from `setWeekScheduleFromJSON()`. JSON-pushed UTC schedules need no sanitization: they are already within the 3-slot-per-UTC-day limit, and the Monday 04:00 UTC slot is fully visible in Eve (displayed as 21:00 on Monday's tab in local time) — the cross-day mapping is display-only, not a storage problem.
 
 ---
 
@@ -403,3 +425,5 @@ Add to Architecture notes:
 - TZ is stored in NVS for display only. A wrong TZ (e.g. from a remote Eve connection) corrupts the Eve schedule display but cannot cause schedules to fire at the wrong time.
 - The nightly recompute fires on a 24h elapsed timer (`_lastRecomputeTime24h`), not localtime midnight detection.
 - `proper_timegm()` is the TZ-free `timegm()` equivalent. Use it whenever a UTC `struct tm` must be converted to `time_t`.
+- `getEffectiveOffsetMin()` is the authoritative source for the UTC↔local offset. It prefers the Eve-confirmed `_lastKnownUtcOffsetMin` (set when Eve sends a `CURRENT_TIME` packet), falling back to the system TZ derived from `localtime_r`/`gmtime_r`. Use it anywhere the UTC offset is needed rather than reading `_lastKnownUtcOffsetMin` directly.
+- `sanitizeScheduleToLocalLimit()` is called only from `convertEveSlotsToUTC()` (Eve→device path). Never call it on JSON-pushed schedules: the round-trip incorrectly drops native same-day UTC slots when cross-day slots from adjacent UTC days fill their slot positions first.
