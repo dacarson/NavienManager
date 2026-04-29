@@ -14,7 +14,7 @@ NavienManager is an ESP32-based bridge that connects your Navien tankless water 
 A dedicated **Hot Water** switch in HomeKit lets you trigger a 5-minute recirculation burst with a voice command. No more waiting at the tap — just ask Siri, wait 30 seconds, and enjoy hot water instantly.
 
 ### Set a smart recirculation schedule
-Use the **Eve app** to define a weekly recirculation schedule — morning showers, evening dishes, whatever fits your routine. The scheduler runs recirculation only when you actually need it, keeping gas and water bills in check.
+Use the **Eve app** to define a weekly recirculation schedule — morning showers, evening dishes, whatever fits your routine. The scheduler runs recirculation only when you actually need it, keeping gas and water bills in check. Schedules are stored and fired in UTC internally, so an Eve connection from a remote timezone (e.g. a family member's phone while travelling) cannot corrupt your firing times.
 
 ### Let the system learn your schedule for you
 The ESP32 runs an **on-device schedule learner** that watches your actual hot-water usage in real time, detects cold-start events, and recomputes the recirculation schedule every night — all without needing a Raspberry Pi or a recurring cron job. After a one-time bootstrap to seed it with your existing InfluxDB history, it runs autonomously and self-corrects as your habits change.
@@ -109,7 +109,7 @@ Without seeding, the on-device learner starts cold and needs 2–4 weeks to accu
 python3 Logger/navien_bootstrap.py --push
 
 # Step 2 — seed the on-device bucket histogram with the same history
-python3 Logger/navien_bucket_export.py --push
+python3 Logger/navien_bucket_export.py --push --replace
 ```
 
 Run both steps once after first flash (or after a LittleFS wipe). After that, the Pi cron job can be disconnected permanently.
@@ -204,6 +204,7 @@ pip3 install influxdb requests
 | `DEV_Navien.*` | HomeKit thermostat and Hot Water switch |
 | `FakeGatoScheduler.*` | Eve schedule parsing, built on `SchedulerBase` |
 | `SchedulerBase.*` | Generic day-of-week scheduler |
+| `TimeUtils.*` | TZ-free `timegm()` equivalent (`proper_timegm`) used by the scheduler |
 | `FakeGatoHistoryService.*` | Eve history protocol |
 | `HomeSpanWeb.*` | Live status web page |
 | `NavienBroadcaster.*` | UDP broadcast of live packet data |
