@@ -39,6 +39,10 @@ public:
   bool enabled() { return scheduleActive; }
   void setEnabled(bool enable);
 
+  // Phase 3 calls this after the schedVersion NVS migration to indicate that
+  // stored slots are UTC and learner-generated schedules may be applied.
+  void setScheduleUtcMode(bool utc) { _scheduleIsUtc = utc; }
+
   static String getSchedulerState(int state); // Return the state as a string
 
   // When the Service recieves Eve Program Data,
@@ -116,8 +120,23 @@ protected:
   uint8_t temperature_offset = 0;
   int currentScheduleDay = -1;
   
-  bool scheduleActive;
-  
+  bool scheduleActive;  // legacy name; new private members use underscore prefix
+
+  // True once Phase 3 has verified stored slots are UTC.
+  // Learner-generated schedules (which are UTC) must not be applied to the
+  // firing path until the scheduler itself is also UTC-aware.
+  // Set via setScheduleUtcMode(true) from begin() after the schedVersion
+  // migration check in Phase 3.
+  bool _scheduleIsUtc = false;
+
+  // UTC offset in minutes computed from the Eve CURRENT_TIME TLV vs system UTC.
+  // Sign convention: UTC = Eve_local + _lastKnownUtcOffsetMin
+  // Example: PST (UTC-8) → Eve sends 07:00, sysUTC=15:00 → offset = +480.
+  int _lastKnownUtcOffsetMin = 0;
+  // True once a valid offset has been established from CURRENT_TIME or inline recompute.
+  // convertEveSlotsToUTC is skipped until this is set to avoid treating local as UTC.
+  bool _utcOffsetKnown = false;
+
   struct PROG_CMD_SCHEDULE_STATE {
     uint8_t header = SCHEDULE_STATE;
     uint8_t schedule_on = 0;  // 00 Schedule off, 01 schedule on
@@ -144,7 +163,22 @@ protected:
     uint8_t header = WEEK_SCHEDULE;
     CMD_DAY_SCHEDULE day[7];
   };
-  
+
+  // General slot offset converter: reads 'in', applies offsetMin, writes cleared+filled 'out'.
+  // Use positive offsetMin for local→UTC (UTC = local + offset) and negative for UTC→local.
+  static void convertSlotsOffset(const PROG_CMD_WEEK_SCHEDULE &in,
+                                  PROG_CMD_WEEK_SCHEDULE &out, int offsetMin);
+  void convertEveSlotsToUTC(int utcOffsetMin);
+
+  // Returns the best available UTC offset in minutes (UTC = local + offset).
+  // Returns INT_MIN if the offset cannot be determined.
+  int getEffectiveOffsetMin() const;
+
+  // Round-trips prog_send_data.weekSchedule through UTC→local→UTC.
+  // Any slot that would exceed 3 per local day is dropped from storage so
+  // every stored slot is visible and controllable from the Eve app.
+  void sanitizeScheduleToLocalLimit(int offsetMin);
+
   struct PROG_CMD_CURRENT_SCHEDULE {
     uint8_t header = CURRENT_SCHEDULE;
     CMD_DAY_SCHEDULE current;

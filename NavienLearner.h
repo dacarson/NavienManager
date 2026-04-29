@@ -175,7 +175,7 @@ private:
     volatile bool _recomputeRequested;  // set from any core, cleared on Core 0
     TaskState     _taskState;
     int           _recomputeDay;        // 0–6; current day being processed in RECOMPUTING
-    int           _lastRecomputeYday;   // tm_yday of last midnight recompute trigger (-1 = never)
+    time_t        _lastRecomputeTime24h; // wall time of last 24h recompute trigger (0 = never)
     bool          _startupDecayDone;    // true once the one-shot startup decay check has run
     time_t        _lastRecomputeTime;   // wall time of last RECOMPUTE_WRITE (0 = never)
 

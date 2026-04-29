@@ -27,20 +27,20 @@ Timing constraint:
 import argparse
 import json
 import sys
-from datetime import date as _date
+from datetime import datetime as _datetime, timezone as _timezone
 
 import config
 import navien_schedule_learner as nsl
 
 
-def build_bucket_payload(args, local_tz, replace=False):
+def build_bucket_payload(args, replace=False):
     """
     Fetch cold-start events from InfluxDB, convert them to 5-minute buckets,
     and build the sparse JSON payload for POST /buckets.
 
     Returns a dict ready for json.dumps().
     """
-    events = nsl.fetch_consumption_events(args, local_tz)
+    events = nsl.fetch_consumption_events(args)
     if not events:
         print("No events found. Check InfluxDB connection.")
         sys.exit(1)
@@ -64,8 +64,8 @@ def build_bucket_payload(args, local_tz, replace=False):
             days.append({"dow": dow, "buckets": buckets})
 
     return {
-        "schema_version": 1,
-        "current_year":   _date.today().year,
+        "schema_version": 2,
+        "current_year":   _datetime.now(_timezone.utc).year,
         "replace":        replace,
         "days":           days,
     }
@@ -167,18 +167,15 @@ def main():
     args.preheat_minutes = nsl.DEFAULT_PREHEAT_MINUTES
     args.gap_minutes     = nsl.DEFAULT_GAP_MINUTES
 
-    today = _date.today()
+    today = _datetime.now(_timezone.utc).date()
     years = [today.year - i for i in range(len(args.recency_weights))]
     print(f"Bootstrap mode: window_weeks=52 (full year per recency entry)")
     print(f"Years: {years}  Weights: {args.recency_weights}")
 
-    local_tz, tz_name = nsl.detect_local_timezone()
-    print(f"Timezone: {tz_name}")
-
     print(f"Querying InfluxDB ({args.influxdb_host}:{args.influxdb_port}/{args.influxdb_db}) "
           f"for full-history cold-start events...")
 
-    payload = build_bucket_payload(args, local_tz, replace=args.replace)
+    payload = build_bucket_payload(args, replace=args.replace)
 
     total = sum(len(d["buckets"]) for d in payload["days"])
     payload_json = json.dumps(payload)

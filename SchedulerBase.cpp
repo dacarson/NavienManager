@@ -21,6 +21,7 @@
  */
 
 #include "SchedulerBase.h"
+#include "TimeUtils.h"
 #include "esp_netif_sntp.h"
 #include <WiFi.h>
 
@@ -154,7 +155,7 @@ SchedulerBase::State SchedulerBase::getNextState(time_t *nextStateTime) const {
     }
     
       // Check if we'll be in an active slot when vacation ends
-    struct tm *end_tm = localtime(&endVacationTime);
+    struct tm *end_tm = gmtime(&endVacationTime);
     int endHour = end_tm->tm_hour;
     int endMinute = end_tm->tm_min;
     int endDay = end_tm->tm_wday;
@@ -170,12 +171,12 @@ SchedulerBase::State SchedulerBase::getNextState(time_t *nextStateTime) const {
   
     // Find the next event
   time_t now = time(nullptr);
-  struct tm *tm_struct = localtime(&now);
-  
+  struct tm *tm_struct = gmtime(&now);
+
   int currentHour = tm_struct->tm_hour;
   int currentMinute = tm_struct->tm_min;
   int currentDay = tm_struct->tm_wday;
-  
+
   int currentTimeInMinutes = currentHour * 60 + currentMinute;
   
   for (int dayoffset = 0; dayoffset < 7; dayoffset++) {
@@ -191,8 +192,8 @@ SchedulerBase::State SchedulerBase::getNextState(time_t *nextStateTime) const {
         nextState_tm.tm_hour = weekSchedule[day].slots[slot].startHour;
         nextState_tm.tm_min = weekSchedule[day].slots[slot].startMinute;
         nextState_tm.tm_sec = 0;
-        nextState_tm.tm_isdst = -1; // Use TZ to determine DST offsets.
-        nextTime = mktime(&nextState_tm);
+        nextState_tm.tm_isdst = 0;
+        nextTime = proper_timegm(&nextState_tm);
         if (startVacationTime && startVacationTime < nextTime) {
           if (nextStateTime) {
             *nextStateTime = startVacationTime;
@@ -214,8 +215,8 @@ SchedulerBase::State SchedulerBase::getNextState(time_t *nextStateTime) const {
         nextState_tm.tm_hour = weekSchedule[day].slots[slot].endHour;
         nextState_tm.tm_min = weekSchedule[day].slots[slot].endMinute;
         nextState_tm.tm_sec = 0;
-        nextState_tm.tm_isdst = -1; // Use TZ to determine DST offsets.
-        nextTime = mktime(&nextState_tm);
+        nextState_tm.tm_isdst = 0;
+        nextTime = proper_timegm(&nextState_tm);
         if (startVacationTime && startVacationTime < nextTime) {
           if (nextStateTime) {
             *nextStateTime = startVacationTime;
@@ -352,7 +353,7 @@ int SchedulerBase::begin() {
   status = nvs_get_str(nvsStorageHandle, "TZ", tzStr, &len);
   if (status) {
     Serial.printf("Failed to load TZ from NVS: %s.\n", esp_err_to_name(status));
-    Serial.println("Schedules won't run until TZ set.");
+    Serial.println("TZ not set; schedule firing does not require TZ (display-only).");
   } else {
     tz = tzStr;
     Serial.print("Restoring saved TZ: ");
@@ -387,7 +388,7 @@ void SchedulerBase::initializeCurrentState() {
   }
   // Finally check if we're in an active time slot
   else {
-    struct tm *tm_struct = localtime(&now);
+    struct tm *tm_struct = gmtime(&now);
     int currentHour = tm_struct->tm_hour;
     int currentMinute = tm_struct->tm_min;
     int currentDay = tm_struct->tm_wday;
@@ -430,12 +431,6 @@ void SchedulerBase::loop() {
     return;
   }
   
-  // No timezone set, so we can't schedule.
-  if (getenv("TZ") == 0) {
-    isInitialized = false;
-    return;
-  }
-
   // If we just became initialized, determine our current state
   if (!isInitialized) {
     isInitialized = true;
