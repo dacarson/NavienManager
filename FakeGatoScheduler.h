@@ -170,6 +170,15 @@ protected:
                                   PROG_CMD_WEEK_SCHEDULE &out, int offsetMin);
   void convertEveSlotsToUTC(int utcOffsetMin);
 
+  // Returns the best available UTC offset in minutes (UTC = local + offset).
+  // Returns INT_MIN if the offset cannot be determined.
+  int getEffectiveOffsetMin() const;
+
+  // Round-trips prog_send_data.weekSchedule through UTC→local→UTC.
+  // Any slot that would exceed 3 per local day is dropped from storage so
+  // every stored slot is visible and controllable from the Eve app.
+  void sanitizeScheduleToLocalLimit(int offsetMin);
+
   struct PROG_CMD_CURRENT_SCHEDULE {
     uint8_t header = CURRENT_SCHEDULE;
     CMD_DAY_SCHEDULE current;
