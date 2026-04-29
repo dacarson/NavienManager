@@ -30,7 +30,7 @@ SOFTWARE.
 
 // Magic number: "NAVI" in little-endian ASCII bytes
 #define BUCKET_MAGIC          0x4E415649u
-#define BUCKET_SCHEMA_VERSION 1
+#define BUCKET_SCHEMA_VERSION 2
 
 // 7 days x 288 five-minute buckets (1440 min / 5)
 #define BUCKET_DAYS    7

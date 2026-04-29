@@ -30,6 +30,7 @@ SOFTWARE.
 #include "FakeGatoHistoryService.h"
 #include "FakeGatoScheduler.h"
 #include "NavienLearner.h"
+#include "TimeUtils.h"
 
 ESPTelnet telnet;
 extern Navien navienSerial;
@@ -359,18 +360,68 @@ void commandScheduler(const String& params) {
     telnet.println("Next transition:  None scheduled");
   }
 
+  bool tzKnown = (getenv("TZ") != nullptr);
   telnet.println("Weekly schedule:");
   for (int day = 0; day < 7; day++) {
     telnet.printf("  %s:", dayNames[day]);
-    bool hasSlots = false;
+
+    struct SlotDisplay {
+      int lsh, lsm, leh, lem;
+      int sh, sm, eh, em;
+      int dayShift;  // -1 = fires previous local day, 0 = same day, +1 = next local day
+    } slots[3];
+    int slotCount = 0;
+
     for (int slot = 0; slot < 3; slot++) {
       uint8_t sh, sm, eh, em;
-      if (scheduler->getTimeSlot(day, slot, sh, sm, eh, em)) {
-        telnet.printf(" %02d:%02d-%02d:%02d", sh, sm, eh, em);
-        hasSlots = true;
+      if (!scheduler->getTimeSlot(day, slot, sh, sm, eh, em)) continue;
+      SlotDisplay &s = slots[slotCount++];
+      s.sh = sh; s.sm = sm; s.eh = eh; s.em = em;
+      s.dayShift = 0;
+      if (tzKnown) {
+        // Slots are stored in UTC; convert to local using a fixed reference
+        // date (Jan 2 1970) so only the hour:min offset matters.
+        struct tm ref = {};
+        ref.tm_year = 70; ref.tm_mon = 0; ref.tm_mday = 2; ref.tm_sec = 0;
+        ref.tm_hour = sh; ref.tm_min = sm;
+        time_t ts = proper_timegm(&ref);
+        struct tm *ls = localtime(&ts);
+        s.lsh = ls->tm_hour; s.lsm = ls->tm_min;
+        ref.tm_hour = eh; ref.tm_min = em;
+        time_t te = proper_timegm(&ref);
+        struct tm *le = localtime(&te);
+        s.leh = le->tm_hour; s.lem = le->tm_min;
+        // Detect midnight rollover: compare local vs UTC start in minutes.
+        int diff = (s.lsh * 60 + s.lsm) - (sh * 60 + sm);
+        if (diff >  720) s.dayShift = -1; // local is previous day (e.g. UTC 04:00 → local 21:00)
+        if (diff < -720) s.dayShift = +1; // local is next day
       }
     }
-    if (!hasSlots) telnet.print(" (none)");
+
+    // Sort by local start time (insertion sort; max 3 elements).
+    if (tzKnown) {
+      for (int i = 1; i < slotCount; i++) {
+        SlotDisplay key = slots[i];
+        int j = i - 1;
+        while (j >= 0 && (slots[j].lsh * 60 + slots[j].lsm) > (key.lsh * 60 + key.lsm)) {
+          slots[j + 1] = slots[j];
+          j--;
+        }
+        slots[j + 1] = key;
+      }
+    }
+
+    for (int i = 0; i < slotCount; i++) {
+      SlotDisplay &s = slots[i];
+      if (tzKnown) {
+        telnet.printf(" %02d:%02d-%02d:%02d (UTC %02d:%02d-%02d:%02d%s)",
+                      s.lsh, s.lsm, s.leh, s.lem, s.sh, s.sm, s.eh, s.em,
+                      s.dayShift == -1 ? ", prev day" : s.dayShift == +1 ? ", next day" : "");
+      } else {
+        telnet.printf(" %02d:%02d-%02d:%02d (UTC)", s.sh, s.sm, s.eh, s.em);
+      }
+    }
+    if (slotCount == 0) telnet.print(" (none)");
     telnet.println();
   }
 }

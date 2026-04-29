@@ -25,7 +25,7 @@ Usage:
 import argparse
 import json
 import sys
-from datetime import date as _date
+from datetime import datetime as _datetime, timezone as _timezone
 
 import config
 import navien_schedule_learner as nsl
@@ -93,17 +93,14 @@ def main():
     # Bootstrap always uses a full-year window so all available history is included
     args.window_weeks = 52
 
-    today = _date.today()
+    today = _datetime.now(_timezone.utc).date()
     years = [today.year - i for i in range(len(args.recency_weights))]
     print(f"Bootstrap mode: window_weeks=52 (full year per recency entry)")
     print(f"Years: {years}  Weights: {args.recency_weights}")
 
-    local_tz, tz_name = nsl.detect_local_timezone()
-    print(f"Timezone: {tz_name}")
-
     print(f"Querying InfluxDB ({args.influxdb_host}:{args.influxdb_port}/{args.influxdb_db}) "
           f"for full-history cold-start events...")
-    events = nsl.fetch_consumption_events(args, local_tz)
+    events = nsl.fetch_consumption_events(args)
     if not events:
         print("No events found. Check InfluxDB connection.")
         sys.exit(1)

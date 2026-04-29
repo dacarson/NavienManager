@@ -25,35 +25,12 @@
 #include "FakeGatoScheduler.h"
 #include "NavienLearner.h"
 #include "Navien.h"
+#include "TimeUtils.h"
 #include <ArduinoJson.h>
+#include <climits>
 
 extern Navien navienSerial;
 extern NavienLearner *learner;
-
-// Unfortunately, ESP32 doesn't have the timegm() function, so implement one here
-time_t timegm(struct tm *tm) {
-    // Save current TZ
-    char *oldTZ = getenv("TZ");
-    char *oldTZCopy = oldTZ ? strdup(oldTZ) : nullptr;  // Make a copy
-    
-    // Temporarily set TZ to UTC
-    setenv("TZ", "UTC0", 1);
-    tzset();
-
-    // Convert to time_t (interpreted as UTC)
-    time_t utcTime = mktime(tm);
-
-    // Restore previous TZ
-    if (oldTZCopy) {
-        setenv("TZ", oldTZCopy, 1);
-        free(oldTZCopy);
-    } else {
-        unsetenv("TZ");  // Reset if there was no previous TZ
-    }
-    tzset();
-
-    return utcTime;
-}
 
 FakeGatoScheduler::FakeGatoScheduler()
 : SchedulerBase() {
@@ -175,6 +152,7 @@ void FakeGatoScheduler::stateChange(State newState){
 }
 
 void FakeGatoScheduler::addMilliseconds(PROG_CMD_CURRENT_TIME *timeStruct, uint32_t milliseconds) {
+    // Eve wire time — intentionally local-time (sent back to Eve for display only).
     // Convert milliseconds to seconds and remaining milliseconds
   uint32_t secondsToAdd = milliseconds / 1000;
   milliseconds %= 1000;  // Remaining milliseconds (not stored in struct)
@@ -202,6 +180,7 @@ void FakeGatoScheduler::addMilliseconds(PROG_CMD_CURRENT_TIME *timeStruct, uint3
 }
 
 void FakeGatoScheduler::guessTimeZone(PROG_CMD_CURRENT_TIME *eveLocalTime) {
+  // TZ is now display-only; wrong TZ corrupts Eve display but not schedule firing.
 
     struct tm eveTimeInfo = {0};  // Initialize to zero
 
@@ -212,7 +191,7 @@ void FakeGatoScheduler::guessTimeZone(PROG_CMD_CURRENT_TIME *eveLocalTime) {
     eveTimeInfo.tm_min  = eveLocalTime->minutes;
     eveTimeInfo.tm_sec  = 0;  // Assuming seconds are zero
 
-    time_t localTime =  timegm(&eveTimeInfo);  // Convert to time_t (Unix timestamp) *IGNORING TIMEZONE*
+    time_t localTime = proper_timegm(&eveTimeInfo);  // treat Eve local as UTC to get pseudo-epoch
     time_t currentTime = time(nullptr);  // Get the current system time
     struct tm *deviceLocalTime = localtime(&currentTime); // Convert to local time struct
 
@@ -226,7 +205,7 @@ void FakeGatoScheduler::guessTimeZone(PROG_CMD_CURRENT_TIME *eveLocalTime) {
 
     double timeDiffSeconds = difftime(currentTime, localTime);
     int timeDiffHours = std::round(timeDiffSeconds / 3600.0);
-    
+
     char tzString[10];
     snprintf(tzString, sizeof(tzString), "UTC%+d", timeDiffHours);
 
@@ -417,7 +396,38 @@ void FakeGatoScheduler::parseProgramData(uint8_t *data, int len) {
           printDaySchedule(&weekSchedule->day[day]);
         }
         Serial.println("");
-        memcpy(&prog_send_data.weekSchedule, weekSchedule, sizeof(PROG_CMD_WEEK_SCHEDULE));
+        // Compute best available UTC offset for conversion.
+        // Use _lastKnownUtcOffsetMin if already set this session; otherwise
+        // recompute inline from the saved currentTime so a lone WEEK_SCHEDULE
+        // packet (or one arriving before CURRENT_TIME) still converts correctly.
+        {
+          int offsetToUse = _lastKnownUtcOffsetMin;
+          if (prog_send_data.currentTime.year != 0 && time(nullptr) > 1700000000L) {
+            struct tm eveUTC = {0};
+            eveUTC.tm_year = prog_send_data.currentTime.year + 100;
+            eveUTC.tm_mon  = prog_send_data.currentTime.month - 1;
+            eveUTC.tm_mday = prog_send_data.currentTime.day;
+            eveUTC.tm_hour = prog_send_data.currentTime.hours;
+            eveUTC.tm_min  = prog_send_data.currentTime.minutes;
+            time_t evePseudo = proper_timegm(&eveUTC);
+            time_t sysUTC = time(nullptr);
+            int computed = (int)(difftime(sysUTC, evePseudo) / 60.0 + 0.5);
+            if (computed >= -720 && computed <= 720) {
+              offsetToUse = computed;
+              _utcOffsetKnown = true;
+            }
+          }
+          if (!_utcOffsetKnown) {
+            // Offset unknown: discard the received schedule rather than storing
+            // unconverted local slots into a UTC-based scheduler.  Eve will
+            // re-send after CURRENT_TIME establishes the offset.
+            WEBLOG("SCHEDULER UTC offset unknown; discarding WEEK_SCHEDULE (will re-apply once CURRENT_TIME received)");
+            byte_offset += sizeof(PROG_CMD_WEEK_SCHEDULE);
+            break;
+          }
+          memcpy(&prog_send_data.weekSchedule, weekSchedule, sizeof(PROG_CMD_WEEK_SCHEDULE));
+          convertEveSlotsToUTC(offsetToUse);
+        }
         updateSchedulerWeekSchedule();
         updateCurrentScheduleIfNeeded(true);
         initializeCurrentState(); // Recalculate current state after schedule change
@@ -436,6 +446,25 @@ void FakeGatoScheduler::parseProgramData(uint8_t *data, int len) {
         memcpy(&prog_send_data.currentTime, currentTime, sizeof(PROG_CMD_CURRENT_TIME));
         clockOffset = millis();
         guessTimeZone(currentTime);
+        // Compute UTC offset: treat Eve local time as UTC pseudo-epoch, diff against real UTC.
+        // Sign: UTC = Eve_local + _lastKnownUtcOffsetMin (PST/UTC-8 → offset = +480).
+        {
+          struct tm eveUTC = {0};
+          eveUTC.tm_year = currentTime->year + 100;
+          eveUTC.tm_mon  = currentTime->month - 1;
+          eveUTC.tm_mday = currentTime->day;
+          eveUTC.tm_hour = currentTime->hours;
+          eveUTC.tm_min  = currentTime->minutes;
+          time_t evePseudo = proper_timegm(&eveUTC);
+          time_t sysUTC    = time(nullptr);
+          int newOffset = (int)(difftime(sysUTC, evePseudo) / 60.0 + 0.5);
+          if (newOffset < -720 || newOffset > 720) {
+            WEBLOG("SCHEDULER UTC offset %d min out of range, ignoring", newOffset);
+          } else {
+            _lastKnownUtcOffsetMin = newOffset;
+            _utcOffsetKnown = true;
+          }
+        }
         byte_offset += sizeof(PROG_CMD_CURRENT_TIME);
         break;
       }
@@ -470,6 +499,7 @@ void FakeGatoScheduler::parseProgramData(uint8_t *data, int len) {
 }
 
 void FakeGatoScheduler::updateCurrentScheduleIfNeeded(bool force) {
+  // Intentionally localtime — selects which local day to show Eve.
   time_t now = time(nullptr);
   struct tm *tm_struct = localtime(&now);
   int eveDayOfWeek = (tm_struct->tm_wday + 6) % 7; // Convert to Monday - Sunday
@@ -545,11 +575,29 @@ bool FakeGatoScheduler::setWeekScheduleFromJSON(const String &json) {
 
 int FakeGatoScheduler::begin() {
   if (SchedulerBase::begin()) {
+    // Check schedVersion in SAVED_DATA.  Any firmware prior to Phase 3 stored
+    // local-time slots; version 1 means slots are already UTC.  If missing or
+    // wrong, clear the schedule so the user re-pushes from Eve (which will
+    // then convert via convertEveSlotsToUTC on the next write).
+    uint8_t schedVersion = 0;
+    nvs_get_u8(savedData, "schedVersion", &schedVersion);
+    if (schedVersion != 1) {
+      WEBLOG("SCHEDULER schedVersion %d: clearing local-time slots; re-push schedule from Eve", (int)schedVersion);
+      memset(&prog_send_data.weekSchedule.day, 0xFF, sizeof(prog_send_data.weekSchedule.day));
+      memset(&prog_send_data.currentSchedule.current, 0xFF, sizeof(prog_send_data.currentSchedule.current));
+      nvs_set_u8(savedData, "schedVersion", 1);
+      nvs_set_blob(savedData, "PROG_SEND_DATA", &prog_send_data, sizeof(prog_send_data));
+      nvs_commit(savedData);
+    }
+
     // Re-apply Eve schedule data on top of whatever SchedulerBase::begin()
-    // loaded (NVS "SCHEDULER" stale data or initDefault). Eve data in
-    // prog_send_data is the authoritative source for FakeGatoScheduler.
+    // loaded. Eve data in prog_send_data is the authoritative source.
     updateSchedulerWeekSchedule();
     updateCurrentScheduleIfNeeded(true);
+
+    // Slots are now UTC (either confirmed by schedVersion==1 or cleared for re-push).
+    setScheduleUtcMode(true);
+
     return true;
   }
 
@@ -562,7 +610,10 @@ void FakeGatoScheduler::loop() {
   // Apply any new schedule produced by NavienLearner on Core 0.
   // checkNewSchedule() is non-blocking; it returns false immediately if no
   // new schedule is ready.  setWeekScheduleFromJSON() must only run on Core 1.
-  if (learner && !learner->isDisabled()) {
+  // Only apply learner-generated (UTC) schedules once the scheduler firing
+  // path is also UTC-based (Phase 3).  Before that, applying UTC slots to a
+  // localtime-based scheduler would cause firings at the wrong wall-clock time.
+  if (_scheduleIsUtc && learner && !learner->isDisabled()) {
     String newScheduleJson;
     if (learner->checkNewSchedule(newScheduleJson)) {
       setWeekScheduleFromJSON(newScheduleJson);
@@ -573,12 +624,146 @@ void FakeGatoScheduler::loop() {
     updateCurrentScheduleIfNeeded(false);
     addMilliseconds(&prog_send_data.currentTime, millis() - clockOffset);
     clockOffset = millis();
+
+    // Build a local-time copy for Eve readback; prog_send_data stays UTC internally.
+    PROG_DATA_FULL_DATA sendData = prog_send_data;
+    if (_scheduleIsUtc) {
+      // Determine UTC→local offset for readback.  Prefer the Eve-confirmed offset;
+      // fall back to the system TZ (loaded from NVS in begin()) so the first Eve
+      // connection after a reboot doesn't send UTC times that Eve misinterprets as
+      // local (which would cause a double-conversion on the next write).
+      int effectiveOffsetMin = 0;
+      if (_utcOffsetKnown) {
+        effectiveOffsetMin = _lastKnownUtcOffsetMin;
+      } else if (getenv("TZ") && time(nullptr) > 1700000000L) {
+        time_t now2 = time(nullptr);
+        struct tm local_tm, utc_tm;
+        localtime_r(&now2, &local_tm);
+        gmtime_r(&now2, &utc_tm);
+        effectiveOffsetMin = (utc_tm.tm_hour * 60 + utc_tm.tm_min)
+                           - (local_tm.tm_hour * 60 + local_tm.tm_min);
+        if (effectiveOffsetMin >  720) effectiveOffsetMin -= 1440;
+        if (effectiveOffsetMin < -720) effectiveOffsetMin += 1440;
+      }
+
+      // Convert stored UTC schedule → local time for Eve display.
+      convertSlotsOffset(prog_send_data.weekSchedule, sendData.weekSchedule,
+                         -effectiveOffsetMin);
+      // currentSchedule must also reflect local-time today for Eve.
+      time_t now2 = time(nullptr);
+      struct tm *ts = localtime(&now2);  // intentionally local-time — Eve display
+      int eveDow = (ts->tm_wday + 6) % 7;
+      memcpy(&sendData.currentSchedule.current,
+             &sendData.weekSchedule.day[eveDow], sizeof(CMD_DAY_SCHEDULE));
+    }
+
     // Don't announce when there is new program data, Eve app will fetch it when it wants it.
-    programData->setData((const uint8_t *)&prog_send_data, sizeof(PROG_DATA_FULL_DATA), refreshProgramData);
+    programData->setData((const uint8_t *)&sendData, sizeof(PROG_DATA_FULL_DATA), refreshProgramData);
     refreshProgramData = false;
   }
 }
 
+
+void FakeGatoScheduler::convertSlotsOffset(const PROG_CMD_WEEK_SCHEDULE &in,
+                                            PROG_CMD_WEEK_SCHEDULE &out,
+                                            int offsetMin) {
+  // General slot offset converter. offsetMin > 0 shifts forward (local→UTC for PST),
+  // offsetMin < 0 shifts backward (UTC→local for readback).
+  // Eve day 0=Monday..6=Sunday; offset units are value*10 minutes past midnight.
+  memset(&out.day, 0xFF, sizeof(out.day));
+
+  for (int d = 0; d < 7; d++) {
+    const CMD_DAY_SCHEDULE *daySched = &in.day[d];
+    for (int i = 0; i < 4 && daySched->slot[i].offset_start != 0xFF; i++) {
+      int t_start = daySched->slot[i].offset_start * 10; // minutes since midnight
+      int t_end   = daySched->slot[i].offset_end   * 10;
+      int shifted_start = t_start + offsetMin;
+      int shifted_end   = t_end   + offsetMin;
+
+      // Day rollover: adjust target day and normalise both times together.
+      int target_day = d;
+      if (shifted_start < 0) {
+        target_day = (d + 6) % 7; // previous day
+        shifted_start += 1440;
+        shifted_end   += 1440;
+      } else if (shifted_start >= 1440) {
+        target_day = (d + 1) % 7; // next day
+        shifted_start -= 1440;
+        shifted_end   -= 1440;
+      }
+
+      // Clamp end to 23:50 (offset 143); warn if slot straddles midnight.
+      if (shifted_end > 1430) {
+        WEBLOG("SCHEDULER convertSlotsOffset: Eve day %d slot %d straddles midnight (offset=%d), truncating end to 23:50", d, i, offsetMin);
+        shifted_end = 1430;
+      }
+      if (shifted_end <= shifted_start) {
+        WEBLOG("SCHEDULER convertSlotsOffset: Eve day %d slot %d zero/negative duration after conversion, skipping", d, i);
+        continue;
+      }
+
+      // Round to nearest 10-min boundary (Eve wire format resolution).
+      // Without rounding, a 1-min jitter in _lastKnownUtcOffsetMin truncates
+      // to the wrong 10-min slot (e.g. 599/10=59 → 9:50 instead of 10:00).
+      uint8_t off_start = (uint8_t)((shifted_start + 5) / 10);
+      uint8_t off_end   = (uint8_t)((shifted_end   + 5) / 10);
+      // Clamp to valid Eve range (max 23:50 = offset 143).
+      if (off_start > 143) off_start = 143;
+      if (off_end   > 143) off_end   = 143;
+
+      // Write into first free slot of the target day (max 3 — Eve UI limit).
+      CMD_DAY_SCHEDULE *targetDay = &out.day[target_day];
+      bool written = false;
+      for (int s = 0; s < 3; s++) {
+        if (targetDay->slot[s].offset_start == 0xFF) {
+          targetDay->slot[s].offset_start = off_start;
+          targetDay->slot[s].offset_end   = off_end;
+          written = true;
+          break;
+        }
+      }
+      if (!written) {
+        WEBLOG("SCHEDULER convertSlotsOffset: local day %d full (3-slot Eve limit), slot dropped (UTC start offset=%d) — fires correctly on device", target_day, off_start);
+      }
+    }
+  }
+}
+
+int FakeGatoScheduler::getEffectiveOffsetMin() const {
+  if (_utcOffsetKnown) return _lastKnownUtcOffsetMin;
+  if (getenv("TZ") && time(nullptr) > 1700000000L) {
+    time_t now = time(nullptr);
+    struct tm local_tm, utc_tm;
+    localtime_r(&now, &local_tm);
+    gmtime_r(&now, &utc_tm);
+    int off = (utc_tm.tm_hour * 60 + utc_tm.tm_min)
+            - (local_tm.tm_hour * 60 + local_tm.tm_min);
+    if (off >  720) off -= 1440;
+    if (off < -720) off += 1440;
+    return off;
+  }
+  return INT_MIN;
+}
+
+void FakeGatoScheduler::sanitizeScheduleToLocalLimit(int offsetMin) {
+  // Round-trip UTC→local→UTC. convertSlotsOffset enforces 3 slots per output
+  // day in both directions, so any slot that would be invisible in Eve (because
+  // its local day is already full) is dropped from storage here, preventing it
+  // from firing silently.
+  PROG_CMD_WEEK_SCHEDULE localView, sanitized;
+  convertSlotsOffset(prog_send_data.weekSchedule, localView,  -offsetMin);
+  convertSlotsOffset(localView,                   sanitized,  +offsetMin);
+  if (memcmp(&prog_send_data.weekSchedule, &sanitized, sizeof(sanitized)) != 0) {
+    WEBLOG("SCHEDULER: slots trimmed from UTC schedule — would exceed 3 per local day and be invisible in Eve");
+    memcpy(&prog_send_data.weekSchedule, &sanitized, sizeof(sanitized));
+  }
+}
+
+void FakeGatoScheduler::convertEveSlotsToUTC(int utcOffsetMin) {
+  PROG_CMD_WEEK_SCHEDULE orig = prog_send_data.weekSchedule;
+  convertSlotsOffset(orig, prog_send_data.weekSchedule, utcOffsetMin);
+  sanitizeScheduleToLocalLimit(utcOffsetMin);
+}
 
 void FakeGatoScheduler::printData(uint8_t *data, int len) {
   Serial.printf("Data %d ", len);

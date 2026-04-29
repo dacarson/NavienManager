@@ -75,7 +75,7 @@ NavienLearner::NavienLearner()
       _recomputeRequested(false),
       _taskState(IDLE),
       _recomputeDay(0),
-      _lastRecomputeYday(-1),
+      _lastRecomputeTime24h(0),
       _startupDecayDone(false),
       _lastRecomputeTime(0),
       _scheduleHandoffMutex(nullptr),
@@ -168,9 +168,9 @@ void NavienLearner::onNavienState(bool consumption_active,
 
         if (isColdStart) {
             // Pin dow and bucket to tap-open time.
-            struct tm *t = localtime(&now);
-            _runDow    = t->tm_wday;                          // 0=Sun
-            _runBucket = (t->tm_hour * 60 + t->tm_min) / 5;  // 0–287
+            struct tm *t = gmtime(&now);
+            _runDow    = t->tm_wday;                          // 0=Sun (UTC)
+            _runBucket = (t->tm_hour * 60 + t->tm_min) / 5;  // 0–287 (UTC)
 
             _runStart        = now;
             _runDurationSec  = 0;
@@ -237,26 +237,31 @@ void NavienLearner::advanceMeasuredWeek() {
 
 // On-disk layout for measured.bin
 struct MeasuredFile {
-    uint32_t    magic;           // 0x4D454153 ("MEAS")
-    uint8_t     schema_version;  // bump if struct layout changes
-    uint8_t     head;            // _measuredHead (0–3)
+    uint32_t    magic;              // 0x4D454153 ("MEAS")
+    uint8_t     schema_version;     // bump if struct layout changes
+    uint8_t     head;               // _measuredHead (0–3)
     uint8_t     pad[2];
     WeekMeasured measured[4];
+    // int64_t used so the field survives if time_t widens beyond 32 bits on a
+    // future toolchain.  On ESP32 Arduino time_t is signed 32-bit; values above
+    // 2^31-1 (year 2038) are not supported by the platform regardless.
+    int64_t     last_recompute_24h; // _lastRecomputeTime24h (epoch seconds); survives reboots
 };
 
 static constexpr uint32_t MEASURED_MAGIC          = 0x4D454153u;
-static constexpr uint8_t  MEASURED_SCHEMA_VERSION = 1;
+static constexpr uint8_t  MEASURED_SCHEMA_VERSION = 2;
 static constexpr char     MEASURED_FILE[]         = "/navien/measured.bin";
 static constexpr char     MEASURED_TMP_FILE[]     = "/navien/measured.tmp";
 
 bool NavienLearner::saveMeasured() {
     MeasuredFile mf;
-    mf.magic          = MEASURED_MAGIC;
-    mf.schema_version = MEASURED_SCHEMA_VERSION;
-    mf.head           = _measuredHead;
-    mf.pad[0]         = 0;
-    mf.pad[1]         = 0;
+    mf.magic              = MEASURED_MAGIC;
+    mf.schema_version     = MEASURED_SCHEMA_VERSION;
+    mf.head               = _measuredHead;
+    mf.pad[0]             = 0;
+    mf.pad[1]             = 0;
     memcpy(mf.measured, _measured, sizeof(_measured));
+    mf.last_recompute_24h = (int64_t)_lastRecomputeTime24h;
 
     File f = LittleFS.open(MEASURED_TMP_FILE, "w");
     if (!f) {
@@ -318,7 +323,8 @@ bool NavienLearner::loadMeasured() {
     }
 
     memcpy(_measured, mf.measured, sizeof(_measured));
-    _measuredHead = mf.head;
+    _measuredHead         = mf.head;
+    _lastRecomputeTime24h = (time_t)mf.last_recompute_24h;
     Serial.printf("NavienLearner: measured window loaded (head=%u)\n", mf.head);
     return true;
 }
@@ -430,19 +436,30 @@ void NavienLearner::idleStep() {
         return;
     }
 
-    // Midnight + 2min check: trigger nightly recompute once per day.
+    // 24h elapsed timer: trigger nightly recompute once per day.
     // Goes via DECAY_CHECK first so year-rollover decay is applied before
     // the new schedule is computed.
     time_t now = time(nullptr);
-    if (now > 0) {
-        struct tm tm_buf;
-        struct tm *t = localtime_r(&now, &tm_buf);
-        if (t->tm_hour == 0 && t->tm_min >= 2 &&
-            t->tm_yday != _lastRecomputeYday) {
-            _lastRecomputeYday = t->tm_yday;
-            // Sunday midnight: advance the measured efficiency week slot.
+    if (now > 1700000000L) {  // require a plausible NTP-synced epoch, not just any positive value
+        if (_lastRecomputeTime24h == 0) {
+            // First eligible tick after boot (or missing measured.bin).
+            // Persist immediately so a reboot in the first 24h window still
+            // anchors from this point rather than from zero again.
+            _lastRecomputeTime24h = now;
+            saveMeasured();
+        }
+        // Guard against NTP backward jumps resetting the anchor into the future;
+        // a forward jump is harmless (fires one recompute early at most).
+        if (_lastRecomputeTime24h > now) _lastRecomputeTime24h = now;
+        if (now - _lastRecomputeTime24h >= 86400L) {
+            _lastRecomputeTime24h = now;
+            struct tm tm_buf;
+            struct tm *t = gmtime_r(&now, &tm_buf);
+            // UTC Sunday: advance the measured efficiency week slot.
             if (t->tm_wday == 0) {
-                advanceMeasuredWeek();
+                advanceMeasuredWeek();  // advanceMeasuredWeek calls saveMeasured()
+            } else {
+                saveMeasured();  // persist the updated 24h anchor between weekly saves
             }
             _taskState = DECAY_CHECK;
         }
@@ -473,7 +490,7 @@ void NavienLearner::decayCheck() {
     }
 
     struct tm  tm_buf;
-    struct tm *t        = localtime_r(&now, &tm_buf);
+    struct tm *t        = gmtime_r(&now, &tm_buf);
     uint16_t  this_year = (uint16_t)(t->tm_year + 1900);
     uint16_t  stored_year = _store.data().current_year;
 
@@ -653,7 +670,7 @@ int NavienLearner::ingestBucketPayload(const char *json, bool &replaced) {
         // BucketStore::begin() so the header is never left at a stale value.
         if (current_year <= 0) {
             time_t now = time(nullptr);
-            struct tm *t = localtime(&now);
+            struct tm *t = gmtime(&now);
             current_year = (t && t->tm_year > 100) ? (t->tm_year + 1900) : 2025;
         }
         bf.current_year = (uint16_t)current_year;
@@ -781,7 +798,7 @@ void NavienLearner::appendStatusHTML(String &page) const {
     if (_lastRecomputeTime > 0) {
         char tbuf[32];
         struct tm  tm_buf;
-        struct tm *t = localtime_r(&_lastRecomputeTime, &tm_buf);
+        struct tm *t = localtime_r(&_lastRecomputeTime, &tm_buf);  // display only
         strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M", t);
         time_t elapsed = time(nullptr) - _lastRecomputeTime;
         char abuf[32];
