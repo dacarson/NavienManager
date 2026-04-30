@@ -21,7 +21,7 @@ SOFTWARE.
 */
 
 #include "PeakFinder.h"
-#include <stdio.h>
+#include "HomeSpan.h"
 #include <string.h>
 
 // Bucket duration in minutes — 288 buckets × 5 min = 1440 min/day.
@@ -136,7 +136,7 @@ int PeakFinder::findDaySlots(const BucketFile::Bucket *day_buckets,
         float kept_min_score    = best[MAX_SLOTS_PER_DAY - 1].score;
         float dropped_best_score = best[MAX_SLOTS_PER_DAY].score;
         float dropped_worst_score = best[original_count - 1].score;
-        printf("LEARNER PeakFinder pruned slots: candidates=%d kept=%d pruned=%d kept_min=%.2f dropped_best=%.2f dropped_worst=%.2f\n",
+        WEBLOG("LEARNER PeakFinder pruned slots: candidates=%d kept=%d pruned=%d kept_min=%.2f dropped_best=%.2f dropped_worst=%.2f",
                original_count, MAX_SLOTS_PER_DAY, pruned_count,
                kept_min_score, dropped_best_score, dropped_worst_score);
         n_best = MAX_SLOTS_PER_DAY;

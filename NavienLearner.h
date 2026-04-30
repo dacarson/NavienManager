@@ -180,8 +180,9 @@ private:
     time_t        _lastRecomputeTime;   // wall time of last RECOMPUTE_WRITE (0 = never)
 
     // Capacity for the schedule JSON buffer.
-    // Worst case: 7 days × 3 slots, fully expanded ≈ 1309 bytes; 1400 gives margin.
-    static constexpr int SCHEDULE_JSON_CAPACITY = 1400;
+    // Includes per-slot score metadata (`"score":%.3f`) used by learnerStatus.
+    // Worst-case expanded payload is now ~1.65 KB; 2048 keeps safe headroom.
+    static constexpr int SCHEDULE_JSON_CAPACITY = 2048;
 
     // --- Schedule handoff (Core 0 writes, Core 1 reads — guarded by mutex) ---
     SemaphoreHandle_t _scheduleHandoffMutex;

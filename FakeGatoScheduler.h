@@ -24,12 +24,16 @@
 
 #include "SchedulerBase.h"
 #include "HomeSpan.h"
+#include <math.h>
 
   // Custom Characteristics.
 CUSTOM_CHAR_DATA(ProgramData, E863F12F-079E-48FF-8F27-9C2605A29F52, PR + EV);
 
 class FakeGatoScheduler : public SchedulerBase {
 public:
+  static constexpr int ACTIVE_SLOT_LIMIT = MAX_SLOTS_PER_DAY;  // 3-slot Eve UI/runtime limit
+  static constexpr int SLOT_SCORE_STORAGE_SLOTS = 4;  // mirrors Eve wire struct slot[4]
+
   FakeGatoScheduler();
   virtual ~FakeGatoScheduler() {}
   
@@ -169,8 +173,8 @@ protected:
   // Use positive offsetMin for local→UTC (UTC = local + offset) and negative for UTC→local.
   static void convertSlotsOffset(const PROG_CMD_WEEK_SCHEDULE &in,
                                   PROG_CMD_WEEK_SCHEDULE &out, int offsetMin,
-                                  const float inScores[7][4] = nullptr,
-                                  float outScores[7][4] = nullptr);
+                                  const float inScores[7][SLOT_SCORE_STORAGE_SLOTS] = nullptr,
+                                  float outScores[7][SLOT_SCORE_STORAGE_SLOTS] = nullptr);
   void convertEveSlotsToUTC(int utcOffsetMin);
 
   // Returns the best available UTC offset in minutes (UTC = local + offset).
@@ -246,8 +250,8 @@ protected:
   } PROG_DATA_FULL_DATA;
   
   PROG_DATA_FULL_DATA prog_send_data;
-  float _slotScoreUtc[7][4];
-  static constexpr float SLOT_SCORE_UNKNOWN = -1000000000.0f;
+  float _slotScoreUtc[7][SLOT_SCORE_STORAGE_SLOTS];
+  static constexpr float SLOT_SCORE_UNKNOWN = NAN;
   
     // Packet Headers
   enum {

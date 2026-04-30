@@ -78,7 +78,7 @@ FakeGatoScheduler::FakeGatoScheduler()
 
 void FakeGatoScheduler::resetSlotScores() {
   for (int d = 0; d < 7; d++) {
-    for (int s = 0; s < 4; s++) {
+    for (int s = 0; s < SLOT_SCORE_STORAGE_SLOTS; s++) {
       _slotScoreUtc[d][s] = SLOT_SCORE_UNKNOWN;
     }
   }
@@ -106,12 +106,12 @@ void FakeGatoScheduler::setEnabled(bool enable) {
 }
 
 bool FakeGatoScheduler::getSlotScoreUtc(int day, int slotIndex, float &scoreOut) const {
-  if (day < 0 || day > 6 || slotIndex < 0 || slotIndex >= 3) return false;
+  if (day < 0 || day > 6 || slotIndex < 0 || slotIndex >= ACTIVE_SLOT_LIMIT) return false;
   uint8_t sh, sm, eh, em;
   if (!getTimeSlot(day, slotIndex, sh, sm, eh, em)) return false;
   int eveDay = (day + 6) % 7;  // SchedulerBase Sunday-first -> Eve Monday-first
   float score = _slotScoreUtc[eveDay][slotIndex];
-  if (score <= SLOT_SCORE_UNKNOWN + 1.0f) return false;
+  if (isnan(score)) return false;
   scoreOut = score;
   return true;
 }
@@ -708,15 +708,15 @@ void FakeGatoScheduler::loop() {
 void FakeGatoScheduler::convertSlotsOffset(const PROG_CMD_WEEK_SCHEDULE &in,
                                             PROG_CMD_WEEK_SCHEDULE &out,
                                             int offsetMin,
-                                            const float inScores[7][4],
-                                            float outScores[7][4]) {
+                                            const float inScores[7][SLOT_SCORE_STORAGE_SLOTS],
+                                            float outScores[7][SLOT_SCORE_STORAGE_SLOTS]) {
   // General slot offset converter. offsetMin > 0 shifts forward (local→UTC for PST),
   // offsetMin < 0 shifts backward (UTC→local for readback).
   // Eve day 0=Monday..6=Sunday; offset units are value*10 minutes past midnight.
   memset(&out.day, 0xFF, sizeof(out.day));
   if (outScores) {
     for (int d = 0; d < 7; d++) {
-      for (int s = 0; s < 4; s++) {
+      for (int s = 0; s < SLOT_SCORE_STORAGE_SLOTS; s++) {
         outScores[d][s] = SLOT_SCORE_UNKNOWN;
       }
     }
@@ -765,7 +765,7 @@ void FakeGatoScheduler::convertSlotsOffset(const PROG_CMD_WEEK_SCHEDULE &in,
       // Write into first free slot of the target day (max 3 — Eve UI limit).
       CMD_DAY_SCHEDULE *targetDay = &out.day[target_day];
       bool written = false;
-      for (int s = 0; s < 3; s++) {
+      for (int s = 0; s < ACTIVE_SLOT_LIMIT; s++) {
         if (targetDay->slot[s].offset_start == 0xFF) {
           targetDay->slot[s].offset_start = off_start;
           targetDay->slot[s].offset_end   = off_end;
@@ -778,7 +778,7 @@ void FakeGatoScheduler::convertSlotsOffset(const PROG_CMD_WEEK_SCHEDULE &in,
         int worst = 0;
         float worstScore = outScores ? outScores[target_day][0] : SLOT_SCORE_UNKNOWN;
         uint8_t worstStart = targetDay->slot[0].offset_start;
-        for (int s = 1; s < 3; s++) {
+        for (int s = 1; s < ACTIVE_SLOT_LIMIT; s++) {
           float sScore = outScores ? outScores[target_day][s] : SLOT_SCORE_UNKNOWN;
           uint8_t sStart = targetDay->slot[s].offset_start;
           if (sScore < worstScore || (fabsf(sScore - worstScore) < 0.0001f && sStart > worstStart)) {
@@ -791,6 +791,9 @@ void FakeGatoScheduler::convertSlotsOffset(const PROG_CMD_WEEK_SCHEDULE &in,
         if (slotScore > worstScore) {
           replace = true;
         } else if (fabsf(slotScore - worstScore) < 0.0001f && off_start < worstStart) {
+          // Deterministic tie-break for equal scores: prefer earlier local start.
+          // This keeps earlier demand windows visible/retained when constrained
+          // by Eve's 3-slot-per-day cap.
           replace = true;
         }
         if (replace) {
@@ -825,7 +828,7 @@ void FakeGatoScheduler::sanitizeScheduleToLocalLimit(int offsetMin) {
   // its local day is already full) is dropped from storage here, preventing it
   // from firing silently.
   PROG_CMD_WEEK_SCHEDULE localView, sanitized;
-  float localScores[7][4], sanitizedScores[7][4];
+  float localScores[7][SLOT_SCORE_STORAGE_SLOTS], sanitizedScores[7][SLOT_SCORE_STORAGE_SLOTS];
   convertSlotsOffset(prog_send_data.weekSchedule, localView,  -offsetMin,
                      _slotScoreUtc, localScores);
   convertSlotsOffset(localView,                   sanitized,  +offsetMin,
@@ -839,7 +842,7 @@ void FakeGatoScheduler::sanitizeScheduleToLocalLimit(int offsetMin) {
 
 void FakeGatoScheduler::convertEveSlotsToUTC(int utcOffsetMin) {
   PROG_CMD_WEEK_SCHEDULE orig = prog_send_data.weekSchedule;
-  float convertedScores[7][4];
+  float convertedScores[7][SLOT_SCORE_STORAGE_SLOTS];
   convertSlotsOffset(orig, prog_send_data.weekSchedule, utcOffsetMin,
                      _slotScoreUtc, convertedScores);
   memcpy(&_slotScoreUtc, &convertedScores, sizeof(_slotScoreUtc));
