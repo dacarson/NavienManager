@@ -548,8 +548,8 @@ void NavienLearner::recomputeWrite() {
             int em = _weekSlots[dow][s].end_min   % 60;
             ok &= safeAppend(buf, SCHEDULE_JSON_CAPACITY, &pos,
                              "%s{\"startHour\":%d,\"startMinute\":%d,"
-                             "\"endHour\":%d,\"endMinute\":%d}",
-                             s > 0 ? "," : "", sh, sm, eh, em);
+                             "\"endHour\":%d,\"endMinute\":%d,\"score\":%.3f}",
+                             s > 0 ? "," : "", sh, sm, eh, em, _weekSlots[dow][s].score);
         }
         ok &= safeAppend(buf, SCHEDULE_JSON_CAPACITY, &pos, "]}");
     }

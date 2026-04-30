@@ -47,6 +47,7 @@ SOFTWARE.
 struct TimeSlot {
     uint16_t start_min;  // minutes since midnight (start of recirc window)
     uint16_t end_min;    // minutes since midnight (end of recirc window)
+    float    score;      // weighted score of the peak that produced this slot
 };
 
 // ---------------------------------------------------------------------------

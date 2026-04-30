@@ -38,6 +38,7 @@ public:
 
   bool enabled() { return scheduleActive; }
   void setEnabled(bool enable);
+  bool getSlotScoreUtc(int day, int slotIndex, float &scoreOut) const;
 
   // Phase 3 calls this after the schedVersion NVS migration to indicate that
   // stored slots are UTC and learner-generated schedules may be applied.
@@ -167,7 +168,9 @@ protected:
   // General slot offset converter: reads 'in', applies offsetMin, writes cleared+filled 'out'.
   // Use positive offsetMin for local→UTC (UTC = local + offset) and negative for UTC→local.
   static void convertSlotsOffset(const PROG_CMD_WEEK_SCHEDULE &in,
-                                  PROG_CMD_WEEK_SCHEDULE &out, int offsetMin);
+                                  PROG_CMD_WEEK_SCHEDULE &out, int offsetMin,
+                                  const float inScores[7][4] = nullptr,
+                                  float outScores[7][4] = nullptr);
   void convertEveSlotsToUTC(int utcOffsetMin);
 
   // Returns the best available UTC offset in minutes (UTC = local + offset).
@@ -178,6 +181,9 @@ protected:
   // Any slot that would exceed 3 per local day is dropped from storage so
   // every stored slot is visible and controllable from the Eve app.
   void sanitizeScheduleToLocalLimit(int offsetMin);
+  void resetSlotScores();
+  void loadSlotScoresFromStorage();
+  void saveSlotScoresToStorage();
 
   struct PROG_CMD_CURRENT_SCHEDULE {
     uint8_t header = CURRENT_SCHEDULE;
@@ -240,6 +246,8 @@ protected:
   } PROG_DATA_FULL_DATA;
   
   PROG_DATA_FULL_DATA prog_send_data;
+  float _slotScoreUtc[7][4];
+  static constexpr float SLOT_SCORE_UNKNOWN = -1000000000.0f;
   
     // Packet Headers
   enum {

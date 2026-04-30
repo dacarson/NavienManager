@@ -18,6 +18,14 @@ The firmware operates in one of two modes depending on whether a NaviLink contro
 - **Monitor mode** — A NaviLink is present. The ESP32 passively observes all traffic and reports state but does not transmit any commands, to avoid interfering with the NaviLink.
 - **Control mode** — No NaviLink is present. The ESP32 takes ownership of the bus, periodically sends announce packets to identify itself, and actively sends commands to the heater in response to HomeKit requests and the internal scheduler.
 
+### Deployment and Logging Constraint
+
+This firmware is deployed as a headless embedded device: **there is no computer attached to the ESP32 in normal operation**. Therefore, diagnostics that only go to `Serial.print*` are operationally ineffective. Any log or status information needed for field debugging must be emitted through user-visible channels such as:
+
+- HomeSpan `WEBLOG` / web status page
+- Telnet commands/output
+- UDP telemetry packets
+
 ---
 
 ## RS485 / Navien Serial Protocol
@@ -707,6 +715,8 @@ If the device is powered off over New Year and boots in January, the mismatch is
 
 **Adaptive threshold:** starts at `min_weighted_score` = 6.0, steps down by 1.0 until `MAX_SLOTS_PER_DAY` peaks are found or `min_score_floor` is reached. If still fewer peaks than needed, `min_occurrences` is relaxed by 1 and the pass repeats.
 
+**Pruning and observability:** after ranking peak candidates by score, only the top `MAX_SLOTS_PER_DAY` (3) are kept. Any overflow candidates are pruned. When pruning occurs, firmware emits a `WEBLOG` entry with candidate/kept/pruned counts and score boundaries for the kept vs dropped sets.
+
 ### Efficiency Tracking
 
 Two efficiency metrics are maintained continuously and cached for display.
@@ -716,6 +726,7 @@ Two efficiency metrics are maintained continuously and cached for display.
 - A bucket is *covered* if it falls inside a slot.
 - A bucket is *schedulable* if it falls inside a slot **or** within 15 minutes after a slot ends (the hot-water window).
 - `predicted% = covered / schedulable × 100`
+- Predicted coverage is evaluated against the **final retained schedule slots** (post-prune, max 3/day), not against pre-prune candidate peaks.
 
 **Measured efficiency** — rolling 4-week window of actual observations. Each cold-start event records whether recirculation was already running at tap-open time (`recircAtStart`). The counters (`total[dow]` and `covered[dow]`) are updated on Core 0 when each `PendingColdStart` is consumed from the queue. On Sunday midnight the oldest week slot is zeroed and the head advances.
 

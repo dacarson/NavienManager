@@ -573,6 +573,34 @@ void commandLearnerStatus(const String& params) {
   if (cntPred > 0) snprintf(avgPred, sizeof(avgPred), "%6.1f%%", sumPred / cntPred);
   if (cntMeas > 0) snprintf(avgMeas, sizeof(avgMeas), "%6.1f%%", sumMeas / cntMeas);
   telnet.printf("  %-11s  %s   %s\n", "Weekly avg", avgPred, avgMeas);
+
+  // Final retained slot table (max 3/day) with UTC score per slot.
+  telnet.println(F("\n  Slots and Scores (final retained schedule)"));
+  telnet.println(F("  Day         Slot  UTC Range       Score"));
+  telnet.println(F("  ----------------------------------------------"));
+  bool printedAny = false;
+  if (scheduler) {
+    for (int day = 0; day < 7; day++) {
+      for (int slot = 0; slot < 3; slot++) {
+        uint8_t sh, sm, eh, em;
+        if (!scheduler->getTimeSlot(day, slot, sh, sm, eh, em)) continue;
+        float score = NAN;
+        bool hasScore = scheduler->getSlotScoreUtc(day, slot, score);
+        char scoreStr[16];
+        if (hasScore) {
+          snprintf(scoreStr, sizeof(scoreStr), "%.3f", score);
+        } else {
+          snprintf(scoreStr, sizeof(scoreStr), "N/A");
+        }
+        telnet.printf("  %-11s  %d     %02d:%02d-%02d:%02d    %s\n",
+                      dayNames[day], slot + 1, sh, sm, eh, em, scoreStr);
+        printedAny = true;
+      }
+    }
+  }
+  if (!printedAny) {
+    telnet.println(F("  (none)"));
+  }
 }
 
 void commandSaveLearner(const String& params) {

@@ -28,6 +28,7 @@
 #include "TimeUtils.h"
 #include <ArduinoJson.h>
 #include <climits>
+#include <cmath>
 
 extern Navien navienSerial;
 extern NavienLearner *learner;
@@ -41,6 +42,7 @@ FakeGatoScheduler::FakeGatoScheduler()
   nvs_open("SAVED_DATA",NVS_READWRITE,&savedData);       // open a new namespace called SAVED_DATA in the NVS
   if(!nvs_get_blob(savedData,"PROG_SEND_DATA",NULL,&len)) {        // if PROG_SEND_DATA data found
     nvs_get_blob(savedData,"PROG_SEND_DATA",&prog_send_data,&len);       // retrieve data
+    loadSlotScoresFromStorage();
     
     WEBLOG("SCHEDULER Loaded Program State");
       // Restore scheduleActive from its own key.
@@ -67,19 +69,51 @@ FakeGatoScheduler::FakeGatoScheduler()
     memset(&prog_send_data.weekSchedule.day, 0xFF, sizeof(prog_send_data.weekSchedule.day));
       // clear today's schedule
     memset(&prog_send_data.currentSchedule.current, 0xFF, sizeof(prog_send_data.currentSchedule.current));
+    resetSlotScores();
   }
   
   updateSchedulerWeekSchedule();
   refreshProgramData = true;
 }
 
+void FakeGatoScheduler::resetSlotScores() {
+  for (int d = 0; d < 7; d++) {
+    for (int s = 0; s < 4; s++) {
+      _slotScoreUtc[d][s] = SLOT_SCORE_UNKNOWN;
+    }
+  }
+}
+
+void FakeGatoScheduler::loadSlotScoresFromStorage() {
+  size_t len = sizeof(_slotScoreUtc);
+  if (nvs_get_blob(savedData, "SLOT_SCORE_V1", &_slotScoreUtc, &len) != ESP_OK || len != sizeof(_slotScoreUtc)) {
+    resetSlotScores();
+  }
+}
+
+void FakeGatoScheduler::saveSlotScoresToStorage() {
+  nvs_set_blob(savedData, "SLOT_SCORE_V1", &_slotScoreUtc, sizeof(_slotScoreUtc));
+}
+
 void FakeGatoScheduler::setEnabled(bool enable) {
   scheduleActive = enable;
   nvs_set_u8(savedData, "SCHED_ACTIVE", enable ? 1 : 0);
   nvs_set_blob(savedData, "PROG_SEND_DATA", &prog_send_data, sizeof(prog_send_data));
+  saveSlotScoresToStorage();
   nvs_commit(savedData);
   refreshProgramData = true;
   if (enable && isInitialized) initializeCurrentState();
+}
+
+bool FakeGatoScheduler::getSlotScoreUtc(int day, int slotIndex, float &scoreOut) const {
+  if (day < 0 || day > 6 || slotIndex < 0 || slotIndex >= 3) return false;
+  uint8_t sh, sm, eh, em;
+  if (!getTimeSlot(day, slotIndex, sh, sm, eh, em)) return false;
+  int eveDay = (day + 6) % 7;  // SchedulerBase Sunday-first -> Eve Monday-first
+  float score = _slotScoreUtc[eveDay][slotIndex];
+  if (score <= SLOT_SCORE_UNKNOWN + 1.0f) return false;
+  scoreOut = score;
+  return true;
 }
 
 String FakeGatoScheduler::getSchedulerState(int state) {
@@ -426,6 +460,7 @@ void FakeGatoScheduler::parseProgramData(uint8_t *data, int len) {
             break;
           }
           memcpy(&prog_send_data.weekSchedule, weekSchedule, sizeof(PROG_CMD_WEEK_SCHEDULE));
+          resetSlotScores();  // Eve wire schedule carries no score metadata.
           convertEveSlotsToUTC(offsetToUse);
         }
         updateSchedulerWeekSchedule();
@@ -493,6 +528,7 @@ void FakeGatoScheduler::parseProgramData(uint8_t *data, int len) {
   clockOffset = millis();
   if (storeData) {
     nvs_set_blob(savedData,"PROG_SEND_DATA",&prog_send_data,sizeof(prog_send_data));      // update data in the NVS
+    saveSlotScoresToStorage();
     nvs_commit(savedData);
     refreshProgramData = true;
   }
@@ -526,6 +562,7 @@ bool FakeGatoScheduler::setWeekScheduleFromJSON(const String &json) {
 
   // Clear all Eve week schedule slots to 0xFF (unused)
   memset(&prog_send_data.weekSchedule.day, 0xFF, sizeof(prog_send_data.weekSchedule.day));
+  resetSlotScores();
 
   // JSON index:  0=Sunday .. 6=Saturday  (SchedulerBase order)
   // Eve storage: 0=Monday .. 6=Sunday
@@ -556,6 +593,7 @@ bool FakeGatoScheduler::setWeekScheduleFromJSON(const String &json) {
         }
         eveDaySchedule->slot[slotIdx].offset_start = sh * 6 + sm / 10;
         eveDaySchedule->slot[slotIdx].offset_end   = eh * 6 + em / 10;
+        _slotScoreUtc[eveDay][slotIdx] = slot["score"] | SLOT_SCORE_UNKNOWN;
         slotIdx++;
       }
     }
@@ -567,6 +605,7 @@ bool FakeGatoScheduler::setWeekScheduleFromJSON(const String &json) {
 
   // Persist to NVS
   nvs_set_blob(savedData, "PROG_SEND_DATA", &prog_send_data, sizeof(prog_send_data));
+  saveSlotScoresToStorage();
   nvs_commit(savedData);
   refreshProgramData = true;
 
@@ -585,8 +624,10 @@ int FakeGatoScheduler::begin() {
       WEBLOG("SCHEDULER schedVersion %d: clearing local-time slots; re-push schedule from Eve", (int)schedVersion);
       memset(&prog_send_data.weekSchedule.day, 0xFF, sizeof(prog_send_data.weekSchedule.day));
       memset(&prog_send_data.currentSchedule.current, 0xFF, sizeof(prog_send_data.currentSchedule.current));
+      resetSlotScores();
       nvs_set_u8(savedData, "schedVersion", 1);
       nvs_set_blob(savedData, "PROG_SEND_DATA", &prog_send_data, sizeof(prog_send_data));
+      saveSlotScoresToStorage();
       nvs_commit(savedData);
     }
 
@@ -666,11 +707,20 @@ void FakeGatoScheduler::loop() {
 
 void FakeGatoScheduler::convertSlotsOffset(const PROG_CMD_WEEK_SCHEDULE &in,
                                             PROG_CMD_WEEK_SCHEDULE &out,
-                                            int offsetMin) {
+                                            int offsetMin,
+                                            const float inScores[7][4],
+                                            float outScores[7][4]) {
   // General slot offset converter. offsetMin > 0 shifts forward (local→UTC for PST),
   // offsetMin < 0 shifts backward (UTC→local for readback).
   // Eve day 0=Monday..6=Sunday; offset units are value*10 minutes past midnight.
   memset(&out.day, 0xFF, sizeof(out.day));
+  if (outScores) {
+    for (int d = 0; d < 7; d++) {
+      for (int s = 0; s < 4; s++) {
+        outScores[d][s] = SLOT_SCORE_UNKNOWN;
+      }
+    }
+  }
 
   for (int d = 0; d < 7; d++) {
     const CMD_DAY_SCHEDULE *daySched = &in.day[d];
@@ -707,6 +757,7 @@ void FakeGatoScheduler::convertSlotsOffset(const PROG_CMD_WEEK_SCHEDULE &in,
       // to the wrong 10-min slot (e.g. 599/10=59 → 9:50 instead of 10:00).
       uint8_t off_start = (uint8_t)((shifted_start + 5) / 10);
       uint8_t off_end   = (uint8_t)((shifted_end   + 5) / 10);
+      float slotScore = inScores ? inScores[d][i] : SLOT_SCORE_UNKNOWN;
       // Clamp to valid Eve range (max 23:50 = offset 143).
       if (off_start > 143) off_start = 143;
       if (off_end   > 143) off_end   = 143;
@@ -718,12 +769,35 @@ void FakeGatoScheduler::convertSlotsOffset(const PROG_CMD_WEEK_SCHEDULE &in,
         if (targetDay->slot[s].offset_start == 0xFF) {
           targetDay->slot[s].offset_start = off_start;
           targetDay->slot[s].offset_end   = off_end;
+          if (outScores) outScores[target_day][s] = slotScore;
           written = true;
           break;
         }
       }
       if (!written) {
-        WEBLOG("SCHEDULER convertSlotsOffset: local day %d full (3-slot Eve limit), slot dropped (UTC start offset=%d) — fires correctly on device", target_day, off_start);
+        int worst = 0;
+        float worstScore = outScores ? outScores[target_day][0] : SLOT_SCORE_UNKNOWN;
+        uint8_t worstStart = targetDay->slot[0].offset_start;
+        for (int s = 1; s < 3; s++) {
+          float sScore = outScores ? outScores[target_day][s] : SLOT_SCORE_UNKNOWN;
+          uint8_t sStart = targetDay->slot[s].offset_start;
+          if (sScore < worstScore || (fabsf(sScore - worstScore) < 0.0001f && sStart > worstStart)) {
+            worst = s;
+            worstScore = sScore;
+            worstStart = sStart;
+          }
+        }
+        bool replace = false;
+        if (slotScore > worstScore) {
+          replace = true;
+        } else if (fabsf(slotScore - worstScore) < 0.0001f && off_start < worstStart) {
+          replace = true;
+        }
+        if (replace) {
+          targetDay->slot[worst].offset_start = off_start;
+          targetDay->slot[worst].offset_end   = off_end;
+          if (outScores) outScores[target_day][worst] = slotScore;
+        }
       }
     }
   }
@@ -751,17 +825,24 @@ void FakeGatoScheduler::sanitizeScheduleToLocalLimit(int offsetMin) {
   // its local day is already full) is dropped from storage here, preventing it
   // from firing silently.
   PROG_CMD_WEEK_SCHEDULE localView, sanitized;
-  convertSlotsOffset(prog_send_data.weekSchedule, localView,  -offsetMin);
-  convertSlotsOffset(localView,                   sanitized,  +offsetMin);
+  float localScores[7][4], sanitizedScores[7][4];
+  convertSlotsOffset(prog_send_data.weekSchedule, localView,  -offsetMin,
+                     _slotScoreUtc, localScores);
+  convertSlotsOffset(localView,                   sanitized,  +offsetMin,
+                     localScores, sanitizedScores);
   if (memcmp(&prog_send_data.weekSchedule, &sanitized, sizeof(sanitized)) != 0) {
     WEBLOG("SCHEDULER: slots trimmed from UTC schedule — would exceed 3 per local day and be invisible in Eve");
     memcpy(&prog_send_data.weekSchedule, &sanitized, sizeof(sanitized));
+    memcpy(&_slotScoreUtc, &sanitizedScores, sizeof(_slotScoreUtc));
   }
 }
 
 void FakeGatoScheduler::convertEveSlotsToUTC(int utcOffsetMin) {
   PROG_CMD_WEEK_SCHEDULE orig = prog_send_data.weekSchedule;
-  convertSlotsOffset(orig, prog_send_data.weekSchedule, utcOffsetMin);
+  float convertedScores[7][4];
+  convertSlotsOffset(orig, prog_send_data.weekSchedule, utcOffsetMin,
+                     _slotScoreUtc, convertedScores);
+  memcpy(&_slotScoreUtc, &convertedScores, sizeof(_slotScoreUtc));
   sanitizeScheduleToLocalLimit(utcOffsetMin);
 }
 
