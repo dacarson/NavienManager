@@ -31,7 +31,7 @@ CUSTOM_CHAR_DATA(ProgramData, E863F12F-079E-48FF-8F27-9C2605A29F52, PR + EV);
 
 class FakeGatoScheduler : public SchedulerBase {
 public:
-  static constexpr int ACTIVE_SLOT_LIMIT = MAX_SLOTS_PER_DAY;  // 3-slot Eve UI/runtime limit
+  static constexpr int ACTIVE_SLOT_LIMIT = 3;  // keep in sync with PeakFinder MAX_SLOTS_PER_DAY
   static constexpr int SLOT_SCORE_STORAGE_SLOTS = 4;  // mirrors Eve wire struct slot[4]
 
   FakeGatoScheduler();
