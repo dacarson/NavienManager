@@ -105,7 +105,7 @@ if __name__ == "__main__":
 
     while 1:
 
-        msg=s.recvfrom(1024)
+        msg=s.recvfrom(8192)
         try:
             data = json.loads(msg[0])
         except json.JSONDecodeError as e:
