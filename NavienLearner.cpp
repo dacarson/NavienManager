@@ -21,6 +21,7 @@ SOFTWARE.
 */
 
 #include "NavienLearner.h"
+#include "HomeSpan.h"
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <stdarg.h>
@@ -75,6 +76,7 @@ NavienLearner::NavienLearner()
       _recomputeRequested(false),
       _taskState(IDLE),
       _recomputeDay(0),
+      _recomputeOffsetMin(0),
       _lastRecomputeTime24h(0),
       _startupDecayDone(false),
       _lastRecomputeTime(0),
@@ -351,20 +353,41 @@ void NavienLearner::learnerTask(void *pvParam) {
                 self->_taskState = RECOMPUTE_LOAD;
                 break;
 
-            case RECOMPUTE_LOAD:
-                // Data is already in RAM (BucketStore holds it).
-                // Reset per-day counters and begin processing from day 0.
+            case RECOMPUTE_LOAD: {
+                // Snapshot UTC offset once for the entire pass so all local-day
+                // bucket views and the UTC conversion in recomputeWrite() use the
+                // same offset (avoids drift if the system clock ticks across an
+                // hour boundary mid-recompute).
+                time_t rlt_now = time(nullptr);
+                struct tm rlt_local = {}, rlt_utc = {};
+                localtime_r(&rlt_now, &rlt_local);
+                gmtime_r(&rlt_now, &rlt_utc);
+                self->_recomputeOffsetMin =
+                    (rlt_utc.tm_hour * 60 + rlt_utc.tm_min)
+                  - (rlt_local.tm_hour * 60 + rlt_local.tm_min);
+                if (self->_recomputeOffsetMin >  720) self->_recomputeOffsetMin -= 1440;
+                if (self->_recomputeOffsetMin < -720) self->_recomputeOffsetMin += 1440;
                 memset(self->_weekSlotCount, 0, sizeof(self->_weekSlotCount));
                 self->_recomputeDay = 0;
                 self->_taskState    = RECOMPUTING;
-                // No delay — start RECOMPUTING immediately on next iteration.
                 break;
+            }
 
             case RECOMPUTING: {
-                int day = self->_recomputeDay;
-                self->_weekSlotCount[day] = PeakFinder::findDaySlots(
-                    self->_store.data().buckets[day],
-                    self->_weekSlots[day]);
+                int local_dow = self->_recomputeDay;
+                // Build local-day bucket view from UTC-indexed buckets.
+                // utc_min = local_min + offsetMin; wrap day on midnight crossing.
+                // Static keeps 288×6 = 1728 bytes off the task stack (Rule 2).
+                static BucketFile::Bucket local_buckets[BUCKET_PER_DAY];
+                for (int lb = 0; lb < BUCKET_PER_DAY; lb++) {
+                    int utc_min = lb * 5 + self->_recomputeOffsetMin;
+                    int utc_dow = local_dow;
+                    if (utc_min < 0)     { utc_min += 1440; utc_dow = (utc_dow + 6) % 7; }
+                    if (utc_min >= 1440) { utc_min -= 1440; utc_dow = (utc_dow + 1) % 7; }
+                    local_buckets[lb] = self->_store.data().buckets[utc_dow][utc_min / 5];
+                }
+                self->_weekSlotCount[local_dow] = PeakFinder::findDaySlots(
+                    local_buckets, self->_weekSlots[local_dow]);
                 self->_recomputeDay++;
                 if (self->_recomputeDay >= BUCKET_DAYS) {
                     self->_taskState = RECOMPUTE_WRITE;
@@ -410,6 +433,14 @@ void NavienLearner::idleStep() {
     // Consume any pending cold-start event from Core 1.
     PendingColdStart cs;
     if (xQueueReceive(_coldStartQueue, &cs, 0) == pdTRUE) {
+        static const char *dowNames[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+        int bucket_h = (cs.bucket * 5) / 60;
+        int bucket_m = (cs.bucket * 5) % 60;
+        WEBLOG("LEARNER cold-start: UTC %s %02d:%02d bucket=%d recirc=%s weight=%.1f",
+               dowNames[cs.dow], bucket_h, bucket_m, cs.bucket,
+               cs.recircAtStart ? "yes" : "no",
+               cs.demand_weight * cs.recency_weight);
+
         // Update measured-efficiency counters here on Core 0, not in
         // onNavienState() on Core 1, so _measured[] and _measuredHead are
         // written by exactly one core — no synchronisation needed.
@@ -522,14 +553,133 @@ void NavienLearner::decayCheck() {
 }
 
 // ---------------------------------------------------------------------------
+// LocalSlot — recomputeWrite() intermediate.  Kept at file scope so it can
+// be referenced in both the pruning loop and the UDP broadcast block inside
+// recomputeWrite() without being exposed in the header.
+// ---------------------------------------------------------------------------
+struct LocalSlot {
+    int      utc_dow;        // UTC day of week (0=Sun); this is the Eve day index
+    uint16_t utc_start_min;  // UTC start minute of day
+    uint16_t utc_end_min;    // UTC end minute of day
+    int      local_dow;      // local day of week (for diagnostics only)
+    uint16_t local_start_min;
+    uint16_t local_end_min;
+    float    score;
+};
+
+// ---------------------------------------------------------------------------
 // recomputeWrite() — private; builds schedule JSON and hands off (Core 0)
 // ---------------------------------------------------------------------------
 
 void NavienLearner::recomputeWrite() {
-    // Build JSON in setWeekScheduleFromJSON() format:
-    // {"schedule":[{"slots":[{"startHour":H,"startMinute":M,
-    //                         "endHour":H,"endMinute":M},...]},...]}
-    // Array index 0=Sunday .. 6=Saturday (SchedulerBase order).
+    // --- Step 1: Use UTC offset snapshotted in RECOMPUTE_LOAD ---
+    // _recomputeOffsetMin: UTC = local + offsetMin (PST → +480, Tokyo → -540).
+    int offsetMin = _recomputeOffsetMin;
+
+    // --- Step 2: Collect local-day slots, prune to MAX_SLOTS_PER_DAY per local
+    // day by score, then convert to UTC.
+    // _weekSlots[local_dow][s] holds local-time slots from findDaySlots on the
+    // local-day bucket view built in RECOMPUTING.
+    // Static keeps 21×sizeof(LocalSlot) off the task stack (Rule 2).
+    static LocalSlot allLocal[7 * MAX_SLOTS_PER_DAY];
+    int nLocal = 0;
+
+    for (int local_dow = 0; local_dow < BUCKET_DAYS; local_dow++) {
+        int n = _weekSlotCount[local_dow];
+
+        // Sort this local day's slots by score descending so the top-3 prune
+        // keeps the highest-scoring peaks.  findDaySlots returns them
+        // chronologically, not by score.
+        TimeSlot sorted[MAX_PEAK_CANDIDATES];
+        memcpy(sorted, _weekSlots[local_dow], n * sizeof(TimeSlot));
+        for (int i = 1; i < n; i++) {
+            TimeSlot key = sorted[i];
+            int j = i - 1;
+            while (j >= 0 && sorted[j].score < key.score) {
+                sorted[j + 1] = sorted[j];
+                j--;
+            }
+            sorted[j + 1] = key;
+        }
+
+        int kept = (n < MAX_SLOTS_PER_DAY) ? n : MAX_SLOTS_PER_DAY;
+
+        for (int s = 0; s < n; s++) {
+            int local_start = (int)sorted[s].start_min;
+            int local_end   = (int)sorted[s].end_min;
+            float score     = sorted[s].score;
+
+            if (s >= kept) {
+                WEBLOG("LEARNER local-day prune: local_dow=%d kept=%d dropped local=%02d:%02d score=%.2f",
+                       local_dow, MAX_SLOTS_PER_DAY,
+                       local_start / 60, local_start % 60, score);
+                continue;
+            }
+
+            // Convert local time → UTC.
+            int utc_start = local_start + offsetMin;
+            int utc_end   = local_end   + offsetMin;
+            int utc_dow   = local_dow;
+
+            if (utc_start < 0) {
+                utc_start += 1440;
+                utc_end   += 1440;
+                utc_dow    = (local_dow + 6) % 7;
+                if (utc_end > 1430) utc_end = 1430;
+            } else if (utc_start >= 1440) {
+                utc_start -= 1440;
+                utc_end   -= 1440;
+                utc_dow    = (local_dow + 1) % 7;
+                if (utc_end < 0)    utc_end = 0;
+                if (utc_end > 1430) utc_end = 1430;
+            } else if (utc_end > 1430) {
+                // Slot straddles UTC midnight — cap end at 23:50.
+                utc_end = 1430;
+            }
+
+            allLocal[nLocal++] = {
+                utc_dow, (uint16_t)utc_start, (uint16_t)utc_end,
+                local_dow, (uint16_t)local_start, (uint16_t)local_end, score
+            };
+        }
+    }
+
+    // --- Step 2b: Diagnostic — log local and UTC slot distribution ---
+    {
+        static const char *dn[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+        WEBLOG("LEARNER recompute: local peaks: Sun=%d Mon=%d Tue=%d Wed=%d Thu=%d Fri=%d Sat=%d (offsetMin=%d)",
+               _weekSlotCount[0], _weekSlotCount[1], _weekSlotCount[2], _weekSlotCount[3],
+               _weekSlotCount[4], _weekSlotCount[5], _weekSlotCount[6], offsetMin);
+        int udc[7] = {};
+        for (int i = 0; i < nLocal; i++) udc[allLocal[i].utc_dow]++;
+        WEBLOG("LEARNER recompute: UTC slots post-local-prune: Sun=%d Mon=%d Tue=%d Wed=%d Thu=%d Fri=%d Sat=%d",
+               udc[0], udc[1], udc[2], udc[3], udc[4], udc[5], udc[6]);
+        for (int d = 0; d < 7; d++) {
+            for (int i = 0; i < nLocal; i++) {
+                if (allLocal[i].local_dow != d) continue;
+                WEBLOG("  local_%s %02d:%02d-%02d:%02d -> utc_%s %02d:%02d-%02d:%02d score=%.3f",
+                       dn[d],
+                       allLocal[i].local_start_min / 60, allLocal[i].local_start_min % 60,
+                       allLocal[i].local_end_min   / 60, allLocal[i].local_end_min   % 60,
+                       dn[allLocal[i].utc_dow],
+                       allLocal[i].utc_start_min / 60, allLocal[i].utc_start_min % 60,
+                       allLocal[i].utc_end_min   / 60, allLocal[i].utc_end_min   % 60,
+                       allLocal[i].score);
+            }
+        }
+    }
+
+    // allLocal is already pruned to MAX_SLOTS_PER_DAY per local day;
+    // use it directly as pruned.
+    LocalSlot *pruned = allLocal;
+    int        nPruned = nLocal;
+
+    // --- Step 3: Build JSON with LOCAL times indexed by LOCAL day (0=Sun..6=Sat).
+    // Same format as navien_schedule_learner.py POST /schedule — NOT "utc":true.
+    // setWeekScheduleFromJSON() loads all 3 slots per local day, then
+    // convertEveSlotsToUTC(offsetMin) maps them into UTC storage (replacing the
+    // lowest-scoring slot when multiple local days collide on one UTC day).
+    // Indexing by UTC day here caused silent truncation at 3 slots/UTC day.
     //
     // safeAppend() clamps pos to SCHEDULE_JSON_CAPACITY-1 on overflow so
     // neither buf nor _pendingScheduleJSON can be overrun regardless of data.
@@ -537,19 +687,38 @@ void NavienLearner::recomputeWrite() {
     int  pos     = 0;
     bool ok      = true;
 
-    ok &= safeAppend(buf, SCHEDULE_JSON_CAPACITY, &pos, "{\"schedule\":[");
-    for (int dow = 0; dow < BUCKET_DAYS && ok; dow++) {
+    ok &= safeAppend(buf, SCHEDULE_JSON_CAPACITY, &pos,
+                     "{\"offsetMin\":%d,\"schedule\":[", offsetMin);
+    for (int local_dow = 0; local_dow < BUCKET_DAYS && ok; local_dow++) {
         ok &= safeAppend(buf, SCHEDULE_JSON_CAPACITY, &pos,
-                         "%s{\"slots\":[", dow > 0 ? "," : "");
-        for (int s = 0; s < _weekSlotCount[dow] && ok; s++) {
-            int sh = _weekSlots[dow][s].start_min / 60;
-            int sm = _weekSlots[dow][s].start_min % 60;
-            int eh = _weekSlots[dow][s].end_min   / 60;
-            int em = _weekSlots[dow][s].end_min   % 60;
+                         "%s{\"slots\":[", local_dow > 0 ? "," : "");
+        // Collect this local day's slots and sort by start time for JSON.
+        int dayIdx[ MAX_SLOTS_PER_DAY ];
+        int nDay = 0;
+        for (int i = 0; i < nPruned; i++) {
+            if (pruned[i].local_dow == local_dow)
+                dayIdx[nDay++] = i;
+        }
+        for (int a = 1; a < nDay; a++) {
+            int keyI = dayIdx[a];
+            int j = a - 1;
+            while (j >= 0 &&
+                   pruned[dayIdx[j]].local_start_min > pruned[keyI].local_start_min) {
+                dayIdx[j + 1] = dayIdx[j];
+                j--;
+            }
+            dayIdx[j + 1] = keyI;
+        }
+        for (int a = 0; a < nDay && ok; a++) {
+            const LocalSlot &s = pruned[dayIdx[a]];
+            int sh = s.local_start_min / 60;
+            int sm = s.local_start_min % 60;
+            int eh = s.local_end_min   / 60;
+            int em = s.local_end_min   % 60;
             ok &= safeAppend(buf, SCHEDULE_JSON_CAPACITY, &pos,
                              "%s{\"startHour\":%d,\"startMinute\":%d,"
                              "\"endHour\":%d,\"endMinute\":%d,\"score\":%.3f}",
-                             s > 0 ? "," : "", sh, sm, eh, em, _weekSlots[dow][s].score);
+                             a > 0 ? "," : "", sh, sm, eh, em, s.score);
         }
         ok &= safeAppend(buf, SCHEDULE_JSON_CAPACITY, &pos, "]}");
     }
@@ -562,29 +731,29 @@ void NavienLearner::recomputeWrite() {
         return;
     }
 
-    // Compute predicted efficiency from the new schedule and bucket data.
-    // A bucket with raw_count > 0 is "schedulable" if it falls inside a slot
-    // or within HOT_WINDOW_MIN minutes after a slot ends (the pipe stays hot
-    // briefly after recirculation stops).
-    // predicted% = covered_schedulable / total_schedulable × 100
+    // --- Step 4: Predicted efficiency per LOCAL day (matches schedule semantics) ---
+    // Uses the same local-day bucket view as RECOMPUTING; slots are local times.
     static constexpr int HOT_WINDOW_MIN = 15;
-    for (int dow = 0; dow < BUCKET_DAYS; dow++) {
+    for (int local_dow = 0; local_dow < BUCKET_DAYS; local_dow++) {
         int covered = 0, schedulable = 0;
-        for (int b = 0; b < BUCKET_PER_DAY; b++) {
-            if (_store.data().buckets[dow][b].raw_count == 0) continue;
-            int  bucket_min = b * 5;  // minute-of-day for this bucket
-            bool in_slot    = false;
-            bool near_after = false;
-            for (int s = 0; s < _weekSlotCount[dow]; s++) {
-                int start = (int)_weekSlots[dow][s].start_min;
-                int end   = (int)_weekSlots[dow][s].end_min;
-                if (bucket_min >= start && bucket_min < end) {
+        for (int lb = 0; lb < BUCKET_PER_DAY; lb++) {
+            int utc_min = lb * 5 + offsetMin;
+            int utc_dow = local_dow;
+            if (utc_min < 0)     { utc_min += 1440; utc_dow = (utc_dow + 6) % 7; }
+            if (utc_min >= 1440) { utc_min -= 1440; utc_dow = (utc_dow + 1) % 7; }
+            if (_store.data().buckets[utc_dow][utc_min / 5].raw_count == 0) continue;
+            int local_min = lb * 5;
+            bool in_slot = false, near_after = false;
+            for (int i = 0; i < nPruned; i++) {
+                if (pruned[i].local_dow != local_dow) continue;
+                int start = (int)pruned[i].local_start_min;
+                int end   = (int)pruned[i].local_end_min;
+                if (local_min >= start && local_min < end) {
                     in_slot = true;
-                    break;  // slots don't overlap; no need to check further
+                    break;
                 }
-                if (bucket_min >= end && bucket_min < end + HOT_WINDOW_MIN) {
+                if (local_min >= end && local_min < end + HOT_WINDOW_MIN) {
                     near_after = true;
-                    // keep checking — bucket might fall inside a later slot
                 }
             }
             if (in_slot || near_after) {
@@ -592,7 +761,7 @@ void NavienLearner::recomputeWrite() {
                 if (in_slot) covered++;
             }
         }
-        _predictedEfficiency[dow] = (schedulable > 0)
+        _predictedEfficiency[local_dow] = (schedulable > 0)
             ? (covered * 100.0f / schedulable)
             : NAN;
     }
@@ -607,7 +776,72 @@ void NavienLearner::recomputeWrite() {
     _newScheduleReady = true;
     xSemaphoreGive(_scheduleHandoffMutex);
 
-    broadcastUDP();
+    // --- Step 6: Broadcast learner status over UDP ---
+    // Uses the pruned schedule (same MAX_SLOTS_PER_DAY slots pushed to HomeKit)
+    // rather than the full pre-prune candidate list.  Pre-prune candidates can
+    // number up to MAX_PEAK_CANDIDATES (32) per day; broadcasting all of them
+    // produces a JSON that exceeds the ~1472-byte UDP payload limit, causing
+    // silent truncation by the network stack.
+    {
+        static const char *dayPfx[] = {
+            "sun","mon","tue","wed","thu","fri","sat"
+        };
+
+        JsonDocument udpDoc;
+        udpDoc["type"] = "learner";
+        udpDoc["last_recompute"] = (long)_lastRecomputeTime;
+        udpDoc["bucket_fill_pct"] = serialized(
+            String(_store.nonZeroCount() * 100.0f / (BUCKET_DAYS * BUCKET_PER_DAY), 1));
+
+        char key[32];
+        for (int dow = 0; dow < BUCKET_DAYS; dow++) {
+            // "HH:MM-HH:MM" per slot = 11 chars; 2 separating commas; null terminator.
+            char slotStr[MAX_SLOTS_PER_DAY * 12 + 2] = "";
+            int  spos = 0;
+            bool firstSlot = true;
+            for (int i = 0; i < nPruned; i++) {
+                if (pruned[i].local_dow != dow) continue;
+                spos += snprintf(slotStr + spos, (int)sizeof(slotStr) - spos,
+                                 "%s%02d:%02d-%02d:%02d",
+                                 firstSlot ? "" : ",",
+                                 pruned[i].local_start_min / 60, pruned[i].local_start_min % 60,
+                                 pruned[i].local_end_min   / 60, pruned[i].local_end_min   % 60);
+                firstSlot = false;
+            }
+            snprintf(key, sizeof(key), "%s_slots", dayPfx[dow]);
+            udpDoc[key] = slotStr;
+
+            float pred = _predictedEfficiency[dow];
+            if (!isnan(pred)) {
+                snprintf(key, sizeof(key), "%s_predicted_pct", dayPfx[dow]);
+                udpDoc[key] = serialized(String(pred, 1));
+            }
+
+            uint32_t measTotal = 0, measCovered = 0;
+            for (int w = 0; w < 4; w++) {
+                measTotal   += _measured[w].total[dow];
+                measCovered += _measured[w].covered[dow];
+            }
+            if (measTotal > 0) {
+                float meas = measCovered * 100.0f / measTotal;
+                snprintf(key, sizeof(key), "%s_measured_pct", dayPfx[dow]);
+                udpDoc[key] = serialized(String(meas, 1));
+                if (!isnan(pred)) {
+                    snprintf(key, sizeof(key), "%s_gap_pct", dayPfx[dow]);
+                    udpDoc[key] = serialized(String(pred - meas, 1));
+                }
+            }
+
+            snprintf(key, sizeof(key), "%s_cold_starts_4wk", dayPfx[dow]);
+            udpDoc[key] = (int)measTotal;
+        }
+
+        udpDoc["debug"] = "";
+
+        String udpJson;
+        serializeJson(udpDoc, udpJson);
+        udp.broadcastTo(udpJson.c_str(), UDP_BROADCAST_PORT);
+    }
 
     Serial.println("NavienLearner: recompute complete, new schedule ready");
 }
@@ -708,76 +942,6 @@ int NavienLearner::ingestBucketPayload(const char *json, bool &replaced) {
     Serial.printf("[learner] POST /buckets: wrote %d buckets, replaced=%s, finalize=%s\n",
                   count, replaced ? "true" : "false", finalize ? "true" : "false");
     return count;
-}
-
-// ---------------------------------------------------------------------------
-// broadcastUDP() — private; emits a "type":"learner" JSON packet over UDP.
-// Called from recomputeWrite() on Core 0 after mutex handoff.
-// Uses ArduinoJson (same pattern as NavienBroadcaster.ino).
-// ---------------------------------------------------------------------------
-
-void NavienLearner::broadcastUDP() {
-    // 3-letter day prefixes used to build flat field names (e.g. "sun_slots").
-    // Flat top-level keys allow navien_listener.py to pass payload['fields'] = data
-    // directly to InfluxDB without any flattening — nested arrays/objects would
-    // fail InfluxDB line protocol.
-    static const char *dayPfx[] = {
-        "sun","mon","tue","wed","thu","fri","sat"
-    };
-
-    JsonDocument doc;
-    doc["type"] = "learner";
-    doc["last_recompute"] = (long)_lastRecomputeTime;
-    doc["bucket_fill_pct"] = serialized(
-        String(_store.nonZeroCount() * 100.0f / (BUCKET_DAYS * BUCKET_PER_DAY), 1));
-
-    char key[32];
-    for (int dow = 0; dow < BUCKET_DAYS; dow++) {
-        // Encode slots as compact string "HH:MM-HH:MM,..." (empty if no slots).
-        char slotStr[MAX_SLOTS_PER_DAY * 12] = "";  // "HH:MM-HH:MM," per slot
-        int  spos = 0;
-        for (int s = 0; s < _weekSlotCount[dow]; s++) {
-            spos += snprintf(slotStr + spos, (int)sizeof(slotStr) - spos,
-                             "%s%02d:%02d-%02d:%02d",
-                             s > 0 ? "," : "",
-                             _weekSlots[dow][s].start_min / 60,
-                             _weekSlots[dow][s].start_min % 60,
-                             _weekSlots[dow][s].end_min   / 60,
-                             _weekSlots[dow][s].end_min   % 60);
-        }
-        snprintf(key, sizeof(key), "%s_slots", dayPfx[dow]);
-        doc[key] = slotStr;  // ArduinoJson v7 copies both key and value
-
-        float pred = _predictedEfficiency[dow];
-        if (!isnan(pred)) {
-            snprintf(key, sizeof(key), "%s_predicted_pct", dayPfx[dow]);
-            doc[key] = serialized(String(pred, 1));
-        }
-
-        uint32_t measTotal = 0, measCovered = 0;
-        for (int w = 0; w < 4; w++) {
-            measTotal   += _measured[w].total[dow];
-            measCovered += _measured[w].covered[dow];
-        }
-        if (measTotal > 0) {
-            float meas = measCovered * 100.0f / measTotal;
-            snprintf(key, sizeof(key), "%s_measured_pct", dayPfx[dow]);
-            doc[key] = serialized(String(meas, 1));
-            if (!isnan(pred)) {
-                snprintf(key, sizeof(key), "%s_gap_pct", dayPfx[dow]);
-                doc[key] = serialized(String(pred - meas, 1));
-            }
-        }
-
-        snprintf(key, sizeof(key), "%s_cold_starts_4wk", dayPfx[dow]);
-        doc[key] = (int)measTotal;
-    }
-
-    doc["debug"] = "";
-
-    String json;
-    serializeJson(doc, json);
-    udp.broadcastTo(json.c_str(), UDP_BROADCAST_PORT);
 }
 
 // ---------------------------------------------------------------------------

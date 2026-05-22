@@ -76,11 +76,15 @@ public:
 
     // Find schedule slots for one day using the adaptive threshold algorithm.
     //
-    // day_buckets : array of BUCKET_PER_DAY buckets (from BucketFile).
-    // out_slots   : caller-supplied array of at least MAX_SLOTS_PER_DAY entries.
+    // day_buckets : array of BUCKET_PER_DAY buckets representing one local
+    //              calendar day (built by NavienLearner::RECOMPUTING from the
+    //              UTC-indexed BucketStore via the current UTC offset).
+    // out_slots   : caller-supplied array of at least MAX_PEAK_CANDIDATES entries.
     //
-    // Returns the number of slots written (0 – MAX_SLOTS_PER_DAY), sorted
-    // chronologically (ascending start_min).
+    // Returns the number of slots written (0 – MAX_PEAK_CANDIDATES), sorted
+    // chronologically (ascending start_min) in local minutes-since-midnight.
+    // No per-day cap is applied here; recomputeWrite() prunes to
+    // MAX_SLOTS_PER_DAY per local day by score before converting to UTC.
     static int findDaySlots(const BucketFile::Bucket *day_buckets,
                             TimeSlot *out_slots);
 

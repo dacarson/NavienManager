@@ -379,6 +379,51 @@ Example: Monday UTC 04:00 → Sunday local 21:00 (PDT). This steals `slot[0]` of
 
 **Fix:** `sanitizeScheduleToLocalLimit()` is called only from `convertEveSlotsToUTC()` (the Eve→device path, where Eve sends local-time slots that genuinely require sanitization after UTC conversion). It is never called from `setWeekScheduleFromJSON()`. JSON-pushed UTC schedules need no sanitization: they are already within the 3-slot-per-UTC-day limit, and the Monday 04:00 UTC slot is fully visible in Eve (displayed as 21:00 on Monday's tab in local time) — the cross-day mapping is display-only, not a storage problem.
 
+*Bug — learner recompute picks three slots per UTC day, not per local day:*
+
+**Symptom:** `navien_schedule_learner.py` (local-time grouping) and the on-device learner disagree. Example (America/Los_Angeles, PDT): Python Sunday shows `08:10–09:10, 10:00–11:00, 20:10–21:20`, but `learnerStatus` / `scheduler` retain peaks like Sunday UTC `01:50–03:00` (Saturday evening local) and spread unrelated UTC-day peaks across the week. Predicted efficiency is very high (~80%) while measured (cold-starts in local DOW) is low (~23%) because the schedule covers the wrong wall-clock hours.
+
+**Root cause:** Buckets in `buckets.bin` are correctly indexed by UTC `tm_wday` / UTC minute (Phase 2). Peak-finding, however, still runs **per UTC calendar day**:
+
+1. `RECOMPUTING` calls `PeakFinder::findDaySlots(buckets[utc_dow], …)` for `utc_dow` 0..6.
+2. `recomputeWrite()` Step 4 prunes to `MAX_SLOTS_PER_DAY` per **`utc_dow`**, not per local day.
+
+Comments in `PeakFinder.cpp` and `BEHAVIOR_SPEC.md` describe local-day pruning in `recomputeWrite()`, but the implementation prunes by UTC day. That inverts the problem Python solves: Python clusters cold-starts into **local** DOW + local minute (`events_to_minutes()`), then finds three windows per **local** day. The device finds peaks on UTC-midnight boundaries, so a Monday-morning local habit becomes Sunday-night UTC buckets and competes with unrelated Sunday UTC peaks.
+
+The old mitigation (find `2 × MAX_SLOTS_PER_DAY` UTC peaks per day, then “convert and prune local”) does not work when pruning is still keyed on `utc_dow`.
+
+**Correct approach — local-day bucket view, UTC storage unchanged:**
+
+Keep UTC bucket recording and UTC schedule storage/firing. Change **only** how peaks are discovered and capped:
+
+| Step | Action |
+|------|--------|
+| 1 | At recompute time (after NTP), compute `offsetMin` as today: `gmtime` minute-of-day minus `localtime` minute-of-day, normalized to ±720 (same formula as current `recomputeWrite()` Step 1). Sign: **`utc_min = local_min + offsetMin`**, **`local_min = utc_min - offsetMin`**. |
+| 2 | For each **local** day `L` (0=Sun .. 6=Sat), build a temporary `Bucket[BUCKET_PER_DAY]` array (288 × 5 min) representing that local calendar day. |
+| 3 | For each local bucket index `lb` (0..287), `local_min = lb × 5`. Map to UTC: `utc_min = local_min + offsetMin`; adjust `utc_dow` and `utc_min` across midnight (same rollover rules as `recomputeWrite()` today). Copy `raw_count` / `weighted_score` from `buckets[utc_dow][utc_min / 5]` into `local_buckets[lb]`. |
+| 4 | Run `PeakFinder::findDaySlots(local_buckets, …)` → candidate slots in **local** minute-of-day. |
+| 5 | Keep the top **`MAX_SLOTS_PER_DAY` (3)** candidates for local day `L` by score (sort descending; tie-break by `start_min`). |
+| 6 | For each retained slot, convert `(local_dow, local_start_min, local_end_min)` → `(utc_dow, utc_start_min, utc_end_min)` using the inverse of step 3. |
+| 7 | Emit JSON grouped by **`utc_dow`** (unchanged wire format: `"utc":true`, Sunday-first). Multiple local days may contribute slots to the same UTC day; that is expected. |
+
+**State-machine change:** Remove the per-UTC-day `RECOMPUTING` loop (`findDaySlots` on `buckets[utc_dow]`). Either fold steps 2–7 into `recomputeWrite()` (one local day per `vTaskDelay` tick to preserve Core 0 yielding), or add a `RECOMPUTING_LOCAL` state that iterates `local_dow` 0..6 with the extract→find→prune step. Drop `_weekSlots[7][…]` / `_weekSlotCount[7]` if no longer needed, or repurpose them as local-day scratch.
+
+**`findDaySlots` search target:** With local-day extraction, each call sees a true 24 h local window. Revert the `2 × MAX_SLOTS_PER_DAY` search target to **`MAX_SLOTS_PER_DAY`** (3) unless testing shows NMS still needs headroom within a single local day.
+
+**Predicted efficiency (Step 7 today):** Recompute using the **local-day-pruned** slots against the **local-day bucket view** (step 3 arrays), not UTC-day buckets vs UTC-pruned slots. That aligns predicted % with what the user sees in Eve and with measured cold-start DOW counts.
+
+**Offset source:** Use `localtime_r` / `gmtime_r` at recompute time (device system TZ). Do **not** use Eve `_lastKnownUtcOffsetMin` for learning — Eve offset is for display/write-back; household usage follows wall-clock local time. Wrong system TZ skews learned slots but does not affect firing once slots are stored in UTC (Phase 3).
+
+**Verification:** After fix, `learnerStatus` UTC ranges converted to local (or `scheduler` local column) should match `navien_schedule_learner.py` within ±10 min rounding and preheat window. Sunday PDT example: local `08:10, 10:00, 20:10` ↔ UTC `15:10, 17:00, 03:10` (Sunday + Monday UTC indices as needed).
+
+**Files to change:**
+- `NavienLearner.cpp` — `RECOMPUTING` / `recomputeWrite()` (primary)
+- `NavienLearner.h` — optional struct cleanup
+- `PeakFinder.cpp` — update comments; possibly reduce `2×` search target
+- `BEHAVIOR_SPEC.md` — ensure § learner recompute matches implementation (already describes local-day intent; code must match)
+
+**Relation to Phase 4:** Python may continue to display and cluster in **local** time for human-readable output while pushing UTC-indexed buckets. The device must apply the same **local-day** peak logic on UTC-stored buckets. Phase 4’s optional “UTC-only clustering” in `navien_schedule_learner.py` is independent; reference schedules for regression tests should stay local-grouped until Python is deliberately aligned.
+
 ---
 
 ### Phase 4 — Python Tools
@@ -427,3 +472,4 @@ Add to Architecture notes:
 - `proper_timegm()` is the TZ-free `timegm()` equivalent. Use it whenever a UTC `struct tm` must be converted to `time_t`.
 - `getEffectiveOffsetMin()` is the authoritative source for the UTC↔local offset. It prefers the Eve-confirmed `_lastKnownUtcOffsetMin` (set when Eve sends a `CURRENT_TIME` packet), falling back to the system TZ derived from `localtime_r`/`gmtime_r`. Use it anywhere the UTC offset is needed rather than reading `_lastKnownUtcOffsetMin` directly.
 - `sanitizeScheduleToLocalLimit()` is called only from `convertEveSlotsToUTC()` (Eve→device path). Never call it on JSON-pushed schedules: the round-trip incorrectly drops native same-day UTC slots when cross-day slots from adjacent UTC days fill their slot positions first.
+- Schedule learning: buckets are stored UTC; peaks are found on a **local-day 24 h view** (copy buckets through current `offsetMin`, `findDaySlots`, keep 3 per local day, convert slots back to UTC for JSON). Do not run `findDaySlots` per UTC day or prune by `utc_dow`.

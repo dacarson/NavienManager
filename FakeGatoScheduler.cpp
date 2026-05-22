@@ -464,6 +464,7 @@ void FakeGatoScheduler::parseProgramData(uint8_t *data, int len) {
           convertEveSlotsToUTC(offsetToUse);
         }
         updateSchedulerWeekSchedule();
+        clearUtcFireSlots();  // Eve edit: use weekSchedule[7][3] until next learner handoff
         updateCurrentScheduleIfNeeded(true);
         initializeCurrentState(); // Recalculate current state after schedule change
         byte_offset += sizeof(PROG_CMD_WEEK_SCHEDULE);
@@ -546,6 +547,28 @@ void FakeGatoScheduler::updateCurrentScheduleIfNeeded(bool force) {
   }
 }
 
+// Map local wall time to UTC storage indices (UTC = local + offsetMin).
+static void localMinutesToUtc(int localDow, int localStart, int localEnd, int offsetMin,
+                              int &utcDow, int &utcStart, int &utcEnd) {
+  utcStart = localStart + offsetMin;
+  utcEnd   = localEnd   + offsetMin;
+  utcDow   = localDow;
+  if (utcStart < 0) {
+    utcStart += 1440;
+    utcEnd   += 1440;
+    utcDow    = (localDow + 6) % 7;
+    if (utcEnd > 1430) utcEnd = 1430;
+  } else if (utcStart >= 1440) {
+    utcStart -= 1440;
+    utcEnd   -= 1440;
+    utcDow    = (localDow + 1) % 7;
+    if (utcEnd < 0)    utcEnd = 0;
+    if (utcEnd > 1430) utcEnd = 1430;
+  } else if (utcEnd > 1430) {
+    utcEnd = 1430;
+  }
+}
+
 bool FakeGatoScheduler::setWeekScheduleFromJSON(const String &json) {
   JsonDocument doc;
   DeserializationError err = deserializeJson(doc, json);
@@ -560,13 +583,34 @@ bool FakeGatoScheduler::setWeekScheduleFromJSON(const String &json) {
     return false;
   }
 
+  // Learner and POST /schedule carry local wall times (Sun..Sat, 3 slots/day).
+  // Legacy "utc":true JSON is still accepted for direct UTC storage.
+  bool isUtc = doc["utc"] | false;
+
+  int learnedOffset = 0;
+  if (!isUtc) {
+    if (doc["offsetMin"].is<int>()) {
+      learnedOffset = doc["offsetMin"].as<int>();
+      if (learnedOffset >  720) learnedOffset -= 1440;
+      if (learnedOffset < -720) learnedOffset += 1440;
+    } else {
+      learnedOffset = getEffectiveOffsetMin();
+    }
+    if (learnedOffset == INT_MIN) {
+      WEBLOG("SCHEDULER setWeekScheduleFromJSON: UTC offset unknown — rejecting schedule (existing week schedule unchanged; learner will retry next recompute)");
+      return false;
+    }
+  }
+
+  clearUtcFireSlots();
+
   // Clear all Eve week schedule slots to 0xFF (unused)
   memset(&prog_send_data.weekSchedule.day, 0xFF, sizeof(prog_send_data.weekSchedule.day));
   resetSlotScores();
 
-  // JSON index:  0=Sunday .. 6=Saturday  (SchedulerBase order)
+  // JSON index:  0=Sunday .. 6=Saturday  (SchedulerBase order, UTC or local)
   // Eve storage: 0=Monday .. 6=Sunday
-  // Mapping:  Eve day = (SchedulerBase day + 6) % 7
+  // Mapping:  Eve day = (day + 6) % 7  (same formula for both UTC and local input)
   for (int dow = 0; dow < 7; dow++) {
     JsonObject dayObj = schedule[dow];
     if (dayObj.isNull()) {
@@ -591,13 +635,44 @@ bool FakeGatoScheduler::setWeekScheduleFromJSON(const String &json) {
           Serial.printf("setWeekScheduleFromJSON: invalid time in day %d slot %d\n", dow, slotIdx);
           return false;
         }
+        float score = slot["score"].is<float>()
+                          ? slot["score"].as<float>()
+                          : SLOT_SCORE_UNKNOWN;
+
         eveDaySchedule->slot[slotIdx].offset_start = sh * 6 + sm / 10;
         eveDaySchedule->slot[slotIdx].offset_end   = eh * 6 + em / 10;
-        _slotScoreUtc[eveDay][slotIdx] = slot["score"] | SLOT_SCORE_UNKNOWN;
+        _slotScoreUtc[eveDay][slotIdx] = score;
         slotIdx++;
+
+        // Full firing table: all local-day slots (up to 21), no UTC-day cap.
+        int localStart = sh * 60 + sm;
+        int localEnd   = eh * 60 + em;
+        int utcDow, utcStart, utcEnd;
+        if (isUtc) {
+          utcDow   = dow;
+          utcStart = localStart;
+          utcEnd   = localEnd;
+        } else {
+          localMinutesToUtc(dow, localStart, localEnd, learnedOffset,
+                            utcDow, utcStart, utcEnd);
+        }
+        if (!appendUtcFireSlot((uint8_t)utcDow,
+                               (uint8_t)(utcStart / 60), (uint8_t)(utcStart % 60),
+                               (uint8_t)(utcEnd   / 60), (uint8_t)(utcEnd   % 60),
+                               score)) {
+          WEBLOG("SCHEDULER setWeekScheduleFromJSON: UTC fire slot table full — extra slot dropped");
+        }
       }
     }
   }
+
+  if (!isUtc) {
+    // Eve wire / weekSchedule[]: convert local prog_send_data to UTC (≤3 per UTC
+    // index for display). Firing uses _utcFireSlots above.
+    convertEveSlotsToUTC(learnedOffset, /*sanitize=*/false);
+  }
+
+  WEBLOG("SCHEDULER setWeekScheduleFromJSON: %d UTC fire slots loaded", _utcFireSlotCount);
 
   // Sync weekSchedule[] (SchedulerBase format) from the updated Eve data
   updateSchedulerWeekSchedule();
@@ -840,13 +915,16 @@ void FakeGatoScheduler::sanitizeScheduleToLocalLimit(int offsetMin) {
   }
 }
 
-void FakeGatoScheduler::convertEveSlotsToUTC(int utcOffsetMin) {
+void FakeGatoScheduler::convertEveSlotsToUTC(int utcOffsetMin, bool sanitize) {
   PROG_CMD_WEEK_SCHEDULE orig = prog_send_data.weekSchedule;
   float convertedScores[7][SLOT_SCORE_STORAGE_SLOTS];
   convertSlotsOffset(orig, prog_send_data.weekSchedule, utcOffsetMin,
                      _slotScoreUtc, convertedScores);
   memcpy(&_slotScoreUtc, &convertedScores, sizeof(_slotScoreUtc));
-  sanitizeScheduleToLocalLimit(utcOffsetMin);
+  // Sanitize only on the Eve→device path (parseProgramData). Learner JSON from
+  // recomputeWrite() is already pruned to 3 per local day; the round-trip would
+  // drop valid same-day UTC slots when adjacent local days share a UTC day.
+  if (sanitize) sanitizeScheduleToLocalLimit(utcOffsetMin);
 }
 
 void FakeGatoScheduler::printData(uint8_t *data, int len) {

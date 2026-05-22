@@ -45,7 +45,9 @@ def build_bucket_payload(args, replace=False):
         print("No events found. Check InfluxDB connection.")
         sys.exit(1)
 
-    raw_counts, weighted_scores = nsl.events_to_minutes(events, verbose=args.verbose)
+    # ESP32 bucket store is UTC-indexed (uses gmtime()); convert before bucketing.
+    utc_events = [(dt.astimezone(_timezone.utc), w) for (dt, w) in events]
+    raw_counts, weighted_scores = nsl.events_to_minutes(utc_events, verbose=args.verbose)
 
     days = []
     for dow in range(7):
@@ -162,14 +164,18 @@ def main():
 
     args = parser.parse_args()
 
-    # Full-year window, matching navien_bootstrap.py
-    args.window_weeks    = 52
+    # Seasonal window sized to stay within one DST period (~±8 weeks from today
+    # covers March–July from a May run date, entirely within PDT for California).
+    # Full-year (52) averages PDT and PST events into adjacent UTC buckets,
+    # flattening peaks and shifting them 1–2 hours; a seasonal window avoids this.
+    # ±8 weeks gives ~2× the event density of ±4 weeks while remaining seasonal.
+    args.window_weeks    = 8
     args.preheat_minutes = nsl.DEFAULT_PREHEAT_MINUTES
     args.gap_minutes     = nsl.DEFAULT_GAP_MINUTES
 
     today = _datetime.now(_timezone.utc).date()
     years = [today.year - i for i in range(len(args.recency_weights))]
-    print(f"Bootstrap mode: window_weeks=52 (full year per recency entry)")
+    print(f"Bootstrap mode: window_weeks={args.window_weeks} (±{args.window_weeks}-week seasonal window per recency entry)")
     print(f"Years: {years}  Weights: {args.recency_weights}")
 
     print(f"Querying InfluxDB ({args.influxdb_host}:{args.influxdb_port}/{args.influxdb_db}) "

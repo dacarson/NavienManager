@@ -22,6 +22,7 @@
 
 #include "SchedulerBase.h"
 #include "TimeUtils.h"
+#include <math.h>
 #include "esp_netif_sntp.h"
 #include <WiFi.h>
 
@@ -138,6 +139,21 @@ void SchedulerBase::activateOverride(int durationMinutes) {
 
 
 SchedulerBase::State SchedulerBase::getNextState(time_t *nextStateTime) const {
+  if (_utcFireSlotCount > 0) {
+    if (currentState == State::Vacation) {
+      if (endVacationTime == 0) {
+        if (nextStateTime) *nextStateTime = 0;
+        return State::Vacation;
+      }
+      if (nextStateTime) *nextStateTime = endVacationTime;
+      struct tm *end_tm = gmtime(&endVacationTime);
+      if (isActiveOnFireSlots(end_tm->tm_wday, end_tm->tm_hour, end_tm->tm_min))
+        return State::Active;
+      return State::InActive;
+    }
+    return getNextStateFromFireSlots(nextStateTime);
+  }
+
   time_t nextTime;
   
     // Handle vacation state
@@ -235,6 +251,102 @@ SchedulerBase::State SchedulerBase::getNextState(time_t *nextStateTime) const {
   if (nextStateTime) {
     *nextStateTime = 0;
   }
+  return State::InActive;
+}
+
+bool SchedulerBase::appendUtcFireSlot(uint8_t utcDow,
+                                    uint8_t startHour, uint8_t startMinute,
+                                    uint8_t endHour, uint8_t endMinute,
+                                    float score) {
+  if (_utcFireSlotCount >= MAX_UTC_FIRE_SLOTS || utcDow > 6) return false;
+  UtcFireSlot &s = _utcFireSlots[_utcFireSlotCount++];
+  s.utcDow       = utcDow;
+  s.startHour    = startHour;
+  s.startMinute  = startMinute;
+  s.endHour      = endHour;
+  s.endMinute    = endMinute;
+  s.score        = score;
+  return true;
+}
+
+bool SchedulerBase::getUtcFireSlot(int index, uint8_t &utcDow,
+                                   uint8_t &startHour, uint8_t &startMinute,
+                                   uint8_t &endHour, uint8_t &endMinute,
+                                   float *scoreOut) const {
+  if (index < 0 || index >= _utcFireSlotCount) return false;
+  const UtcFireSlot &s = _utcFireSlots[index];
+  utcDow      = s.utcDow;
+  startHour   = s.startHour;
+  startMinute = s.startMinute;
+  endHour     = s.endHour;
+  endMinute   = s.endMinute;
+  if (scoreOut) *scoreOut = s.score;
+  return true;
+}
+
+bool SchedulerBase::isActiveOnFireSlots(int utcDow, int hour, int minute) const {
+  for (int i = 0; i < _utcFireSlotCount; i++) {
+    const UtcFireSlot &s = _utcFireSlots[i];
+    if (s.utcDow != (uint8_t)utcDow) continue;
+    TimeSlot ts = { s.startHour, s.startMinute, s.endHour, s.endMinute };
+    if (isTimeWithinSlot(hour, minute, ts)) return true;
+  }
+  return false;
+}
+
+SchedulerBase::State SchedulerBase::getNextStateFromFireSlots(time_t *nextStateTime) const {
+  time_t now = time(nullptr);
+  struct tm *tm_struct = gmtime(&now);
+  int currentHour = tm_struct->tm_hour;
+  int currentMinute = tm_struct->tm_min;
+  int currentDay = tm_struct->tm_wday;
+  int currentTimeInMinutes = currentHour * 60 + currentMinute;
+
+  for (int dayoffset = 0; dayoffset < 7; dayoffset++) {
+    int day = (currentDay + dayoffset) % 7;
+    for (int i = 0; i < _utcFireSlotCount; i++) {
+      const UtcFireSlot &fs = _utcFireSlots[i];
+      if (fs.utcDow != (uint8_t)day) continue;
+      TimeSlot slot = { fs.startHour, fs.startMinute, fs.endHour, fs.endMinute };
+      int startMin = dayoffset * 24 * 60 + fs.startHour * 60 + fs.startMinute;
+      if (startMin > currentTimeInMinutes) {
+        tm nextState_tm;
+        nextState_tm.tm_year = tm_struct->tm_year;
+        nextState_tm.tm_mon  = tm_struct->tm_mon;
+        nextState_tm.tm_mday = tm_struct->tm_mday + dayoffset;
+        nextState_tm.tm_hour = fs.startHour;
+        nextState_tm.tm_min  = fs.startMinute;
+        nextState_tm.tm_sec  = 0;
+        nextState_tm.tm_isdst = 0;
+        time_t nextTime = proper_timegm(&nextState_tm);
+        if (startVacationTime && startVacationTime < nextTime) {
+          if (nextStateTime) *nextStateTime = startVacationTime;
+          return State::Vacation;
+        }
+        if (nextStateTime) *nextStateTime = nextTime;
+        return State::Active;
+      }
+      int endMin = dayoffset * 24 * 60 + fs.endHour * 60 + fs.endMinute;
+      if (endMin > currentTimeInMinutes) {
+        tm nextState_tm;
+        nextState_tm.tm_year = tm_struct->tm_year;
+        nextState_tm.tm_mon  = tm_struct->tm_mon;
+        nextState_tm.tm_mday = tm_struct->tm_mday + dayoffset;
+        nextState_tm.tm_hour = fs.endHour;
+        nextState_tm.tm_min  = fs.endMinute;
+        nextState_tm.tm_sec  = 0;
+        nextState_tm.tm_isdst = 0;
+        time_t nextTime = proper_timegm(&nextState_tm);
+        if (startVacationTime && startVacationTime < nextTime) {
+          if (nextStateTime) *nextStateTime = startVacationTime;
+          return State::Vacation;
+        }
+        if (nextStateTime) *nextStateTime = nextTime;
+        return State::InActive;
+      }
+    }
+  }
+  if (nextStateTime) *nextStateTime = 0;
   return State::InActive;
 }
 
@@ -392,11 +504,16 @@ void SchedulerBase::initializeCurrentState() {
     int currentHour = tm_struct->tm_hour;
     int currentMinute = tm_struct->tm_min;
     int currentDay = tm_struct->tm_wday;
-    
-    for (int i = 0; i < 3 && weekSchedule[currentDay].slots[i].startHour != 0xFF; i++) {
-      if (isTimeWithinSlot(currentHour, currentMinute, weekSchedule[currentDay].slots[i])) {
+
+    if (_utcFireSlotCount > 0) {
+      if (isActiveOnFireSlots(currentDay, currentHour, currentMinute))
         newState = State::Active;
-        break;
+    } else {
+      for (int i = 0; i < 3 && weekSchedule[currentDay].slots[i].startHour != 0xFF; i++) {
+        if (isTimeWithinSlot(currentHour, currentMinute, weekSchedule[currentDay].slots[i])) {
+          newState = State::Active;
+          break;
+        }
       }
     }
   }

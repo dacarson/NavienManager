@@ -197,7 +197,7 @@ The Eve app's thermostat schedule is parsed and stored in NVS (`SAVED_DATA` / `P
 
 **Empty/unused slot sentinel:** `0xFF` is the sentinel value for an unused slot in both the Eve wire format and the internal representation:
 - In the Eve `CMD_DAY_SCHEDULE` struct, `slot[i].offset_start == 0xFF` marks slot `i` (and all following slots) as unused. The conversion loop in `updateSchedulerWeekSchedule()` stops at the first `0xFF` offset.
-- In `SchedulerBase`'s `DaySchedule` struct, `slots[i].startHour == 0xFF` marks slot `i` as unused. All iteration loops (`getNextState`, `getTimeSlot`, `isTimeWithinSlot` callers) stop at the first `0xFF` startHour.
+- In `SchedulerBase`'s `DaySchedule` struct, `slots[i].startHour == 0xFF` marks slot `i` as unused. `weekSchedule[7][3]` iteration stops at the first `0xFF` startHour. When `_utcFireSlotCount > 0` (learner or `POST /schedule` handoff), firing and next-transition logic use `_utcFireSlots[]` instead.
 - The full `weekSchedule[7]` array is initialized to `0xFF` via `memset` at the start of `updateSchedulerWeekSchedule()` so that any slots not populated from Eve data are correctly marked unused rather than left with garbage values.
 
 **Timezone handling:** The Eve app sends the current local time in the `CURRENT_TIME` packet. The scheduler computes the UTC offset in minutes by comparing the Eve-supplied local time against the system clock and stores it in `_lastKnownUtcOffsetMin` (`_utcOffsetKnown` is set `true`). A human-readable `UTC±N` string is also written to NVS (`SCHEDULER` / `TZ`) for display purposes only. **TZ is display-only:** schedule slots are stored and fired in UTC; a wrong TZ (e.g. written by `guessTimeZone()` when a remote Eve app connects from a different timezone) corrupts the Eve schedule display but cannot cause schedules to fire at the wrong time. `getEffectiveOffsetMin()` is the authoritative source for the UTC↔local offset — it returns `_lastKnownUtcOffsetMin` when `_utcOffsetKnown` is `true`, otherwise falls back to the system TZ derived from `localtime_r`/`gmtime_r`. The timezone string can be overridden or cleared via the Telnet `timezone` command (display only).
@@ -214,7 +214,15 @@ The Eve app's thermostat schedule is parsed and stored in NVS (`SAVED_DATA` / `P
 | `guessTimeZone()` / NVS `TZ` | TZ string; used to convert UTC slots → local for Eve readback |
 | `HomeSpanWeb.ino` | Status time strings |
 
-**UTC-native storage and Eve conversion paths:** Slots are stored internally and compared at fire-time in UTC. `SchedulerBase::getNextState()` and `initializeCurrentState()` use `gmtime()` and `proper_timegm()` (from `TimeUtils.h`) — never `localtime()` or `mktime()`. When Eve writes `WEEK_SCHEDULE`, `convertEveSlotsToUTC(_lastKnownUtcOffsetMin)` converts the local-time slots to UTC before they are passed to `updateSchedulerWeekSchedule()` and written to NVS. If `_utcOffsetKnown` is false when `WEEK_SCHEDULE` arrives, the schedule is discarded and a warning is logged — Eve will resend after a `CURRENT_TIME` packet establishes the offset. When `prog_send_data` is assembled for Eve readback, `getEffectiveOffsetMin()` converts stored UTC slots back to local time. `proper_timegm()` in `TimeUtils.h` is the TZ-free `timegm()` equivalent (integer arithmetic, no `setenv("TZ")` side effects); use it whenever a UTC `struct tm` must be converted to `time_t`.
+**UTC-native firing and Eve conversion paths:** Wall-clock comparisons use UTC (`gmtime()`, `proper_timegm()` from `TimeUtils.h` — never `localtime()` / `mktime()` for firing). Eve's app speaks **local** time (three comfort periods per local calendar day). Internally:
+
+| Store | Role | Limit |
+|---|---|---|
+| `_utcFireSlots[]` | Authoritative for `getNextState()` / `initializeCurrentState()` when `_utcFireSlotCount > 0` | Up to 21 (3 × 7 local days), each with `utcDow` + UTC start/end + score |
+| `weekSchedule[7][3]` | Derived from `prog_send_data` for legacy paths and Eve sync | ≤3 slots per UTC `tm_wday` index |
+| `prog_send_data.weekSchedule` | Eve wire / NVS blob; local slots converted via `convertEveSlotsToUTC()` | 3 per local day in Eve UI |
+
+When Eve writes `WEEK_SCHEDULE`, `convertEveSlotsToUTC(_lastKnownUtcOffsetMin)` converts local slots to UTC before `updateSchedulerWeekSchedule()`; `_utcFireSlots` is cleared so firing uses `weekSchedule` until the next learner handoff. If `_utcOffsetKnown` is false, the schedule is discarded and Eve resends after `CURRENT_TIME`. Readback to Eve uses `getEffectiveOffsetMin()` to convert stored UTC back to local for display. Wrong NVS `TZ` corrupts Eve display only, not firing, when `_utcFireSlots` is populated from the learner.
 
 **NVS schedule version migration:** A `schedVersion` key (type `uint8_t`) is stored in the `SAVED_DATA` NVS namespace alongside `PROG_SEND_DATA`. `FakeGatoScheduler::begin()` checks this key before applying `prog_send_data` to `weekSchedule[]`. If the version is not `1` (UTC-format), slots are cleared and `schedVersion` is written to `1`. After flashing, the user must re-push the schedule once from the Eve app (or via `navien_bootstrap.py --push`) to repopulate NVS with UTC-converted slots.
 
@@ -298,7 +306,7 @@ A Telnet server listens on **port 23**. It is started after WiFi connects. All c
 | `recirc` | (no arg) | Prints current recirculation state for all units. |
 | `recirc` | `on` \| `off` | Enables or disables recirculation. |
 | `hotButton` | — | Sends a hot-button press+release sequence. |
-| `scheduler` | (no arg) | Prints scheduler enabled state, current state, next transition time and target state, and full weekly schedule. Slots are shown as both local time and UTC (`HH:MM-HH:MM (UTC HH:MM-HH:MM)`); when the UTC day differs from the local day, `prev day` is appended. |
+| `scheduler` | (no arg) | Prints scheduler enabled state, current state, next transition time and target state, and full weekly schedule. Slots are grouped by **local** firing day; each line shows local time and UTC (`HH:MM-HH:MM (UTC HH:MM-HH:MM)`), with `UTC <day>` when storage day differs. |
 | `scheduler` | `on` \| `off` | Enables or disables the scheduler (persisted to NVS). |
 | `timezone` | (no arg) | Prints the currently stored timezone. |
 | `timezone` | `<tz string>` | Sets the timezone (e.g. `UTC-8`). |
@@ -309,7 +317,8 @@ A Telnet server listens on **port 23**. It is started after WiFi connects. All c
 | `history` | `<N>` | Dumps the last N history entries as CSV. |
 | `eraseHistory` | — | Erases all history entries from LittleFS and memory. |
 | `fsStat` | — | Prints LittleFS partition total, used, and free bytes. |
-| `learnerStatus` | — | Prints on-device schedule learner status: last recompute time, bucket fill percentage, and a per-day table showing predicted efficiency, measured efficiency, gap, and rolling 4-week cold-start count. |
+| `learnerStatus` | — | Prints on-device schedule learner status: last recompute time, bucket fill percentage, per-day predicted/measured/gap table, and final schedule slots (**3 per local day**, local range with UTC storage note). |
+| `recomputeSchedule` | — | Requests an immediate learner recompute (same path as post-`POST /buckets`). |
 | `saveLearner` | — | Immediately persists the rolling measured-efficiency window to `/navien/measured.bin` on LittleFS. Useful before a planned reboot that is not triggered through OTA. |
 | `reboot` | — | Disconnects the Telnet client and restarts the ESP32. |
 | `bye` | — | Disconnects the Telnet session. |
@@ -443,7 +452,7 @@ RS485-derived packets (`water`, `gas`, `command`, `announce`) include a `"debug"
 
 **Learner packet** (`"type": "learner"`):
 
-Emitted by `NavienLearner::broadcastUDP()` at the end of every `RECOMPUTE_WRITE` — both the nightly midnight recompute and any manual recompute triggered by `requestRecompute()` (e.g. after seeding buckets via `POST /buckets`). Not subject to the raw-hex duplicate throttle used by RS485-derived packets.
+Emitted at the end of every `RECOMPUTE_WRITE` inside `NavienLearner::recomputeWrite()` — nightly 24h recompute, `recomputeSchedule` Telnet, or `requestRecompute()` after `POST /buckets`. Not subject to the raw-hex duplicate throttle used by RS485-derived packets. `{pfx}_slots` strings use **local** times (3 per local day).
 
 All per-day fields use a 3-letter day prefix: `sun`, `mon`, `tue`, `wed`, `thu`, `fri`, `sat`. The structure is fully flat so that `navien_listener.py` can pass `payload['fields'] = data` directly to InfluxDB without custom flattening.
 
@@ -538,16 +547,21 @@ The endpoint is started in `setupScheduleEndpoint()` (called from `onWifiConnect
 - `days[].buckets[].score` — weighted score to add.
 - Only non-zero buckets need be included; absent buckets are unchanged (merge) or zero (replace).
 
-### Internal Mapping
+### Internal Mapping (`POST /schedule` and learner handoff)
 
-`FakeGatoScheduler::setWeekScheduleFromJSON()` translates the received schedule into both internal representations and persists both:
+`FakeGatoScheduler::setWeekScheduleFromJSON()` accepts JSON `{"offsetMin":…,"schedule":[…]}` (learner) or `{"schedule":[…]}` (Pi script, offset from `getEffectiveOffsetMin()`). Index 0 = Sunday … 6 = Saturday. Each day has up to three `slots` with `startHour`, `startMinute`, `endHour`, `endMinute`, and optional `score`. Legacy `"utc":true` JSON (UTC times, no conversion) is still accepted.
 
-1. **Eve binary format** (`prog_send_data.weekSchedule`): days are re-ordered from Sunday-first (JSON) to Monday-first (Eve), and times are encoded as 10-minute offsets (`hour × 6 + minute / 10`). Unused slots are set to `0xFF`.
-2. **SchedulerBase format** (`weekSchedule[7]`): populated by calling `updateSchedulerWeekSchedule()`, which converts the Eve offsets back to `{startHour, startMinute, endHour, endMinute}` structs and handles the Monday→Sunday to Sunday→Saturday index shift.
+Processing order:
 
-Slots beyond the third in any day are silently dropped. The full `PROG_DATA_FULL_DATA` blob is then committed to NVS (`SAVED_DATA` / `PROG_SEND_DATA`), `initializeCurrentState()` is called to apply the new schedule immediately, and `refreshProgramData` is set so all paired Eve instances receive an EV notification with the updated schedule.
+1. **Clear and fill `_utcFireSlots[]`** — For each local slot (or UTC slot if `utc:true`), convert to `(utcDow, utc start/end)` and append (max 21). This is the full learned schedule; no cap per UTC calendar day.
+2. **Load `prog_send_data.weekSchedule`** — Write local (or UTC) times into the Eve Monday-first wire layout (≤3 slots per local day in JSON).
+3. **`convertEveSlotsToUTC(offsetMin, sanitize=false)`** when times are local — Produces UTC `prog_send_data` for Eve/NVS. `convertSlotsOffset()` may keep only three windows per UTC storage index (display/wire constraint); firing does **not** rely on this step retaining every window.
+4. **`updateSchedulerWeekSchedule()`** — Copies into `weekSchedule[7][3]` (≤3 per UTC index).
+5. **NVS commit** — `PROG_SEND_DATA`, slot scores, `initializeCurrentState()`, `refreshProgramData` for Eve EV notify.
 
-`setWeekScheduleFromJSON()` receives slots already in UTC (from the on-device learner or a Python push) and stores them verbatim. It does **not** apply `sanitizeScheduleToLocalLimit()` — JSON-pushed schedules are already within the 3-slot-per-UTC-day limit. `sanitizeScheduleToLocalLimit()` is called **only** from `convertEveSlotsToUTC()` (the Eve→device path); calling it on a UTC schedule incorrectly drops valid same-day slots when cross-day UTC slots from adjacent days fill slot positions first.
+`sanitizeScheduleToLocalLimit()` runs only on the Eve BLE path (`convertEveSlotsToUTC(..., sanitize=true)`). Learner and HTTP JSON never use it.
+
+**Learner `recomputeWrite()` JSON** — Omits `"utc":true`. Uses local times and `"offsetMin"` snapshotted in `RECOMPUTE_LOAD` so all seven local-day bucket views share one offset. Do **not** group slots by UTC day in JSON; that caused silent truncation at three slots per UTC index in an earlier implementation.
 
 ### config.py
 
@@ -614,7 +628,7 @@ Always prints the learned schedule. With `--verbose`:
 
 Pass `--push` to POST the schedule to `http://<esp32_host>:<esp32_port>/schedule`. By default the script is a dry run and prints the JSON that would be sent without pushing.
 
-**Timezone handling:** The script has no local timezone dependency. All cold-start events, bucket indices, `dow`, and `minute_of_day` values are derived from UTC datetimes. Schedule output posted to `POST /schedule` contains UTC hours/minutes. SF morning peaks appear around 14:00–16:00 UTC.
+**Timezone handling:** Detects system timezone (`/etc/timezone` on the Pi). Cold-start events are converted to **local** time before binning; `dow` and `minute_of_day` are local. Schedule output posted to `POST /schedule` contains **local** hours/minutes (device converts to UTC storage via `convertEveSlotsToUTC`). `navien_bucket_export.py` bins into **UTC** buckets to match on-device `buckets.bin` (schema 2).
 
 **Defaults and CLI flags:**
 
@@ -676,7 +690,7 @@ The `NavienLearner` class autonomously learns and recomputes the recirculation s
 
 **Use `recirculation_active` with a 15-minute lookback to detect covered demands.** The Navien heater cycles the recirc pump on and off to maintain pipe temperature throughout a scheduled slot — `recirculation_running` (pump physically spinning, `flow_state & 0x08`) oscillates between 1 and 0 while the slot is active. A tap opened during the hot/idle phase between pump cycles will see `recirculation_running = 0` even though the pipes are fully pre-heated. `recirculation_active` (`recirculation_enabled & 0x2`) reflects whether recirc *mode* is on and stays true throughout the slot regardless of pump cycling.
 
-Additionally, pipes stay hot for up to 15 minutes after a recirc slot ends (`RECIRC_HOT_WINDOW_SEC = 900`, matching `config.py RECIRC_WINDOW_MINUTES`). The learner tracks `_lastRecircActiveTime` and sets `_recircAtStart = true` if `recirculation_active` is currently true **or** was true within the last 15 minutes. This matches `navien_efficiency.py`'s lookback window exactly.
+Additionally, pipes stay hot for up to 18 minutes after a recirc slot ends (`RECIRC_HOT_WINDOW_SEC = 1080` — Navien pump cycles ~17 min; 15 min missed the last inter-cycle gap). The learner tracks `_lastRecircActiveTime` and sets `_recircAtStart = true` if `recirculation_active` is currently true **or** was true within that window. Predicted-efficiency hot-window checks in `recomputeWrite()` still use 15 minutes to match `config.py RECIRC_WINDOW_MINUTES`.
 
 `recirculation_active` comes from the `recirculation_enabled` byte, independent of `flow_state`, so it does not clear atomically with `consumption_active` — no previous-packet lookback is needed.
 
@@ -686,11 +700,11 @@ Additionally, pipes stay hot for up to 15 minutes after a recirc slot ends (`REC
 
 ### Background Recompute — Core 0 Task
 
-The learner task runs on Core 0. It triggers a full recompute at **midnight + 2 minutes** local time (the previous day's cold-starts are complete and the day-of-week index has just rolled). The recompute processes **one day per iteration** with a 10 ms `vTaskDelay` between days to yield to other Core 0 work.
+The learner task runs on Core 0. It triggers a full recompute on a **24-hour elapsed timer** (`_lastRecomputeTime24h`, persisted in `measured.bin`), not local-midnight detection. On UTC Sunday the measured-efficiency week advances. The `RECOMPUTING` state processes **one local day per iteration** with a 10 ms `vTaskDelay` between days.
 
-Manual recomputes (e.g. triggered by `POST /buckets`) set `_recomputeRequested` and follow the same state machine.
+Manual recomputes (`POST /buckets`, Telnet `recomputeSchedule`, or first boot with non-empty buckets after NTP) set `_recomputeRequested` and follow the same state machine.
 
-**Schedule handoff:** Core 0 never calls `setWeekScheduleFromJSON()` directly. It writes the JSON to `_pendingScheduleJSON` and sets `_newScheduleReady` under a mutex. `FakeGatoScheduler::loop()` on Core 1 takes the mutex non-blockingly each iteration; if a new schedule is ready it copies the JSON, releases the mutex, then calls `setWeekScheduleFromJSON()`. Missing one check is harmless — the schedule is applied on the next loop pass.
+**Schedule handoff:** Core 0 never calls `setWeekScheduleFromJSON()` directly. It builds local-time JSON in `_pendingScheduleJSON` and sets `_newScheduleReady` under a mutex. `FakeGatoScheduler::loop()` on Core 1 copies the JSON and calls `setWeekScheduleFromJSON()`, which populates `_utcFireSlots` and Eve/NVS. Telnet `scheduler` and `learnerStatus` list slots from `_utcFireSlots` when present (grouped by local firing day); otherwise they fall back to `weekSchedule[7][3]`.
 
 ### Annual Decay at Year Rollover
 
@@ -713,9 +727,11 @@ If the device is powered off over New Year and boots in January, the mismatch is
 | `smooth_radius` | 2 buckets |
 | `MAX_SLOTS_PER_DAY` | 3 |
 
-**Adaptive threshold:** starts at `min_weighted_score` = 6.0, steps down by 1.0 until `MAX_SLOTS_PER_DAY` peaks are found or `min_score_floor` is reached. If still fewer peaks than needed, `min_occurrences` is relaxed by 1 and the pass repeats.
+**Adaptive threshold:** starts at `min_weighted_score` = 6.0, steps down by 1.0 until `MAX_SLOTS_PER_DAY` (3) peaks are found or `min_score_floor` is reached. If still fewer peaks than needed, `min_occurrences` is relaxed by 1 and the pass repeats. `findDaySlots` is called on a **local-day bucket view** (not a UTC-day view), so each call sees a true 24 h local window — no doubling of the search target is needed.
 
-**Pruning and observability:** after ranking peak candidates by score, only the top `MAX_SLOTS_PER_DAY` (3) are kept. Any overflow candidates are pruned. When pruning occurs, firmware emits a `WEBLOG` entry with candidate/kept/pruned counts and score boundaries for the kept vs dropped sets.
+**Local-day bucket view:** The `RECOMPUTING` state iterates local days 0..6. For each local day `L`, it builds a `Bucket[288]` scratch array by mapping local minute `lb × 5` to UTC via `utc_min = local_min + offsetMin` (wrapping day on midnight crossing) and copying from `buckets[utc_dow][utc_b]`. `PeakFinder::findDaySlots` is called on this local view; returned slots are in local minutes-since-midnight. `offsetMin` is snapshotted once in `RECOMPUTE_LOAD` so all seven days use the same offset.
+
+**Pruning — local-day only:** `PeakFinder` returns all NMS-surviving candidates without a per-day cap. `recomputeWrite()` sorts each local day's slots by score descending, keeps the top `MAX_SLOTS_PER_DAY` (3), and emits JSON with **local** times indexed by **local** day (same as `navien_schedule_learner.py`). There is **no** learner prune keyed on UTC day. `setWeekScheduleFromJSON()` loads all three slots per **local** day into Eve `prog_send_data`, builds `_utcFireSlots[]` (up to 21 UTC windows — one per local slot), then `convertEveSlotsToUTC(offsetMin)` for Eve/`weekSchedule[]` display (≤3 per UTC index). **`getNextState()` / `initializeCurrentState()` use `_utcFireSlots` when populated**, so all three local Tuesday windows can fire even if four UTC projections share a calendar index. Eve's UI limit remains three comfort periods per **local** day. When local-day pruning drops a candidate, firmware emits a `WEBLOG` entry.
 
 ### Efficiency Tracking
 
@@ -726,7 +742,7 @@ Two efficiency metrics are maintained continuously and cached for display.
 - A bucket is *covered* if it falls inside a slot.
 - A bucket is *schedulable* if it falls inside a slot **or** within 15 minutes after a slot ends (the hot-water window).
 - `predicted% = covered / schedulable × 100`
-- Predicted coverage is evaluated against the **final retained schedule slots** (post-prune, max 3/day), not against pre-prune candidate peaks.
+- Predicted coverage is evaluated per **local** day using the local-day bucket view and local slot times. `_predictedEfficiency[dow]` uses the same Sun–Sat index as the learned schedule. Measured cold-start counts in the table remain **UTC** `tm_wday` (live ingest uses `gmtime()`).
 
 **Measured efficiency** — rolling 4-week window of actual observations. Each cold-start event records whether recirculation was already running at tap-open time (`recircAtStart`). The counters (`total[dow]` and `covered[dow]`) are updated on Core 0 when each `PendingColdStart` is consumed from the queue. On Sunday midnight the oldest week slot is zeroed and the head advances.
 

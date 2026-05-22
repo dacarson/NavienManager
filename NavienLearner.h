@@ -135,7 +135,7 @@ public:
     static constexpr uint32_t COLD_GAP_SEC             = 600; // 10 min
     static constexpr uint32_t MIN_DURATION_GENUINE_SEC  = 60;  // 6 × 10s
     static constexpr uint32_t MIN_DURATION_RECIRC_SEC   = 30;  // 3 × 10s
-    static constexpr uint32_t RECIRC_HOT_WINDOW_SEC     = 900; // 15 min — matches config.py RECIRC_WINDOW_MINUTES
+    static constexpr uint32_t RECIRC_HOT_WINDOW_SEC     = 1080; // 18 min — Navien pump cycles every ~17 min; 15 min window misses the last minute of each inter-cycle gap, causing pump artifacts to be counted as cold-pipe events
 
     // Recency weight for live (current-year) data, matching Python [3, 2]
     static constexpr float RECENCY_WEIGHT_CURRENT = 3.0f;
@@ -154,8 +154,7 @@ private:
     // Core 0 state machine helpers.
     void idleStep();        // called every IDLE tick: queue drain, midnight check
     void decayCheck();      // apply annual weighted_score decay if year has rolled over
-    void recomputeWrite();  // builds JSON and hands off to Core 1 via mutex
-    void broadcastUDP();    // broadcasts learner JSON packet over UDP (Phase 8)
+    void recomputeWrite();  // builds JSON, hands off to Core 1, and broadcasts UDP
 
     // --- Cold-start detector state (Core 1 only) ---
     time_t   _lastActiveTime;    // last time consumption_active was true
@@ -190,9 +189,12 @@ private:
     bool              _newScheduleReady;
 
     // --- Recompute results (Core 0 only) ---
-    TimeSlot _weekSlots[7][MAX_SLOTS_PER_DAY];  // slots per day from last recompute
-    int      _weekSlotCount[7];                  // slot count per day (0–MAX_SLOTS_PER_DAY)
-    float    _predictedEfficiency[7];            // per-day predicted efficiency (Phase 7)
+    // _weekSlots[local_dow] holds local-time slots from findDaySlots on the
+    // local-day bucket view; converted to UTC in recomputeWrite().
+    TimeSlot _weekSlots[7][MAX_PEAK_CANDIDATES];  // local-time slots per local day
+    int      _weekSlotCount[7];                   // slot count per local day (0–MAX_PEAK_CANDIDATES)
+    int      _recomputeOffsetMin;                 // UTC offset (UTC = local + offset) for this pass
+    float    _predictedEfficiency[7];            // per local day (Sun..Sat), Phase 7
 
     // --- Measured efficiency rolling window (Core 0 writes only) ---
     // Updated in idleStep() when consuming cold-start events from the queue.

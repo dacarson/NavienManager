@@ -175,7 +175,7 @@ protected:
                                   PROG_CMD_WEEK_SCHEDULE &out, int offsetMin,
                                   const float inScores[7][SLOT_SCORE_STORAGE_SLOTS] = nullptr,
                                   float outScores[7][SLOT_SCORE_STORAGE_SLOTS] = nullptr);
-  void convertEveSlotsToUTC(int utcOffsetMin);
+  void convertEveSlotsToUTC(int utcOffsetMin, bool sanitize = true);
 
   // Returns the best available UTC offset in minutes (UTC = local + offset).
   // Returns INT_MIN if the offset cannot be determined.

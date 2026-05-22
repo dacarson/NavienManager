@@ -362,25 +362,31 @@ void commandScheduler(const String& params) {
 
   bool tzKnown = (getenv("TZ") != nullptr);
   telnet.println("Weekly schedule:");
-  for (int day = 0; day < 7; day++) {
-    telnet.printf("  %s:", dayNames[day]);
 
-    struct SlotDisplay {
-      int lsh, lsm, leh, lem;
-      int sh, sm, eh, em;
-      int dayShift;  // -1 = fires previous local day, 0 = same day, +1 = next local day
-    } slots[3];
-    int slotCount = 0;
+  // Collect every slot from all UTC days, assign to its local firing day, then
+  // display grouped by local day.  Without this, slots whose UTC time crosses a
+  // day boundary (e.g. local Mon 21:50 stored as UTC Tue 04:50) appear under the
+  // wrong local day with a confusing "prev day" annotation.
+  struct SlotDisplay {
+    int  local_day;           // 0=Sun..6=Sat: actual local day this slot fires on
+    int  lsh, lsm, leh, lem; // local start / end
+    int  sh,  sm,  eh,  em;  // UTC  start / end
+    int  utc_day;             // SchedulerBase UTC day the slot is stored under
+  };
+  SlotDisplay allSlots[SchedulerBase::MAX_UTC_FIRE_SLOTS];
+  int totalSlots = 0;
 
-    for (int slot = 0; slot < 3; slot++) {
-      uint8_t sh, sm, eh, em;
-      if (!scheduler->getTimeSlot(day, slot, sh, sm, eh, em)) continue;
-      SlotDisplay &s = slots[slotCount++];
+  int fireCount = scheduler->getUtcFireSlotCount();
+  if (fireCount > 0) {
+    for (int i = 0; i < fireCount && totalSlots < SchedulerBase::MAX_UTC_FIRE_SLOTS; i++) {
+      uint8_t sh, sm, eh, em, ud;
+      if (!scheduler->getUtcFireSlot(i, ud, sh, sm, eh, em)) continue;
+      SlotDisplay &s = allSlots[totalSlots++];
       s.sh = sh; s.sm = sm; s.eh = eh; s.em = em;
-      s.dayShift = 0;
+      s.utc_day   = ud;
+      s.local_day = ud;
+      s.lsh = sh; s.lsm = sm; s.leh = eh; s.lem = em;
       if (tzKnown) {
-        // Slots are stored in UTC; convert to local using a fixed reference
-        // date (Jan 2 1970) so only the hour:min offset matters.
         struct tm ref = {};
         ref.tm_year = 70; ref.tm_mon = 0; ref.tm_mday = 2; ref.tm_sec = 0;
         ref.tm_hour = sh; ref.tm_min = sm;
@@ -391,37 +397,74 @@ void commandScheduler(const String& params) {
         time_t te = proper_timegm(&ref);
         struct tm *le = localtime(&te);
         s.leh = le->tm_hour; s.lem = le->tm_min;
-        // Detect midnight rollover: compare local vs UTC start in minutes.
         int diff = (s.lsh * 60 + s.lsm) - (sh * 60 + sm);
-        if (diff >  720) s.dayShift = -1; // local is previous day (e.g. UTC 04:00 → local 21:00)
-        if (diff < -720) s.dayShift = +1; // local is next day
+        if (diff >  720) s.local_day = (ud + 6) % 7;
+        if (diff < -720) s.local_day = (ud + 1) % 7;
       }
     }
-
-    // Sort by local start time (insertion sort; max 3 elements).
-    if (tzKnown) {
-      for (int i = 1; i < slotCount; i++) {
-        SlotDisplay key = slots[i];
-        int j = i - 1;
-        while (j >= 0 && (slots[j].lsh * 60 + slots[j].lsm) > (key.lsh * 60 + key.lsm)) {
-          slots[j + 1] = slots[j];
-          j--;
+  } else {
+    for (int day = 0; day < 7; day++) {
+      for (int slot = 0; slot < 3; slot++) {
+        uint8_t sh, sm, eh, em;
+        if (!scheduler->getTimeSlot(day, slot, sh, sm, eh, em)) continue;
+        SlotDisplay &s = allSlots[totalSlots++];
+        s.sh = sh; s.sm = sm; s.eh = eh; s.em = em;
+        s.utc_day   = day;
+        s.local_day = day;
+        s.lsh = sh; s.lsm = sm; s.leh = eh; s.lem = em;
+        if (tzKnown) {
+          struct tm ref = {};
+          ref.tm_year = 70; ref.tm_mon = 0; ref.tm_mday = 2; ref.tm_sec = 0;
+          ref.tm_hour = sh; ref.tm_min = sm;
+          time_t ts = proper_timegm(&ref);
+          struct tm *ls = localtime(&ts);
+          s.lsh = ls->tm_hour; s.lsm = ls->tm_min;
+          ref.tm_hour = eh; ref.tm_min = em;
+          time_t te = proper_timegm(&ref);
+          struct tm *le = localtime(&te);
+          s.leh = le->tm_hour; s.lem = le->tm_min;
+          int diff = (s.lsh * 60 + s.lsm) - (sh * 60 + sm);
+          if (diff >  720) s.local_day = (day + 6) % 7;
+          if (diff < -720) s.local_day = (day + 1) % 7;
         }
-        slots[j + 1] = key;
       }
     }
+  }
 
-    for (int i = 0; i < slotCount; i++) {
-      SlotDisplay &s = slots[i];
+  // Sort by (local_day asc, local start_min asc).
+  for (int i = 1; i < totalSlots; i++) {
+    SlotDisplay key = allSlots[i];
+    int keyMin = key.lsh * 60 + key.lsm;
+    int j = i - 1;
+    while (j >= 0) {
+      int curMin = allSlots[j].lsh * 60 + allSlots[j].lsm;
+      if (allSlots[j].local_day < key.local_day ||
+          (allSlots[j].local_day == key.local_day && curMin <= keyMin)) break;
+      allSlots[j + 1] = allSlots[j];
+      j--;
+    }
+    allSlots[j + 1] = key;
+  }
+
+  static const char *dayAbbr[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+  for (int day = 0; day < 7; day++) {
+    telnet.printf("  %s:", dayNames[day]);
+    bool anySlot = false;
+    for (int i = 0; i < totalSlots; i++) {
+      if (allSlots[i].local_day != day) continue;
+      anySlot = true;
+      SlotDisplay &s = allSlots[i];
       if (tzKnown) {
+        char utcNote[12] = "";
+        if (s.utc_day != day)
+          snprintf(utcNote, sizeof(utcNote), ", UTC %s", dayAbbr[s.utc_day]);
         telnet.printf(" %02d:%02d-%02d:%02d (UTC %02d:%02d-%02d:%02d%s)",
-                      s.lsh, s.lsm, s.leh, s.lem, s.sh, s.sm, s.eh, s.em,
-                      s.dayShift == -1 ? ", prev day" : s.dayShift == +1 ? ", next day" : "");
+                      s.lsh, s.lsm, s.leh, s.lem, s.sh, s.sm, s.eh, s.em, utcNote);
       } else {
         telnet.printf(" %02d:%02d-%02d:%02d (UTC)", s.sh, s.sm, s.eh, s.em);
       }
     }
-    if (slotCount == 0) telnet.print(" (none)");
+    if (!anySlot) telnet.print(" (none)");
     telnet.println();
   }
 }
@@ -574,26 +617,99 @@ void commandLearnerStatus(const String& params) {
   if (cntMeas > 0) snprintf(avgMeas, sizeof(avgMeas), "%6.1f%%", sumMeas / cntMeas);
   telnet.printf("  %-11s  %s   %s\n", "Weekly avg", avgPred, avgMeas);
 
-  // Final retained slot table (max 3/day) with UTC score per slot.
-  telnet.println(F("\n  Slots and Scores (final retained schedule)"));
-  telnet.println(F("  Day         Slot  UTC Range       Score"));
-  telnet.println(F("  ----------------------------------------------"));
+  // Final schedule: 3 slots per local day (same grouping as scheduler command).
+  telnet.println(F("\n  Slots and Scores (3 per local day)"));
+  telnet.println(F("  Day         Slot  Local Range     (UTC)           Score"));
+  telnet.println(F("  --------------------------------------------------------------"));
   bool printedAny = false;
-  if (scheduler) {
+  bool tzKnown = (getenv("TZ") != nullptr);
+  if (scheduler && tzKnown) {
+    struct SlotDisp {
+      int local_day, lsh, lsm, leh, lem, sh, sm, eh, em, utc_day;
+      float score;
+    } slots[SchedulerBase::MAX_UTC_FIRE_SLOTS];
+    int n = 0;
+    int fireCount = scheduler->getUtcFireSlotCount();
+    if (fireCount > 0) {
+      for (int i = 0; i < fireCount && n < SchedulerBase::MAX_UTC_FIRE_SLOTS; i++) {
+        uint8_t sh, sm, eh, em, ud;
+        if (!scheduler->getUtcFireSlot(i, ud, sh, sm, eh, em, &slots[n].score)) continue;
+        SlotDisp &s = slots[n++];
+        s.sh = sh; s.sm = sm; s.eh = eh; s.em = em;
+        s.utc_day = ud;
+        s.local_day = ud;
+        struct tm ref = {};
+        ref.tm_year = 70; ref.tm_mon = 0; ref.tm_mday = 2; ref.tm_sec = 0;
+        ref.tm_hour = sh; ref.tm_min = sm;
+        time_t ts = proper_timegm(&ref);
+        struct tm *ls = localtime(&ts);
+        s.lsh = ls->tm_hour; s.lsm = ls->tm_min;
+        ref.tm_hour = eh; ref.tm_min = em;
+        time_t te = proper_timegm(&ref);
+        struct tm *le = localtime(&te);
+        s.leh = le->tm_hour; s.lem = le->tm_min;
+        int diff = (s.lsh * 60 + s.lsm) - (sh * 60 + sm);
+        if (diff >  720) s.local_day = (ud + 6) % 7;
+        if (diff < -720) s.local_day = (ud + 1) % 7;
+      }
+    } else {
+      for (int day = 0; day < 7; day++) {
+        for (int slot = 0; slot < 3; slot++) {
+          uint8_t sh, sm, eh, em;
+          if (!scheduler->getTimeSlot(day, slot, sh, sm, eh, em)) continue;
+          SlotDisp &s = slots[n++];
+          s.sh = sh; s.sm = sm; s.eh = eh; s.em = em;
+          s.utc_day = day;
+          s.local_day = day;
+          struct tm ref = {};
+          ref.tm_year = 70; ref.tm_mon = 0; ref.tm_mday = 2; ref.tm_sec = 0;
+          ref.tm_hour = sh; ref.tm_min = sm;
+          time_t ts = proper_timegm(&ref);
+          struct tm *ls = localtime(&ts);
+          s.lsh = ls->tm_hour; s.lsm = ls->tm_min;
+          ref.tm_hour = eh; ref.tm_min = em;
+          time_t te = proper_timegm(&ref);
+          struct tm *le = localtime(&te);
+          s.leh = le->tm_hour; s.lem = le->tm_min;
+          int diff = (s.lsh * 60 + s.lsm) - (sh * 60 + sm);
+          if (diff >  720) s.local_day = (day + 6) % 7;
+          if (diff < -720) s.local_day = (day + 1) % 7;
+          s.score = NAN;
+          scheduler->getSlotScoreUtc(day, slot, s.score);
+        }
+      }
+    }
+    for (int day = 0; day < 7; day++) {
+      int slotNum = 0;
+      for (int i = 0; i < n; i++) {
+        if (slots[i].local_day != day) continue;
+        slotNum++;
+        char scoreStr[16];
+        if (!isnan(slots[i].score))
+          snprintf(scoreStr, sizeof(scoreStr), "%.3f", slots[i].score);
+        else
+          snprintf(scoreStr, sizeof(scoreStr), "N/A");
+        static const char *dayAbbr[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+        char utcNote[16] = "";
+        if (slots[i].utc_day != day)
+          snprintf(utcNote, sizeof(utcNote), " UTC %s", dayAbbr[slots[i].utc_day]);
+        telnet.printf("  %-11s  %d     %02d:%02d-%02d:%02d    (%02d:%02d-%02d:%02d%s)  %s\n",
+                      dayNames[day], slotNum,
+                      slots[i].lsh, slots[i].lsm, slots[i].leh, slots[i].lem,
+                      slots[i].sh, slots[i].sm, slots[i].eh, slots[i].em, utcNote,
+                      scoreStr);
+        printedAny = true;
+      }
+    }
+  } else if (scheduler) {
     for (int day = 0; day < 7; day++) {
       for (int slot = 0; slot < 3; slot++) {
         uint8_t sh, sm, eh, em;
         if (!scheduler->getTimeSlot(day, slot, sh, sm, eh, em)) continue;
         float score = NAN;
-        bool hasScore = scheduler->getSlotScoreUtc(day, slot, score);
-        char scoreStr[16];
-        if (hasScore) {
-          snprintf(scoreStr, sizeof(scoreStr), "%.3f", score);
-        } else {
-          snprintf(scoreStr, sizeof(scoreStr), "N/A");
-        }
-        telnet.printf("  %-11s  %d     %02d:%02d-%02d:%02d    %s\n",
-                      dayNames[day], slot + 1, sh, sm, eh, em, scoreStr);
+        scheduler->getSlotScoreUtc(day, slot, score);
+        telnet.printf("  %-11s  %d     %02d:%02d-%02d:%02d (UTC)  %.3f\n",
+                      dayNames[day], slot + 1, sh, sm, eh, em, score);
         printedAny = true;
       }
     }
@@ -613,6 +729,15 @@ void commandSaveLearner(const String& params) {
   } else {
     telnet.println(F("Failed to save measured efficiency window."));
   }
+}
+
+void commandRecomputeSchedule(const String& params) {
+  if (!learner || learner->isDisabled()) {
+    telnet.println(F("Learner is disabled or not initialized."));
+    return;
+  }
+  learner->requestRecompute();
+  telnet.println(F("Recompute requested — new schedule will apply within a few seconds."));
 }
 
 void commandReboot(const String& params) {
@@ -653,6 +778,7 @@ void setupTelnetCommands() {
 
   registerCommand(F("learnerStatus"), F("Print schedule learner status and efficiency table"), commandLearnerStatus);
   registerCommand(F("saveLearner"), F("Save measured efficiency window to flash"), commandSaveLearner);
+  registerCommand(F("recomputeSchedule"), F("Trigger learner recompute and push new schedule"), commandRecomputeSchedule);
   registerCommand(F("history"), F("Print history entries in CSV format (optional: number of entries)"), commandHistory);
   registerCommand(F("eraseHistory"), F("Erase all history entries"), commandEraseHistory);
   registerCommand(F("fsStat"), F("File system status"), commandfsStat);

@@ -63,6 +63,16 @@ class SchedulerBase {
     time_t getNextStateChangeTime() const { return nextStateChangeTime; }
     bool getTimeSlot(int day, int slotIndex, uint8_t &startHour, uint8_t &startMinute, uint8_t &endHour, uint8_t &endMinute) const;
 
+    // Up to 21 UTC fire windows (3 per local day). Used for firing when the learner
+    // (or POST /schedule) supplies more windows than fit in weekSchedule[7][3].
+    static constexpr int MAX_UTC_FIRE_SLOTS = 21;
+    int  getUtcFireSlotCount() const { return _utcFireSlotCount; }
+    bool getUtcFireSlot(int index, uint8_t &utcDow,
+                        uint8_t &startHour, uint8_t &startMinute,
+                        uint8_t &endHour, uint8_t &endMinute,
+                        float *scoreOut = nullptr) const;
+    void clearUtcFireSlots() { _utcFireSlotCount = 0; }
+
 protected:
     // Structure to store schedule for a day
     struct TimeSlot {
@@ -77,6 +87,15 @@ protected:
       TimeSlot slots[3];
     };
 
+    struct UtcFireSlot {
+      uint8_t utcDow;       // 0=Sun .. 6=Sat (tm_wday)
+      uint8_t startHour;
+      uint8_t startMinute;
+      uint8_t endHour;
+      uint8_t endMinute;
+      float   score;        // NAN if unknown
+    };
+
   // Derived class can override to get
   // state changes.
   virtual void stateChange(State newState) {}
@@ -87,8 +106,16 @@ protected:
   virtual void initDefault();
 
   bool isTimeWithinSlot(int currentHour, int currentMinute, TimeSlot slot) const;
+  bool appendUtcFireSlot(uint8_t utcDow,
+                         uint8_t startHour, uint8_t startMinute,
+                         uint8_t endHour, uint8_t endMinute,
+                         float score = NAN);
+  State getNextStateFromFireSlots(time_t *nextStateTime) const;
+  bool  isActiveOnFireSlots(int utcDow, int hour, int minute) const;
 
-  DaySchedule weekSchedule[7]; // 0 = Sunday, 6 = Saturday
+  DaySchedule weekSchedule[7]; // 0 = Sunday, 6 = Saturday (≤3 slots/UTC day, Eve wire)
+  UtcFireSlot _utcFireSlots[MAX_UTC_FIRE_SLOTS];
+  int         _utcFireSlotCount = 0;
   time_t startVacationTime;
   time_t endVacationTime;
 

@@ -63,15 +63,20 @@ int PeakFinder::findDaySlots(const BucketFile::Bucket *day_buckets,
                               TimeSlot *out_slots) {
     const int sep_buckets = MIN_PEAK_SEPARATION_MIN / BUCKET_MINUTES; // 9
 
-    // Adaptive threshold: two-phase loop matching Python exactly.
+    // Adaptive threshold: two-phase loop.
     //   Phase 1: step score threshold down, keep MIN_OCCURRENCES.
     //   Phase 2: if score floor reached with < MAX_SLOTS_PER_DAY, also try
     //            MIN_OCCURRENCES-1 (weakest useful signal).
     //
-    // n_best / best[] mirror Python's `peaks` variable: they are only updated
-    // when findPeaks() returns a non-empty result, so a previously-found set
-    // of peaks is preserved if a later threshold iteration finds no qualifying
-    // buckets — matching Python's `if hot_weighted: peaks = _find_peaks(...)`.
+    // Search target is MAX_SLOTS_PER_DAY (3): findDaySlots is now called on a
+    // local-day bucket view (not a UTC-day view), so each call sees a true
+    // 24 h local window and there is no need to find extra candidates for an
+    // adjacent day's portion.  recomputeWrite() prunes to MAX_SLOTS_PER_DAY
+    // per local day by score before converting to UTC.
+    //
+    // n_best / best[] are only updated when findPeaks() returns a non-empty
+    // result, so a previously-found set is preserved when qualifying buckets
+    // momentarily disappear at a lower threshold.
     int  n_best = 0;
     Peak best[MAX_PEAK_CANDIDATES];
 
@@ -88,9 +93,6 @@ int PeakFinder::findDaySlots(const BucketFile::Bucket *day_buckets,
                                sep_buckets, candidates);
 
             // Only overwrite the best result when we find something non-empty.
-            // This preserves a prior non-zero result when qualifying buckets
-            // momentarily disappear at a new (higher) starting threshold in
-            // the occ_floor=2 pass — matching Python's `if hot_weighted:` guard.
             if (n > 0) {
                 n_best = n;
                 memcpy(best, candidates, n * sizeof(Peak));
@@ -115,10 +117,9 @@ int PeakFinder::findDaySlots(const BucketFile::Bucket *day_buckets,
         return 0;
     }
 
-    // Rank by score descending, keep top MAX_SLOTS_PER_DAY.
-    // Mirrors Python: ranked = sorted(peaks, key=score, reverse=True)[:MAX_SLOTS_PER_DAY]
-    // Explicit sort here rather than relying on NMS output order, so that
-    // "top N by score" is a provable guarantee independent of NMS internals.
+    // Rank by score descending.  No UTC-day cap here — recomputeWrite() prunes
+    // to MAX_SLOTS_PER_DAY per LOCAL day.  Sort so scores are deterministic
+    // regardless of NMS output order.
     // Uses `<` comparison so equal scores preserve relative (insertion) order —
     // a stable sort, matching Python's timsort stability for equal float scores.
     for (int i = 1; i < n_best; i++) {
@@ -130,18 +131,9 @@ int PeakFinder::findDaySlots(const BucketFile::Bucket *day_buckets,
         }
         best[j + 1] = key;
     }
-    if (n_best > MAX_SLOTS_PER_DAY) {
-        int original_count = n_best;
-        int pruned_count   = original_count - MAX_SLOTS_PER_DAY;
-        float kept_min_score    = best[MAX_SLOTS_PER_DAY - 1].score;
-        float dropped_best_score = best[MAX_SLOTS_PER_DAY].score;
-        float dropped_worst_score = best[original_count - 1].score;
-        WEBLOG("LEARNER PeakFinder pruned slots: candidates=%d kept=%d pruned=%d kept_min=%.2f dropped_best=%.2f dropped_worst=%.2f",
-               original_count, MAX_SLOTS_PER_DAY, pruned_count,
-               kept_min_score, dropped_best_score, dropped_worst_score);
-        n_best = MAX_SLOTS_PER_DAY;
-    }
-
+    // No UTC-day cap: all NMS-surviving candidates are returned so that
+    // recomputeWrite() can prune to MAX_SLOTS_PER_DAY per LOCAL day instead,
+    // correctly handling usage patterns that straddle a UTC-day boundary.
     return buildSlots(best, n_best, out_slots);
 }
 
@@ -242,8 +234,8 @@ int PeakFinder::findPeaks(const BucketFile::Bucket *day_buckets,
     // Accept all non-suppressed candidates up to MAX_PEAK_CANDIDATES.
     // Python has no hard cap here; MAX_PEAK_CANDIDATES (32) covers the
     // theoretical maximum local maxima for 45-min separation in a 288-bucket
-    // day (real-world is 2–5 per day).  Caller explicitly sorts by score and
-    // truncates to MAX_SLOTS_PER_DAY after the adaptive loop.
+    // day (real-world is 2–5 per day).  Caller sorts by score; local-day
+    // pruning to MAX_SLOTS_PER_DAY happens in recomputeWrite().
     int n_accepted = 0;
     for (int i = 0; i < n_candidates; i++) {
         bool ok = true;
@@ -286,8 +278,9 @@ int PeakFinder::buildSlots(const Peak *accepted, int n_accepted,
                             TimeSlot *out_slots) {
     // Sort accepted peaks chronologically (ascending bucket).
     // Copy to a local array so we can sort without modifying the caller's.
-    // n_accepted must be <= MAX_SLOTS_PER_DAY; enforced by findDaySlots().
-    Peak chrono[MAX_SLOTS_PER_DAY];
+    // n_accepted must be <= MAX_PEAK_CANDIDATES; findDaySlots() no longer caps
+    // at MAX_SLOTS_PER_DAY — pruning now happens per local day in recomputeWrite().
+    Peak chrono[MAX_PEAK_CANDIDATES];
     memcpy(chrono, accepted, n_accepted * sizeof(Peak));
 
     // Insertion sort by bucket index.
