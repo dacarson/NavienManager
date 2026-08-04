@@ -53,6 +53,7 @@ unsigned long previousMillis = 0;
 #define JSON_ASSIGN_GAS_BOOL_TO_INT(field) doc[#field] = (int)(gas->field)
 #define JSON_ASSIGN_COMMAND(field) doc[#field] = state->command.field;
 #define JSON_ASSIGN_COMMAND_BOOL_TO_INT(field) doc[#field] = (int)(state->command.field);
+#define JSON_ASSIGN_COMMAND_FLOAT(field) doc[#field] = serialized(String(state->command.field, 1))
 #define JSON_ASSIGN_ANNOUNCE_BOOL_TO_INT(field) doc[#field] = (int)(state->announce.field);
 
   /* Each broadcast routine checks to see if the new packet is different to 
@@ -205,7 +206,7 @@ String commandToJSON(const Navien::NAVIEN_STATE *state, String rawhexstring = ""
   JSON_ASSIGN_COMMAND_BOOL_TO_INT(power_command);
   JSON_ASSIGN_COMMAND_BOOL_TO_INT(power_on);
   JSON_ASSIGN_COMMAND_BOOL_TO_INT(set_temp_command);
-  JSON_ASSIGN_COMMAND(set_temp);
+  JSON_ASSIGN_COMMAND_FLOAT(set_temp);
   JSON_ASSIGN_COMMAND_BOOL_TO_INT(hot_button_command);
   JSON_ASSIGN_COMMAND_BOOL_TO_INT(recirculation_command);
   JSON_ASSIGN_COMMAND_BOOL_TO_INT(recirculation_on);
