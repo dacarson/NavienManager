@@ -45,7 +45,7 @@ struct BucketFile {
     uint16_t current_year;    // year buckets[] was last written for
 
     struct Bucket {
-        uint16_t raw_count;       // unweighted cold-start hits
+        uint16_t raw_count;       // unweighted demand-event hits
         float    weighted_score;  // sum of recency-weighted scores
     } buckets[BUCKET_DAYS][BUCKET_PER_DAY]; // [dow][bucket_index], dow: 0=Sun
 };

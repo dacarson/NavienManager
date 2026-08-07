@@ -6,8 +6,8 @@ Extracts 3 weeks of InfluxDB data and produces a diagnostic report
 to understand why on-device measured scheduling efficiency is low.
 
 Analyses:
-  1. Cold-start event distribution heatmap (day-of-week × hour-of-day, UTC and local)
-  2. Per cold-start: was recirculation active within the prior 15 min?
+  1. Demand event distribution heatmap (day-of-week × hour-of-day, UTC and local)
+  2. Per demand event: was recirculation active within the prior 15 min?
   3. Wasted recirc cycles (ran but no tap followed within 15 min)
   4. Schedule slot coverage vs actual demand (from most recent learner broadcast)
   5. Suggested problem areas and parameter hints
@@ -44,7 +44,7 @@ def get_client(args):
 
 def query_water(client, start_utc: datetime, end_utc: datetime):
     """
-    Fetch water measurement fields needed for cold-start and recirc analysis.
+    Fetch water measurement fields needed for demand-event and recirc analysis.
     Returns a list of dicts sorted by time ascending.
     """
     start_s = start_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -71,7 +71,7 @@ def query_learner_latest(client):
 
 
 # ---------------------------------------------------------------------------
-# Cold-start extraction
+# Demand-event extraction
 # ---------------------------------------------------------------------------
 
 RECIRC_HOT_WINDOW_MIN = config.RECIRC_WINDOW_MINUTES  # 15 min
@@ -99,10 +99,10 @@ def parse_points(points):
     return sorted(rows, key=lambda r: r["dt"])
 
 
-def extract_cold_starts(rows, cold_gap_min=10, min_duration_min=0.0):
+def extract_demand_events(rows, cold_gap_min=10, min_duration_min=0.0):
     """
     Detect consumption 0→1 transitions that follow at least cold_gap_min of
-    inactivity.  For each cold-start, determine whether recirculation was
+    inactivity.  For each demand event, determine whether recirculation was
     active (mode on OR pump running) in the preceding RECIRC_HOT_WINDOW_MIN.
 
     min_duration_min: drop events shorter than this (0 = keep all).
@@ -118,7 +118,7 @@ def extract_cold_starts(rows, cold_gap_min=10, min_duration_min=0.0):
     in_run = False
     run_start = None
     run_rows = []
-    cold_starts = []
+    demand_events = []
 
     def _finish_run(run_rows, rows_context):
         if not run_rows:
@@ -144,7 +144,7 @@ def extract_cold_starts(rows, cold_gap_min=10, min_duration_min=0.0):
         if duration < min_duration_min:
             return  # filter out recirc-pump artifacts and trivial taps
 
-        cold_starts.append({
+        demand_events.append({
             "dt":            start_dt,
             "dow":           start_dt.weekday() + 1 if start_dt.weekday() < 6 else 0,
             # ^ convert Python Mon=0 to Sun=0 (tm_wday convention)
@@ -161,7 +161,7 @@ def extract_cold_starts(rows, cold_gap_min=10, min_duration_min=0.0):
         active = row["consumption_active"]
         if active and not in_run:
             # Start of a new run
-            # Is this a cold-start (preceded by enough inactivity)?
+            # Is this a new demand event (preceded by enough inactivity)?
             if last_consumption_end is None or (row["dt"] - last_consumption_end) >= cold_gap:
                 in_run = True
                 run_rows = [row]
@@ -183,7 +183,7 @@ def extract_cold_starts(rows, cold_gap_min=10, min_duration_min=0.0):
     if in_run:
         _finish_run(run_rows, rows)
 
-    return cold_starts
+    return demand_events
 
 
 # ---------------------------------------------------------------------------
@@ -375,18 +375,18 @@ def run_report(args):
         schedule = {}
 
     # ------------------------------------------------------------------
-    # 1. Cold-start extraction
+    # 1. Demand-event extraction
     # ------------------------------------------------------------------
     dur_note = f" (min duration {args.min_duration_min} min)" if args.min_duration_min else ""
-    print(f"\nExtracting cold-start events{dur_note}...", end=" ", flush=True)
-    cold_starts = extract_cold_starts(rows,
+    print(f"\nExtracting demand events{dur_note}...", end=" ", flush=True)
+    demand_events = extract_demand_events(rows,
                                       cold_gap_min=args.cold_gap_minutes,
                                       min_duration_min=args.min_duration_min)
-    print(f"{len(cold_starts)} events")
+    print(f"{len(demand_events)} events")
 
-    covered   = [e for e in cold_starts if e["recirc_covered"]]
-    uncovered = [e for e in cold_starts if not e["recirc_covered"]]
-    measured_pct = 100.0 * len(covered) / len(cold_starts) if cold_starts else 0.0
+    covered   = [e for e in demand_events if e["recirc_covered"]]
+    uncovered = [e for e in demand_events if not e["recirc_covered"]]
+    measured_pct = 100.0 * len(covered) / len(demand_events) if demand_events else 0.0
 
     # ------------------------------------------------------------------
     # 2. Recirc cycle analysis
@@ -404,7 +404,7 @@ def run_report(args):
     print(f"\n{'─'*70}")
     print(f"  1. OVERALL SUMMARY  ({weeks}-week window)")
     print(f"{'─'*70}")
-    print(f"  Cold-start events total:      {len(cold_starts):>5}")
+    print(f"  Demand events total:          {len(demand_events):>5}")
     print(f"  Covered by recirc (measured): {len(covered):>5}  ({measured_pct:.1f}%)")
     print(f"  Not covered (cold pipe):      {len(uncovered):>5}  ({100-measured_pct:.1f}%)")
     print(f"  Recirc cycles total:          {len(cycles):>5}")
@@ -412,8 +412,8 @@ def run_report(args):
     print(f"  Wasted recirc cycles:         {len(wasted):>5}"
           + (f"  ({100*len(wasted)/len(cycles):.0f}% waste)" if cycles else ""))
 
-    avg_cs_per_day = len(cold_starts) / (weeks * 7)
-    print(f"  Avg cold-starts/day:          {avg_cs_per_day:.1f}")
+    avg_de_per_day = len(demand_events) / (weeks * 7)
+    print(f"  Avg demand events/day:        {avg_de_per_day:.1f}")
 
     # ------------------------------------------------------------------
     # Section 2: Per-day-of-week breakdown
@@ -427,9 +427,9 @@ def run_report(args):
 
     dow_names = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"]
     for dow in range(7):
-        day_cs   = [e for e in cold_starts if e["dow_name"] == dow_names[dow]]
-        day_cov  = [e for e in day_cs if e["recirc_covered"]]
-        day_pct  = 100.0 * len(day_cov) / len(day_cs) if day_cs else None
+        day_de   = [e for e in demand_events if e["dow_name"] == dow_names[dow]]
+        day_cov  = [e for e in day_de if e["recirc_covered"]]
+        day_pct  = 100.0 * len(day_cov) / len(day_de) if day_de else None
 
         day_cyc  = [c for c in cycles
                     if c["dt_start"].isoweekday() % 7 == dow]
@@ -439,25 +439,25 @@ def run_report(args):
         slot_str = "  ".join(fmt_slot(s, e, args.utc_offset) for s, e in slots) if slots else "(none)"
 
         pct_str = f"{day_pct:.1f}%" if day_pct is not None else "  N/A"
-        print(f"  {dow_names[dow]:<11} {len(day_cs):>7} {len(day_cov):>8} {pct_str:>7} {day_wst:>10}   {slot_str}")
+        print(f"  {dow_names[dow]:<11} {len(day_de):>7} {len(day_cov):>8} {pct_str:>7} {day_wst:>10}   {slot_str}")
 
     # ------------------------------------------------------------------
-    # Section 3: Cold-start heatmap by hour
+    # Section 3: Demand-event heatmap by hour
     # ------------------------------------------------------------------
     tz_label = "UTC" if not args.utc_offset else f"UTC{args.utc_offset//60:+d}"
     print(f"\n{'─'*70}")
-    print(f"  3. COLD-START HEATMAP  (by day-of-week and hour, {tz_label})")
+    print(f"  3. DEMAND-EVENT HEATMAP  (by day-of-week and hour, {tz_label})")
     print(f"     ▁=<3%  ▃=<6%  ▅=<10%  ▇=<15%  █=≥15%  of that day's events")
     print(f"{'─'*70}")
 
     print(f"  {'Day':<5} 00  01  02  03  04  05  06  07  08  09  10  11  12  13  14  15  16  17  18  19  20  21  22  23")
 
     for dow in range(7):
-        day_cs = [e for e in cold_starts if e["dow_name"] == dow_names[dow]]
-        if not day_cs:
+        day_de = [e for e in demand_events if e["dow_name"] == dow_names[dow]]
+        if not day_de:
             continue
         hour_counts = defaultdict(int)
-        for e in day_cs:
+        for e in day_de:
             h = e["hour_utc"]
             if args.utc_offset:
                 local_dt = e["dt"] + timedelta(minutes=args.utc_offset)
@@ -465,7 +465,7 @@ def run_report(args):
             hour_counts[h] += 1
 
         # Compact 2-char representation per hour
-        total = len(day_cs)
+        total = len(day_de)
         cells = []
         for h in range(24):
             n = hour_counts.get(h, 0)
@@ -507,13 +507,13 @@ def run_report(args):
     if not schedule or not any(schedule.values()):
         print("  No learner schedule found — cannot analyse coverage.")
     else:
-        print(f"  For each day, uncovered cold-starts are those where consumption")
+        print(f"  For each day, uncovered demand events are those where consumption")
         print(f"  did NOT fall inside a scheduled slot (±{int(RECIRC_HOT_WINDOW_MIN)} min window).")
         print()
 
         for dow in range(7):
-            day_cs = [e for e in cold_starts if e["dow_name"] == dow_names[dow]]
-            if not day_cs:
+            day_de = [e for e in demand_events if e["dow_name"] == dow_names[dow]]
+            if not day_de:
                 continue
 
             in_slot   = []
@@ -523,7 +523,7 @@ def run_report(args):
 
             slots = schedule.get(dow, [])
 
-            for e in day_cs:
+            for e in day_de:
                 minute = e["hour_utc"] * 60 + e["minute_utc"]
                 in_s  = False
                 near_s = False
@@ -542,12 +542,12 @@ def run_report(args):
                 else:
                     outside.append(e)
 
-            total = len(day_cs)
+            total = len(day_de)
             pct_in   = 100 * len(in_slot)   / total if total else 0
             pct_near = 100 * len(near_slot) / total if total else 0
             pct_out  = 100 * len(outside)   / total if total else 0
 
-            print(f"  {dow_names[dow]} ({total} cold-starts):")
+            print(f"  {dow_names[dow]} ({total} demand events):")
             print(f"    Inside slot:           {len(in_slot):>3}  ({pct_in:.0f}%)")
             print(f"    Within {int(RECIRC_HOT_WINDOW_MIN)} min after slot: {len(near_slot):>3}  ({pct_near:.0f}%)")
             print(f"    Completely outside:    {len(outside):>3}  ({pct_out:.0f}%)")
@@ -567,16 +567,16 @@ def run_report(args):
             print()
 
     # ------------------------------------------------------------------
-    # Section 5: Detailed cold-start listing (last 50)
+    # Section 5: Detailed demand-event listing (last 50)
     # ------------------------------------------------------------------
     print(f"{'─'*70}")
-    print(f"  5. RECENT COLD-START EVENTS  (most recent {min(50, len(cold_starts))})")
+    print(f"  5. RECENT DEMAND EVENTS  (most recent {min(50, len(demand_events))})")
     print(f"{'─'*70}")
     print(f"  {'Timestamp (UTC)':<22} {'Local':<8} {'Dow':<5} "
           f"{'Dur(m)':>7} {'Flow':>6} {'Covered':>8} {'In-Slot':>8}")
     print(f"  {'─'*22} {'─'*8} {'─'*5} {'─'*7} {'─'*6} {'─'*8} {'─'*8}")
 
-    recent = sorted(cold_starts, key=lambda e: e["dt"])[-50:]
+    recent = sorted(demand_events, key=lambda e: e["dt"])[-50:]
     for e in recent:
         utc_str = e["dt"].strftime("%Y-%m-%d %H:%M")
         if args.utc_offset:
@@ -674,7 +674,7 @@ def run_report(args):
                 "flow_peak_lpm", "recirc_covered", "in_slot",
             ])
             writer.writeheader()
-            for e in sorted(cold_starts, key=lambda x: x["dt"]):
+            for e in sorted(demand_events, key=lambda x: x["dt"]):
                 local_str = ""
                 if args.utc_offset:
                     local_str = (e["dt"] + timedelta(minutes=args.utc_offset)).strftime("%Y-%m-%d %H:%M")
@@ -711,12 +711,12 @@ def main():
                         help="UTC offset in minutes for local-time display "
                              "(e.g. -420 for PDT / UTC-7, -480 for PST / UTC-8)")
     parser.add_argument("--cold_gap_minutes", default=10, type=int,
-                        help="Inactivity gap (min) that defines a new cold-start event")
+                        help="Inactivity gap (min) that defines a new demand event")
     parser.add_argument("--min_duration_min", default=0.0, type=float,
                         help="Drop events shorter than this many minutes "
                              "(use 1.0 to filter recirc pump artifacts)")
     parser.add_argument("--csv",            default=None, metavar="FILE",
-                        help="Export raw cold-start events to CSV")
+                        help="Export raw demand events to CSV")
     args = parser.parse_args()
     run_report(args)
 

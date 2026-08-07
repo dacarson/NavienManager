@@ -71,7 +71,7 @@ NavienLearner::NavienLearner()
       _runBucket(0),
       _recircAtStart(false),
       _lastRecircActiveTime(0),
-      _coldStartQueue(nullptr),
+      _demandEventQueue(nullptr),
       _taskHandle(nullptr),
       _recomputeRequested(false),
       _taskState(IDLE),
@@ -101,8 +101,8 @@ NavienLearner::NavienLearner()
 // ---------------------------------------------------------------------------
 
 bool NavienLearner::begin() {
-    _coldStartQueue = xQueueCreate(1, sizeof(PendingColdStart));
-    if (_coldStartQueue == nullptr) {
+    _demandEventQueue = xQueueCreate(1, sizeof(PendingDemandEvent));
+    if (_demandEventQueue == nullptr) {
         Serial.println("NavienLearner: queue alloc failed — learner disabled");
         _learnerDisabled = true;
         return false;
@@ -153,7 +153,7 @@ bool NavienLearner::begin() {
 }
 
 // ---------------------------------------------------------------------------
-// onNavienState() — cold-start detector (Core 1)
+// onNavienState() — demand-event detector (Core 1)
 // ---------------------------------------------------------------------------
 
 void NavienLearner::onNavienState(bool consumption_active,
@@ -163,12 +163,12 @@ void NavienLearner::onNavienState(bool consumption_active,
         return;
     }
 
-    // --- consumption_active 0→1: potential cold-start ---
+    // --- consumption_active 0→1: potential new demand event ---
     if (consumption_active && !_inRun) {
-        bool isColdStart = (_lastActiveTime == 0) ||
+        bool isNewDemandEvent = (_lastActiveTime == 0) ||
                            ((now - _lastActiveTime) >= (time_t)COLD_GAP_SEC);
 
-        if (isColdStart) {
+        if (isNewDemandEvent) {
             // Pin dow and bucket to tap-open time.
             struct tm *t = gmtime(&now);
             _runDow    = t->tm_wday;                          // 0=Sun (UTC)
@@ -208,13 +208,13 @@ void NavienLearner::onNavienState(bool consumption_active,
             // Enqueue for Core 0: bucket accumulation and measured-efficiency
             // counter update.  Both operations now happen on Core 0 so that
             // _measured[] and _measuredHead are only ever written by one core.
-            PendingColdStart cs;
+            PendingDemandEvent cs;
             cs.dow            = _runDow;
             cs.bucket         = _runBucket;
             cs.demand_weight  = demand_weight;
             cs.recency_weight = RECENCY_WEIGHT_CURRENT;
             cs.recircAtStart  = _recircAtStart;
-            xQueueOverwrite(_coldStartQueue, &cs);
+            xQueueOverwrite(_demandEventQueue, &cs);
         }
     }
 
@@ -412,7 +412,7 @@ void NavienLearner::learnerTask(void *pvParam) {
 void NavienLearner::idleStep() {
     // One-shot startup decay: on the first tick where the clock is valid,
     // call decayCheck() so that year-rollover data is aged before any
-    // recompute or new cold-starts are accumulated.  This handles the case
+    // recompute or new demand events are accumulated.  This handles the case
     // where the device was powered off over New Year and reboots mid-January.
     if (!_startupDecayDone) {
         time_t now = time(nullptr);
@@ -430,13 +430,13 @@ void NavienLearner::idleStep() {
         }
     }
 
-    // Consume any pending cold-start event from Core 1.
-    PendingColdStart cs;
-    if (xQueueReceive(_coldStartQueue, &cs, 0) == pdTRUE) {
+    // Consume any pending demand event from Core 1.
+    PendingDemandEvent cs;
+    if (xQueueReceive(_demandEventQueue, &cs, 0) == pdTRUE) {
         static const char *dowNames[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
         int bucket_h = (cs.bucket * 5) / 60;
         int bucket_m = (cs.bucket * 5) % 60;
-        WEBLOG("LEARNER cold-start: UTC %s %02d:%02d bucket=%d recirc=%s weight=%.1f",
+        WEBLOG("LEARNER demand-event: UTC %s %02d:%02d bucket=%d recirc=%s weight=%.1f",
                dowNames[cs.dow], bucket_h, bucket_m, cs.bucket,
                cs.recircAtStart ? "yes" : "no",
                cs.demand_weight * cs.recency_weight);
@@ -733,6 +733,14 @@ void NavienLearner::recomputeWrite() {
 
     // --- Step 4: Predicted efficiency per LOCAL day (matches schedule semantics) ---
     // Uses the same local-day bucket view as RECOMPUTING; slots are local times.
+    // schedulable = every bucket with recorded historical demand (the same
+    // population "Measured" draws demand events from); covered = the subset a
+    // real tap at that time would find already warm — either inside a slot or
+    // within HOT_WINDOW_MIN after one ends (pump/pipe still warm). Demand
+    // outside both must count against the day, not be dropped from the ratio,
+    // or "Predicted" silently reduces to "how tight are the chosen windows"
+    // instead of "how much of the day's demand does the schedule cover" —
+    // which is not comparable to "Measured" and reads as a phantom high score.
     static constexpr int HOT_WINDOW_MIN = 15;
     for (int local_dow = 0; local_dow < BUCKET_DAYS; local_dow++) {
         int covered = 0, schedulable = 0;
@@ -742,6 +750,7 @@ void NavienLearner::recomputeWrite() {
             if (utc_min < 0)     { utc_min += 1440; utc_dow = (utc_dow + 6) % 7; }
             if (utc_min >= 1440) { utc_min -= 1440; utc_dow = (utc_dow + 1) % 7; }
             if (_store.data().buckets[utc_dow][utc_min / 5].raw_count == 0) continue;
+            schedulable++;
             int local_min = lb * 5;
             bool in_slot = false, near_after = false;
             for (int i = 0; i < nPruned; i++) {
@@ -756,10 +765,7 @@ void NavienLearner::recomputeWrite() {
                     near_after = true;
                 }
             }
-            if (in_slot || near_after) {
-                schedulable++;
-                if (in_slot) covered++;
-            }
+            if (in_slot || near_after) covered++;
         }
         _predictedEfficiency[local_dow] = (schedulable > 0)
             ? (covered * 100.0f / schedulable)
@@ -893,7 +899,7 @@ int NavienLearner::ingestBucketPayload(const char *json, bool &replaced) {
     // Cross-core note: this method runs on Core 1 (Arduino loop) and mutates
     // _store.data() directly.  Core 0 owns the BucketStore for all normal
     // operations; no mutex guards this path.  Bootstrap must be run while the
-    // device is quiet — no active recompute and no concurrent cold-start flush
+    // device is quiet — no active recompute and no concurrent demand-event flush
     // in progress — to avoid a data race on the in-RAM BucketFile.
     BucketFile &bf = _store.data();
     if (replaced) {
@@ -998,7 +1004,7 @@ void NavienLearner::appendStatusHTML(String &page) const {
             "<th style='padding:4px 12px'>Predicted</th>"
             "<th style='padding:4px 12px'>Measured</th>"
             "<th style='padding:4px 12px'>Gap</th>"
-            "<th style='padding:4px 12px'>Cold-starts (4wk)</th>"
+            "<th style='padding:4px 12px'>Demand events (4wk)</th>"
             "</tr>";
 
     float sumPred = 0.0f, sumMeas = 0.0f;

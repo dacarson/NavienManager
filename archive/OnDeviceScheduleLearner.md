@@ -1,9 +1,42 @@
 # On-Device Schedule Learning — Implementation Plan
 
+## Goal
+
+The scheduler's job is to decide when to run hot-water recirculation, balancing two
+opposing costs:
+
+- **Water waste.** If recirculation isn't running when the homeowner opens a hot-water
+  tap, the pipe is cold. They either wait 3–5 minutes for hot water to arrive (running
+  the tap the whole time) or give up — both waste water. This is the **demand event** cost.
+- **Gas waste.** Recirculation keeps the water in the pipe hot by periodically cycling
+  the heater, whether or not anyone uses the tap. Every cycle that runs with no
+  follow-up tap use burns gas for nothing. This is the **wasted-cycle** cost.
+
+The scheduler's aim is to run recirculation often enough that the homeowner frequently
+gets hot water immediately when they turn on a tap, while running it rarely enough that
+gas isn't burned keeping pipes hot no one is using. Up to **3 slots per user's timezone
+day** (a fixed Eve/HomeKit schedule limit — see `PeakFinder.h`) are placed at the times
+of day demand is most concentrated.
+
+Both costs have a real dollar value, defined in `Logger/config.py` and
+`Logger/navien_schedule_learner.py`:
+
+| Cost | Formula | Approx. value |
+|---|---|---|
+| Demand event (water waste) | `COLD_PIPE_DRAIN_MINUTES × AVG_FLOW_LPM × WATER_RATE_USD_PER_L` | ~$0.097 per demand event |
+| Wasted recirc cycle (gas waste) | `RECIRC_CYCLE_MINUTES/60 × RECIRC_PARTIAL_KCAL_HR × GAS_RATE_USD_PER_KCAL` | ~$0.0024 per cycle |
+
+A demand event currently costs roughly **40× more** than a wasted recirc cycle, so the
+scheduler should be biased toward scheduling recirc rather than withholding it — but not
+unconditionally, since a wide or constant schedule multiplies the number of wasted
+cycles. The peak-finding thresholds, window widths, and slot counts throughout this
+document should be read as an attempt to approximate that dollar-weighted balance, not
+as an end in themselves.
+
 ## Overview
 
 A self-contained `NavienLearner` class that:
-- **Detects cold-starts** in real time by observing RS-485 state transitions
+- **Detects demand events** in real time by observing RS-485 state transitions
 - **Accumulates bucket data** into a compact flat file on LittleFS flash
 - **Recomputes the schedule** nightly on Core 0, completely non-blocking to Core 1
 - **Updates `FakeGatoScheduler`** with the new schedule exactly as the Pi does today via `setWeekScheduleFromJSON()`
@@ -30,7 +63,7 @@ struct BucketFile {
 
     // 7 days × 288 five-minute buckets (1440 min / 5)
     struct Bucket {
-        uint16_t raw_count;      // unweighted cold-start hits
+        uint16_t raw_count;      // unweighted demand event hits
         float    weighted_score; // sum of recency-weighted scores
     } buckets[7][288];           // [dow][bucket_index], dow: 0=Sun
 };
@@ -56,7 +89,7 @@ Temp file used during atomic write (write → rename). LittleFS supports `Little
 
 ---
 
-## Cold-Start Detection
+## Demand-Event Detection
 
 Add a `NavienLearner::onNavienState()` method called from wherever RS-485 packets are currently dispatched (the same place `DEV_Navien` observes state). It needs:
 
@@ -91,7 +124,7 @@ Using elapsed seconds rather than a packet counter makes the thresholds independ
 
 ```
 consumption_active goes 0→1 AND (now - _lastActiveTime) >= cold_gap:
-    → cold-start detected
+    → demand event detected
     → _recircAtStart = recirculation_active || (now - _lastRecircActiveTime < RECIRC_HOT_WINDOW_SEC)
     → _runStart = now, _runDurationSec = 0, _inRun = true
     → _runDow    = localtime(&now)->tm_wday          // pinned to tap-open time
@@ -105,7 +138,7 @@ consumption_active == 1 AND _inRun:
 consumption_active goes 1→0 AND _inRun:
     → _inRun = false
     → compute demand_weight from _recircAtStart and _runDurationSec
-    → if demand_weight > 0.0: enqueue cold-start via xQueueOverwrite()
+    → if demand_weight > 0.0: enqueue demand event via xQueueOverwrite()
        using _runDow and _runBucket (tap-open time, not tap-close time)
 ```
 
@@ -113,10 +146,10 @@ consumption_active goes 1→0 AND _inRun:
 
 ### Cross-Core Communication
 
-Cold-start events are the only data flowing from Core 1 to Core 0. They are transported via a **FreeRTOS single-element queue**, which provides full memory ordering guarantees through its internal critical sections — no hand-rolled atomics or `volatile` tricks needed.
+Demand events are the only data flowing from Core 1 to Core 0. They are transported via a **FreeRTOS single-element queue**, which provides full memory ordering guarantees through its internal critical sections — no hand-rolled atomics or `volatile` tricks needed.
 
 ```cpp
-struct PendingColdStart {
+struct PendingDemandEvent {
     int      dow;            // day of week (0=Sun)
     int      bucket;         // 5-minute bucket index (0–287)
     float    demand_weight;  // 0.5 or 1.0
@@ -124,19 +157,19 @@ struct PendingColdStart {
 };
 
 // Created in NavienLearner::begin(), capacity = 1
-QueueHandle_t _coldStartQueue = xQueueCreate(1, sizeof(PendingColdStart));
+QueueHandle_t _demandEventQueue = xQueueCreate(1, sizeof(PendingDemandEvent));
 ```
 
 **Core 1** (water packet callback):
 ```cpp
-PendingColdStart cs = { dow, bucket, demand_weight, recency_weight };
-xQueueOverwrite(_coldStartQueue, &cs);  // non-blocking; replaces any unread entry
+PendingDemandEvent cs = { dow, bucket, demand_weight, recency_weight };
+xQueueOverwrite(_demandEventQueue, &cs);  // non-blocking; replaces any unread entry
 ```
 
 **Core 0** (IDLE state, every 500ms):
 ```cpp
-PendingColdStart cs;
-if (xQueueReceive(_coldStartQueue, &cs, 0) == pdTRUE) {
+PendingDemandEvent cs;
+if (xQueueReceive(_demandEventQueue, &cs, 0) == pdTRUE) {
     // safe to read cs — FreeRTOS guarantees full visibility
     _buckets.buckets[cs.dow][cs.bucket].raw_count++;
     _buckets.buckets[cs.dow][cs.bucket].weighted_score +=
@@ -145,7 +178,7 @@ if (xQueueReceive(_coldStartQueue, &cs, 0) == pdTRUE) {
 }
 ```
 
-`xQueueOverwrite()` means if Core 0 is busy and misses a cold-start event, the next one replaces it rather than blocking Core 1. Cold-starts happen at most a few times per day; losing one in a theoretical burst is acceptable. **A burst of cold-starts closer than 500ms apart cannot occur** — they require at least `cold_gap` (10 minutes) of inactivity between them by definition.
+`xQueueOverwrite()` means if Core 0 is busy and misses a demand event, the next one replaces it rather than blocking Core 1. Demand events happen at most a few times per day; losing one in a theoretical burst is acceptable. **A burst of demand events closer than 500ms apart cannot occur** — they require at least `cold_gap` (10 minutes) of inactivity between them by definition.
 
 RAM cost: ~100 bytes for a 1-element FreeRTOS queue handle and internal structure.
 
@@ -155,8 +188,8 @@ RAM cost: ~100 bytes for a 1-element FreeRTOS queue handle and internal structur
 
 ```cpp
 bool NavienLearner::begin() {
-    _coldStartQueue = xQueueCreate(1, sizeof(PendingColdStart));
-    if (_coldStartQueue == nullptr) {
+    _demandEventQueue = xQueueCreate(1, sizeof(PendingDemandEvent));
+    if (_demandEventQueue == nullptr) {
         WEBLOG("NavienLearner: queue alloc failed — learner disabled");
         _learnerDisabled = true;
         return false;
@@ -170,12 +203,12 @@ bool NavienLearner::begin() {
 
 ### Demand Weight Logic
 
-Matches the `demand_weight` component of the Python script's `_extract_cold_starts()`. Two components present in the Python script are **intentionally omitted** as documented in the What This Does Not Attempt section — this is an algorithm fork, not an exact port:
+Matches the `demand_weight` component of the Python script's `_extract_demand_events()`. Two components present in the Python script are **intentionally omitted** as documented in the What This Does Not Attempt section — this is an algorithm fork, not an exact port:
 
 - **Seasonal window** (±`window_weeks` band): omitted because incremental on-device accumulation replaces the need to limit query scope.
 - **`cost_multiplier`** (dollar-value scaling): omitted because it is a constant multiplier that normalises to 1.0 for all genuine demand events and has no net effect on peak ranking.
 
-The on-device `combined_weight` per cold-start is therefore `recency_weight × demand_weight` rather than the Python's `recency_weight × demand_weight × cost_multiplier`. For genuine demand events (the common case) the result is identical. For short cold-pipe taps (`demand_weight = 0.5`) the cost multiplier would have further halved the weight in Python — on-device these events are slightly over-weighted relative to Python, a conservative bias that may produce marginally wider windows. This is an acceptable and understood delta.
+The on-device `combined_weight` per demand event is therefore `recency_weight × demand_weight` rather than the Python's `recency_weight × demand_weight × cost_multiplier`. For genuine demand events (the common case) the result is identical. For short cold-pipe taps (`demand_weight = 0.5`) the cost multiplier would have further halved the weight in Python — on-device these events are slightly over-weighted relative to Python, a conservative bias that may produce marginally wider windows. This is an acceptable and understood delta.
 
 | Condition | `demand_weight` |
 |---|---|
@@ -211,7 +244,7 @@ xTaskCreatePinnedToCore(
 
 ```
 IDLE
-  ├─ Every 500ms: xQueueReceive(_coldStartQueue, &cs, 0)
+  ├─ Every 500ms: xQueueReceive(_demandEventQueue, &cs, 0)
   │     If received → read buckets.bin into RAM,
   │                   update bucket struct (cs.dow, cs.bucket),
   │                   write full file back (~10–15ms)
@@ -261,7 +294,7 @@ FakeGatoScheduler::loop() (Core 1):
 
 The zero-timeout `xSemaphoreTake` means if Core 0 holds the mutex at that instant, `loop()` skips and retries on the next iteration. Missing one check is harmless — the schedule is applied on the next loop pass.
 
-Recompute triggers at **midnight + 2 minutes** local time, detected by polling `localtime(now)` inside the task loop. This is the right moment: the previous day's cold-starts are complete, and the day-of-week index has just rolled over.
+Recompute triggers at **midnight + 2 minutes** local time, detected by polling `localtime(now)` inside the task loop. This is the right moment: the previous day's demand events are complete, and the day-of-week index has just rolled over.
 
 ---
 
@@ -328,9 +361,9 @@ Matches the Python adaptive loop exactly:
 
 Two separate synchronisation mechanisms, each with a single clear purpose:
 
-**1. FreeRTOS queue — cold-start handoff (Core 1 → Core 0)**
+**1. FreeRTOS queue — demand event handoff (Core 1 → Core 0)**
 
-`_coldStartQueue` (capacity 1, see Cross-Core Communication above) carries `PendingColdStart` structs from the water packet callback on Core 1 to the IDLE state handler on Core 0. No mutex needed — the queue's internal critical sections provide all required memory ordering.
+`_demandEventQueue` (capacity 1, see Cross-Core Communication above) carries `PendingDemandEvent` structs from the water packet callback on Core 1 to the IDLE state handler on Core 0. No mutex needed — the queue's internal critical sections provide all required memory ordering.
 
 **2. Mutex — schedule JSON handoff (Core 0 → Core 1)**
 
@@ -383,26 +416,26 @@ predicted%          = covered_schedulable / total_schedulable × 100
 
 ### Measured Efficiency
 
-Tracks what actually happened: of all cold-starts the device observed, what fraction had recirculation already running at the moment the tap opened (i.e. the schedule fired in time).
+Tracks what actually happened: of all demand events the device observed, what fraction had recirculation already running at the moment the tap opened (i.e. the schedule fired in time).
 
-The cold-start detector in `onNavienState()` already captures `_recircAtStart` at tap-open time.  That value is forwarded to Core 0 via the `PendingColdStart` queue struct (field `recircAtStart`).  Core 0's `idleStep()` increments the counters when it consumes each event — keeping `_measured[]` and `_measuredHead` written by exactly one core with no synchronisation needed.
+The demand event detector in `onNavienState()` already captures `_recircAtStart` at tap-open time.  That value is forwarded to Core 0 via the `PendingDemandEvent` queue struct (field `recircAtStart`).  Core 0's `idleStep()` increments the counters when it consumes each event — keeping `_measured[]` and `_measuredHead` written by exactly one core with no synchronisation needed.
 
 **Rolling window storage** — 4 weeks × 7 days × 2 counters:
 
 ```cpp
 struct WeekMeasured {
-    uint16_t total[7];    // cold-starts per day-of-week this week
-    uint16_t covered[7];  // cold-starts with recirc already running
+    uint16_t total[7];    // demand events per day-of-week this week
+    uint16_t covered[7];  // demand events with recirc already running
 };
 WeekMeasured _measured[4];  // 112 bytes total, lives in RAM
 uint8_t      _measuredHead; // index of current week (0–3), rotates Sunday midnight
 ```
 
-On Core 0, in `idleStep()`, after consuming each `PendingColdStart` from the queue:
+On Core 0, in `idleStep()`, after consuming each `PendingDemandEvent` from the queue:
 ```cpp
 // Use cs.dow (tap-open day), not localtime(&now) (tap-close day).
 // Consistent with cs.bucket — demand timestamp semantics are always anchored
-// to when the cold-start began, not when the run ended.
+// to when the demand event began, not when the run ended.
 _measured[_measuredHead].total[cs.dow]++;
 if (cs.recircAtStart)
     _measured[_measuredHead].covered[cs.dow]++;
@@ -442,7 +475,7 @@ gap[dow] = predictedEfficiency[dow] - measuredEfficiency[dow]
 | 10–25% | Normal drift — nightly recompute should self-correct within days |
 | > 25% | Habits have shifted significantly; consider rerunning bootstrap |
 | Predicted N/A | Insufficient bucket data for this day — schedule inherited from bootstrap |
-| Measured NaN | No cold-starts observed yet for this day in the rolling window |
+| Measured NaN | No demand events observed yet for this day in the rolling window |
 
 ### `learnerStatus` Telnet Output
 
@@ -451,7 +484,7 @@ Learner Status
   Last recompute:  2025-03-30 00:02  (14h ago)
   Bucket fill:     142 / 2016 non-zero (7.0%)
 
-  Day        Predicted   Measured    Gap    Cold-starts (4wk)
+  Day        Predicted   Measured    Gap    Demand events (4wk)
   ─────────────────────────────────────────────────────────
   Sunday       72.3%      68.1%     -4.2%   23
   Monday       88.5%      91.2%     +2.7%   31
@@ -482,7 +515,7 @@ Example rendering:
 Learner Status
 Last recompute: 2025-03-30 00:02 (14h ago)   Bucket fill: 142 / 2016 (7.0%)
 
-Day          Predicted   Measured    Gap        Cold-starts
+Day          Predicted   Measured    Gap        Demand events
 Sunday         72.3%      68.1%     -4.2%  ●    23
 Monday         88.5%      91.2%     +2.7%  ●    31
 Tuesday        85.1%      79.4%     -5.7%  ●    29
@@ -499,7 +532,7 @@ No additional RAM is required — the HTML string is built on demand into the ex
 
 ```
 _predictedEfficiency[7]:    28 bytes   (floats, updated at recompute)
-_measured[4] rolling window: 112 bytes  (uint16_t counters, updated per cold-start)
+_measured[4] rolling window: 112 bytes  (uint16_t counters, updated per demand event)
 _measuredHead:               1 byte
 ─────────────────────────────────────────────────────────────────────
 Total added RAM:             141 bytes
@@ -554,12 +587,12 @@ Fields:
 | `bucket_fill_pct` | float | Percentage of 2016 buckets that are non-zero (1 decimal place) |
 | `{pfx}_slots` | string | Slots for that day as `"HH:MM-HH:MM,..."` (empty string if no slots); `{pfx}` is `sun`/`mon`/`tue`/`wed`/`thu`/`fri`/`sat` |
 | `{pfx}_predicted_pct` | float | Predicted efficiency % from bucket analysis (1 decimal place); omitted if insufficient data |
-| `{pfx}_measured_pct` | float | Measured efficiency % from rolling 4-week window (1 decimal place); omitted if no cold-starts yet |
+| `{pfx}_measured_pct` | float | Measured efficiency % from rolling 4-week window (1 decimal place); omitted if no demand events yet |
 | `{pfx}_gap_pct` | float | `predicted - measured` (1 decimal place); omitted if either value is unavailable |
-| `{pfx}_cold_starts_4wk` | int | Cold-starts observed in rolling 4-week window for this day; always present |
+| `{pfx}_cold_starts_4wk` | int | Demand events observed in rolling 4-week window for this day; always present |
 | `debug` | string | Empty string (satisfies existing packet contract) |
 
-All 7 days are always present. `{pfx}_measured_pct` and `{pfx}_gap_pct` are omitted rather than zero for days with no cold-starts yet, preventing false readings in Grafana before data accumulates. The flat structure means `navien_listener.py` can pass `payload['fields'] = data` directly to InfluxDB without any custom flattening — no listener changes needed.
+All 7 days are always present. `{pfx}_measured_pct` and `{pfx}_gap_pct` are omitted rather than zero for days with no demand events yet, preventing false readings in Grafana before data accumulates. The flat structure means `navien_listener.py` can pass `payload['fields'] = data` directly to InfluxDB without any custom flattening — no listener changes needed.
 
 ### Total Payload Size
 
@@ -591,8 +624,8 @@ Float fields (`bucket_fill_pct`, `{pfx}_predicted_pct`, etc.) are serialised usi
 ## What This Does Not Attempt
 
 - **No seasonal window** (the ±4-week rolling band from the Python script). All same-day-of-week data accumulates with recency weighting doing the discrimination. The seasonal window was mainly useful to limit InfluxDB query size; incremental on-device updates don't need it.
-- **No cost multipliers** (`COLD_START_WASTE_USD` / `RECIRC_WASTE_USD` scaling). These are constant multipliers that wash out in the normalized score. The `demand_weight` (0.5 / 1.0) is retained.
-- **No ongoing Pi schedule publishing**. After the one-time bootstrap the Pi cron job is disconnected. The device maintains its own schedule autonomously from live cold-start data.
+- **No on-device dollar-cost search.** `navien_schedule_learner.py` (the Pi reference script, including the `navien_bootstrap.py` path) now uses `COLD_START_WASTE_USD`/`RECIRC_WASTE_USD` for real: `buckets_to_windows()` searches each peak's window width and ranks which peaks earn one of the `MAX_SLOTS_PER_DAY` slots by net dollar savings (`_best_slot_for_peak()`, reusing `_score_day()`'s cost accounting) — see `archive/CostGroundedWindowSizing.md`. The on-device `PeakFinder.cpp` port intentionally does **not** replicate this dynamic search; it keeps fixed, hand-tuned constants (`PEAK_HALF_WIDTH_MIN`, `MIN_WEIGHTED_SCORE`, `MIN_SCORE_FLOOR`) retuned to match what the Python search converges to on real data, since true on-device $ search would require a new "elapsed weeks since last decay" concept to convert accumulating `weighted_score` into a rate comparable to the flat per-cycle gas cost. The `demand_weight` (0.5 / 1.0) event-weighting stage is unchanged on both sides.
+- **No ongoing Pi schedule publishing**. After the one-time bootstrap the Pi cron job is disconnected. The device maintains its own schedule autonomously from live demand event data.
 
 ---
 
@@ -694,7 +727,7 @@ def main():
     if not events:
         print("No events found. Check InfluxDB connection.")
         sys.exit(1)
-    print(f"Found {len(events)} cold-start events across full history.")
+    print(f"Found {len(events)} demand events across full history.")
 
     raw_counts, weighted_scores = nsl.events_to_minutes(events, verbose=args.verbose)
     week = nsl.buckets_to_windows(
@@ -726,7 +759,7 @@ if __name__ == "__main__":
 
 ### Step 2 — `navien_bucket_export.py` and `POST /buckets`
 
-Seeds `buckets.bin` on the device with the raw bucket data (cold-start counts and weighted scores) extracted from InfluxDB history. This gives the nightly on-device recompute a full dataset to work from immediately rather than starting from zero.
+Seeds `buckets.bin` on the device with the raw bucket data (demand event counts and weighted scores) extracted from InfluxDB history. This gives the nightly on-device recompute a full dataset to work from immediately rather than starting from zero.
 
 This is a **one-time bootstrap tool**, not an ongoing interface. After bootstrap the Pi plays no further role in schedule management.
 
@@ -884,7 +917,7 @@ Content-Type: application/json
 | `replace` | bool | `false` = add to existing (default); `true` = zero all buckets first |
 | `days[].dow` | int | Day of week, 0=Sunday .. 6=Saturday |
 | `days[].buckets[].b` | int | 5-minute bucket index (0–287) |
-| `days[].buckets[].raw` | int | Unweighted cold-start count to add |
+| `days[].buckets[].raw` | int | Unweighted demand event count to add |
 | `days[].buckets[].score` | float | Weighted score to add |
 
 **Response:**
@@ -915,7 +948,7 @@ After writing, sets `_recomputeRequested = true` so the Core 0 task runs peak-fi
 
 After bootstrap the Pi cron job is disabled. The device owns the schedule from this point forward.
 
-> **Timing constraint:** `POST /buckets` runs on Core 1 and mutates the in-RAM `BucketFile` directly. Core 0 owns the `BucketStore` for all normal operations and no mutex guards this path. Run bootstrap only when the device is quiet — no active recompute (avoid the 00:00–00:05 window) and no RS-485 activity that could trigger a concurrent cold-start flush via `updateBucket()`. In practice this means running the Pi scripts mid-morning on a weekday when the heater has been idle for at least 10 minutes.
+> **Timing constraint:** `POST /buckets` runs on Core 1 and mutates the in-RAM `BucketFile` directly. Core 0 owns the `BucketStore` for all normal operations and no mutex guards this path. Run bootstrap only when the device is quiet — no active recompute (avoid the 00:00–00:05 window) and no RS-485 activity that could trigger a concurrent demand event flush via `updateBucket()`. In practice this means running the Pi scripts mid-morning on a weekday when the heater has been idle for at least 10 minutes.
 
 ---
 
@@ -1003,9 +1036,9 @@ Constraints derived from `BEHAVIOR_SPEC.md` that govern how this feature is impl
 
 **Telnet command registered via existing `setupTelnetCommands()`.** `learnerStatus` is added to the existing `std::map`-based command registry alongside `memory`, `fsStat`, and other diagnostic commands.
 
-**`onNavienState()` is wired via RS485 packet callback, not direct call.** The cold-start detector hooks into the water packet callback registered in `setupNavienBroadcaster()`, consistent with how all other packet consumers observe RS485 state.
+**`onNavienState()` is wired via RS485 packet callback, not direct call.** The demand event detector hooks into the water packet callback registered in `setupNavienBroadcaster()`, consistent with how all other packet consumers observe RS485 state.
 
-**Monitor mode awareness.** `onNavienState()` fires and cold-starts are recorded regardless of mode — the learner accumulates data whether or not the device is in control. The nightly recompute result is **always applied** via `setWeekScheduleFromJSON()` unconditionally: it persists to NVS, updates `prog_send_data`, and triggers Eve EV sync. Heater control commands (recirculation on/off, power) are already gated behind `controlAvailable()` inside `stateChange()` — no additional guard is needed in the learner. The schedule is authoritative program state independent of whether the device is currently controlling the heater.
+**Monitor mode awareness.** `onNavienState()` fires and demand events are recorded regardless of mode — the learner accumulates data whether or not the device is in control. The nightly recompute result is **always applied** via `setWeekScheduleFromJSON()` unconditionally: it persists to NVS, updates `prog_send_data`, and triggers Eve EV sync. Heater control commands (recirculation on/off, power) are already gated behind `controlAvailable()` inside `stateChange()` — no additional guard is needed in the learner. The schedule is authoritative program state independent of whether the device is currently controlling the heater.
 
 ---
 
@@ -1014,12 +1047,12 @@ Constraints derived from `BEHAVIOR_SPEC.md` that govern how this feature is impl
 | Phase | Deliverable | Goal |
 |---|---|---|
 | 1 | `BucketStore` class | LittleFS read/write/atomic-update of `buckets.bin`. Test standalone. |
-| 2 | Cold-start detector | `onNavienState()` state machine. Unit-test with synthetic packet sequences. |
-| 3 | Core 0 task skeleton | IDLE → consume pending cold-start → write bucket file. Confirm zero RS-485 impact. |
+| 2 | Demand event detector | `onNavienState()` state machine. Unit-test with synthetic packet sequences. |
+| 3 | Core 0 task skeleton | IDLE → consume pending demand event → write bucket file. Confirm zero RS-485 impact. |
 | 4 | Peak-finding C++ port | Port `_find_peaks()` and `buckets_to_windows()`. Validate against known Python output. |
 | 5 | Full recompute integration | Wire RECOMPUTE states; Core 0 writes `_pendingScheduleJSON` + sets `_newScheduleReady`; Core 1 `loop()` is sole applier via `setWeekScheduleFromJSON()`. |
 | 6 | Annual decay | Year-check on startup and midnight transition. |
-| 7 | Efficiency tracking | Predicted efficiency in `RECOMPUTE_WRITE`; measured rolling window updated on Core 0 in `idleStep()` (via `recircAtStart` field in `PendingColdStart`); `learnerStatus` Telnet command. |
+| 7 | Efficiency tracking | Predicted efficiency in `RECOMPUTE_WRITE`; measured rolling window updated on Core 0 in `idleStep()` (via `recircAtStart` field in `PendingDemandEvent`); `learnerStatus` Telnet command. |
 | 8 | UDP broadcast | `broadcastUDP()` called after every `RECOMPUTE_WRITE` (nightly and manual); emits `"type":"learner"` JSON packet; verify receipt in InfluxDB. |
 | 9 | `POST /buckets` endpoint | ESP32 ingest handler: parse sparse JSON, merge/replace `_buckets`, write LittleFS, trigger recompute. |
 | 10 | `navien_bootstrap.py` | Pi Step 1: full-history peak-finding → push finished schedule via `POST /schedule`. |

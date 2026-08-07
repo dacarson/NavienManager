@@ -17,7 +17,7 @@ A dedicated **Hot Water** switch in HomeKit lets you trigger a 5-minute recircul
 Use the **Eve app** to define a weekly recirculation schedule — morning showers, evening dishes, whatever fits your routine. The scheduler runs recirculation only when you actually need it, keeping gas and water bills in check. Schedules are stored and fired in UTC internally, so an Eve connection from a remote timezone (e.g. a family member's phone while travelling) cannot corrupt your firing times.
 
 ### Let the system learn your schedule for you
-The ESP32 runs an **on-device schedule learner** that watches your actual hot-water usage in real time, detects cold-start events, and recomputes the recirculation schedule every night — all without needing a Raspberry Pi or a recurring cron job. After a one-time bootstrap to seed it with your existing InfluxDB history, it runs autonomously and self-corrects as your habits change.
+The ESP32 runs an **on-device schedule learner** that watches your actual hot-water usage in real time, detects hot-water demand events, and recomputes the recirculation schedule every night — all without needing a Raspberry Pi or a recurring cron job. After a one-time bootstrap to seed it with your existing InfluxDB history, it runs autonomously and self-corrects as your habits change.
 
 The web dashboard and Telnet CLI show live efficiency metrics — what fraction of your hot-water demand was pre-heated by the schedule, how that compares to the schedule's predicted coverage, and a per-day gap that highlights when habits have drifted.
 
@@ -74,7 +74,7 @@ The ESP32 itself learns your household's hot-water habits and recomputes the rec
 
 **How it works:**
 
-1. Every RS-485 packet is observed for **cold-start events** — the first hot-water tap after pipes have been cold for at least 10 minutes. These are the moments where pre-heating is most valuable.
+1. Every RS-485 packet is observed for **hot-water demand events** — the first tap-on after at least 10 minutes of inactivity, whether or not the pipe was actually cold at that moment. These are the moments where pre-heating is most valuable.
 2. Each event is weighted by **demand quality** (a long genuine draw counts more than a brief accidental tap) and stored into a compact per-day, per-5-minute-bucket histogram on flash (`buckets.bin`).
 3. Every night at midnight the device runs a **peak-finding pass** over the histogram, finds up to 3 dominant activity windows per day, and updates the active recirculation schedule immediately.
 4. An **annual decay** (applied on Jan 1) gradually down-weights older data so recent habit changes win over stale history.
@@ -84,7 +84,7 @@ The ESP32 itself learns your household's hot-water habits and recomputes the rec
 | Metric | What it means |
 |---|---|
 | **Predicted** | Fraction of demand buckets that fall inside (or within 15 min after) a scheduled slot |
-| **Measured** | Fraction of actual cold-start events that had recirculation already running — rolling 4-week window |
+| **Measured** | Fraction of actual demand events that had recirculation already running — rolling 4-week window |
 | **Gap** | Predicted − Measured: green < 10%, amber 10–25%, red > 25% |
 
 ```
@@ -93,7 +93,7 @@ Learner Status
   Last recompute:  2026-04-01 00:02  (8h ago)
   Bucket fill:     1621 / 2016 non-zero (80.4%)
 
-  Day         Predicted  Measured   Gap      Cold-starts (4wk)
+  Day         Predicted  Measured   Gap      Demand events (4wk)
   -----------------------------------------------------------------
   Sunday         79.1%      76.3%     -2.8%   18
   Monday         83.3%      81.0%     -2.3%   22
@@ -208,7 +208,7 @@ pip3 install influxdb requests
 | `FakeGatoHistoryService.*` | Eve history protocol |
 | `HomeSpanWeb.*` | Live status web page |
 | `NavienBroadcaster.*` | UDP broadcast of live packet data |
-| `NavienLearner.*` | On-device schedule learner (cold-start detection, peak-finding, efficiency tracking) |
+| `NavienLearner.*` | On-device schedule learner (demand-event detection, peak-finding, efficiency tracking) |
 | `TelnetCommands.*` | Telnet CLI commands |
 | `Logger/` | UDP listener, InfluxDB logger, Grafana templates, bootstrap and schedule learner scripts |
 

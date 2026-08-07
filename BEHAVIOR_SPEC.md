@@ -378,7 +378,7 @@ The page header firmware version (controller / panel) is displayed as a sub-head
 
 The system log table (HomeSpan's built-in `tab1`) is hidden; only the custom status content is shown.
 
-A **Learner Status** section is appended to the page by `NavienLearner::appendStatusHTML()`. It renders the same data as `learnerStatus` Telnet: last recompute time, bucket fill, and a per-day table with Predicted %, Measured %, Gap, and 4-week cold-start count. The Gap column is colour-coded: green (< 10%), amber (10–25%), red (> 25%). The HTML is built on demand into the existing page buffer and is not cached.
+A **Learner Status** section is appended to the page by `NavienLearner::appendStatusHTML()`. It renders the same data as `learnerStatus` Telnet: last recompute time, bucket fill, and a per-day table with Predicted %, Measured %, Gap, and 4-week demand-event count. The Gap column is colour-coded: green (< 10%), amber (10–25%), red (> 25%). The HTML is built on demand into the existing page buffer and is not cached.
 
 ---
 
@@ -459,12 +459,12 @@ All per-day fields use a 3-letter day prefix: `sun`, `mon`, `tue`, `wed`, `thu`,
 | Field | Type | Description |
 |---|---|---|
 | `last_recompute` | int | Unix timestamp of the completed recompute |
-| `bucket_fill_pct` | float (1 dp) | Percentage of 2016 buckets (7 days × 288 five-minute slots) that have at least one cold-start recorded |
+| `bucket_fill_pct` | float (1 dp) | Percentage of 2016 buckets (7 days × 288 five-minute slots) that have at least one demand event recorded |
 | `{pfx}_slots` | string | Recirculation schedule slots for that day, encoded as `"HH:MM-HH:MM,..."` (empty string if no slots were found) |
 | `{pfx}_predicted_pct` | float (1 dp) | Predicted efficiency: fraction of schedulable demand buckets (those inside a slot OR within 15 min after a slot end) that fall inside a slot; omitted if bucket data is insufficient |
-| `{pfx}_measured_pct` | float (1 dp) | Measured efficiency from the rolling 4-week cold-start window; omitted if no cold-starts have been observed yet for that day |
+| `{pfx}_measured_pct` | float (1 dp) | Measured efficiency from the rolling 4-week demand-event window; omitted if no demand events have been observed yet for that day |
 | `{pfx}_gap_pct` | float (1 dp) | `predicted - measured`; omitted if either value is unavailable |
-| `{pfx}_cold_starts_4wk` | int | Cold-starts observed for that day across the rolling 4-week window; always present |
+| `{pfx}_cold_starts_4wk` | int | Demand events observed for that day across the rolling 4-week window; field name kept as `cold_starts_4wk` for InfluxDB/Grafana compatibility; always present |
 | `debug` | string | Always empty (`""`) |
 
 Float fields (`bucket_fill_pct`, `{pfx}_predicted_pct`, etc.) use `serialized(String(x, 1))` and appear as bare JSON numbers (e.g. `7.0`), not quoted strings. Python's `json.loads()` parses them as floats; InfluxDB stores them as float fields.
@@ -543,7 +543,7 @@ The endpoint is started in `setupScheduleEndpoint()` (called from `onWifiConnect
 - `replace` — `false` (default): merge into existing data; `true`: zero all buckets first.
 - `days[].dow` — day of week, 0 = Sunday … 6 = Saturday.
 - `days[].buckets[].b` — 5-minute bucket index (0–287).
-- `days[].buckets[].raw` — unweighted cold-start count to add.
+- `days[].buckets[].raw` — unweighted demand-event count to add.
 - `days[].buckets[].score` — weighted score to add.
 - Only non-zero buckets need be included; absent buckets are unchanged (merge) or zero (replace).
 
@@ -584,23 +584,22 @@ Processing order:
 
 `Logger/navien_schedule_learner.py` learns a recirculation schedule from InfluxDB history and pushes it to the ESP32. It runs in five steps:
 
-**Step 1 — Fetch cold-start events**
+**Step 1 — Fetch demand events**
 
 Queries InfluxDB for `MAX(consumption_active)` and `MAX(recirculation_running)` from the `water` measurement at **10-second resolution** (`GROUP BY time(10s) FILL(none)`). Queries cover a **rolling ±`window_weeks` (default 4) seasonal band** around today's calendar date in each configured year, so only seasonally relevant data is used.
 
-For each year, cold-start events are extracted: the first active bucket after ≥ `cold_gap_minutes` (default 10) of inactivity. Each event is assigned a **combined weight** = `recency_weight × demand_weight × cost_multiplier`:
+For each year, hot water demand events are extracted: the first active bucket after ≥ `cold_gap_minutes` (default 10) of inactivity, regardless of whether the pipe was actually cold at that moment — see `demand_weight` below. Each event is assigned a **combined weight** = `recency_weight × demand_weight`:
 
-- `demand_weight` depends on whether recirculation was running at the cold-start and the run duration (measured in 10-second buckets):
+- `demand_weight` depends on whether recirculation was running at the start of the event and the run duration (measured in 10-second buckets):
   - `recirculation_running=0`, duration < 6 buckets (< 1 min): `0.5` (short/accidental tap)
   - `recirculation_running=0`, duration ≥ 6 buckets: `1.0` (genuine cold-pipe demand)
   - `recirculation_running=1`, duration < 3 buckets (< 30s): `0.0` (discarded)
   - `recirculation_running=1`, duration ≥ 3 buckets: `1.0` (genuine demand, pipes already hot)
-- `cost_multiplier` is normalised to [0, 1] using `COLD_START_WASTE_USD` (≈ $0.097 per cold-start at 8 L/min × 3 min × water rate) as the reference ceiling. Short cold-pipe taps get a halved cost multiplier.
 - `recency_weight`: per-year multipliers, most-recent first (default `[3, 2]` — current year ×3, previous year ×2). Configurable via `--recency_weights`.
 
 **Step 2 — Bin into per-day buckets**
 
-Cold-start events are binned into two parallel structures keyed by day-of-week (0 = Sunday … 6 = Saturday) and 5-minute bucket:
+Demand events are binned into two parallel structures keyed by day-of-week (0 = Sunday … 6 = Saturday) and 5-minute bucket:
 - `raw_counts[dow][bucket]` — unweighted hit count (used for `min_occurrences` filter)
 - `weighted_scores[dow][bucket]` — sum of combined weights (used for score threshold)
 
@@ -611,16 +610,16 @@ For each day, dominant activity peaks are found using:
 2. Find local maxima with a minimum `min_peak_separation` (default 45) minute separation.
 3. Greedy non-maximum suppression: accept peaks by descending score, reject those within `min_peak_separation` of an already-accepted peak.
 
-An **adaptive threshold** loop starts at `min_weighted_score` (default 6.0) and steps down by 1.0 until `MAX_SLOTS_PER_DAY` (3) peaks are found or `min_score_floor` (default 3.0) is reached. A second pass also relaxes `min_occurrences` by 1 if needed.
+An **adaptive threshold** loop starts at `min_weighted_score` (default 6.0) and steps down by 1.0 until `MAX_SLOTS_PER_DAY` (3) peaks are found or `min_score_floor` (default 3.0) is reached. A second pass also relaxes `min_occurrences` by 1 if needed. This is purely a statistical noise filter — it decides which peaks are a real recurring pattern, not how wide or valuable a window is.
 
-Around each accepted peak, a ± `peak_half_width` (default 30) minute window is built. The window start is shifted back by `preheat_minutes` (default = `COLD_PIPE_DRAIN_MINUTES` = 3.0 min from config.py). All boundaries are rounded to the nearest 10-minute increment to match the firmware's 10-minute-resolution encoding.
+For each accepted peak, `_best_slot_for_peak()` searches candidate half-widths (5-minute steps, up to `peak_half_width`, default 30) and picks the one maximizing net dollar benefit — `covered_per_day × COLD_START_WASTE_USD − gas_waste_usd` (see `_score_day()`), evaluated against demand within `±min_peak_separation` of the peak so neighbouring peaks don't distort the result. The window start is shifted back by `preheat_minutes` (default = `COLD_PIPE_DRAIN_MINUTES` = 3.0 min from config.py); all boundaries are rounded to the nearest 10-minute increment to match the firmware's 10-minute-resolution encoding. Peaks whose best net benefit is ≤ 0 are dropped; survivors are ranked by net dollar benefit (not raw occurrence score) and the top `MAX_SLOTS_PER_DAY` are kept — this is where `COLD_START_WASTE_USD` (≈$0.097/demand event) vs `RECIRC_WASTE_USD` (≈$0.0024/wasted cycle) actually decides which peaks earn a slot and how wide it is.
 
 **Step 4 — Print / estimate**
 
 Always prints the learned schedule. With `--verbose`:
-- Shows per-day peak-finding detail.
-- Prints a **slot width comparison** table (±25 min vs ±30 min) showing efficiency % for each option.
-- Prints an **expected efficiency table** for the coming week: of schedulable cold-starts (those falling inside a slot or within `RECIRC_WINDOW_MINUTES` = 15 min after slot end), what fraction are covered; missed-water-waste and wasted-gas-cycle costs in USD.
+- Shows per-day peak-finding and per-peak width-search detail (chosen half-width and net $ savings per candidate).
+- Prints a **slot width comparison** table (≤±25 min vs ≤±30 min search cap) showing efficiency % for each cap.
+- Prints an **expected efficiency table** for the coming week: of schedulable demand events (those falling inside a slot or within `RECIRC_WINDOW_MINUTES` = 15 min after slot end), what fraction are covered; missed-water-waste and wasted-gas-cycle costs in USD.
 
 `--debug_day <DayName>` shows a detailed per-bucket breakdown for one day including all bucket hit counts, scores, filtering, and peak-selection results, then exits.
 
@@ -628,7 +627,7 @@ Always prints the learned schedule. With `--verbose`:
 
 Pass `--push` to POST the schedule to `http://<esp32_host>:<esp32_port>/schedule`. By default the script is a dry run and prints the JSON that would be sent without pushing.
 
-**Timezone handling:** Detects system timezone (`/etc/timezone` on the Pi). Cold-start events are converted to **local** time before binning; `dow` and `minute_of_day` are local. Schedule output posted to `POST /schedule` contains **local** hours/minutes (device converts to UTC storage via `convertEveSlotsToUTC`). `navien_bucket_export.py` bins into **UTC** buckets to match on-device `buckets.bin` (schema 2).
+**Timezone handling:** Detects system timezone (`/etc/timezone` on the Pi). Demand events are converted to **local** time before binning; `dow` and `minute_of_day` are local. Schedule output posted to `POST /schedule` contains **local** hours/minutes (device converts to UTC storage via `convertEveSlotsToUTC`). `navien_bucket_export.py` bins into **UTC** buckets to match on-device `buckets.bin` (schema 2).
 
 **Defaults and CLI flags:**
 
@@ -641,7 +640,7 @@ Pass `--push` to POST the schedule to `http://<esp32_host>:<esp32_port>/schedule
 | `--esp32_port` | `8080` | ESP32 HTTP port |
 | `--window_weeks` | `4` | Half-width of rolling seasonal window (±weeks) |
 | `--recency_weights` | `3 2` | Per-year multipliers, most-recent first |
-| `--cold_gap_minutes` | `10` | Inactivity gap (min) that defines a cold-start |
+| `--cold_gap_minutes` | `10` | Inactivity gap (min) that defines a new demand event |
 | `--min_duration_genuine` | `6` | Min 10s buckets (cold pipes) for full weight |
 | `--min_duration_recirc` | `3` | Min 10s buckets (recirc on) to count at all |
 | `--preheat_minutes` | `3` | Start recirc this many minutes before predicted demand |
@@ -667,11 +666,11 @@ Dependencies: `pip3 install influxdb requests`
 
 ## On-Device Schedule Learner
 
-The `NavienLearner` class autonomously learns and recomputes the recirculation schedule from live RS-485 observations, eliminating the need for a recurring Pi cron job after an initial bootstrap. It detects cold-start events in real time on Core 1, accumulates bucket data on Core 0 via a FreeRTOS queue, recomputes the schedule nightly, and hands the result to `FakeGatoScheduler` exactly as the Pi's `POST /schedule` does.
+The `NavienLearner` class autonomously learns and recomputes the recirculation schedule from live RS-485 observations, eliminating the need for a recurring Pi cron job after an initial bootstrap. It detects demand events in real time on Core 1, accumulates bucket data on Core 0 via a FreeRTOS queue, recomputes the schedule nightly, and hands the result to `FakeGatoScheduler` exactly as the Pi's `POST /schedule` does.
 
-### Cold-Start Detection
+### Demand-Event Detection
 
-`NavienLearner::onNavienState()` is called from the water packet callback (Core 1) on every RS-485 packet. A cold-start is detected when `consumption_active` transitions 0→1 after at least `cold_gap` of inactivity:
+`NavienLearner::onNavienState()` is called from the water packet callback (Core 1) on every RS-485 packet. A new demand event is detected when `consumption_active` transitions 0→1 after at least `cold_gap` of inactivity:
 
 - **`cold_gap`** = 600 seconds (10 minutes) — inactivity window that separates independent demand events.
 - **`min_duration_genuine`** = 60 seconds — minimum tap duration (no recirc) to count at full weight.
@@ -694,9 +693,9 @@ Additionally, pipes stay hot for up to 18 minutes after a recirc slot ends (`REC
 
 `recirculation_active` comes from the `recirculation_enabled` byte, independent of `flow_state`, so it does not clear atomically with `consumption_active` — no previous-packet lookback is needed.
 
-> **Diagnostic:** if Measured efficiency shows 0.0% for days with a significant Cold-starts count, the cause is that `_recircAtStart` is never true. Verify: (1) `onNavienState()` receives `water->recirculation_active` (not `water->recirculation_running`); (2) `_lastRecircActiveTime` is updated whenever `recirculation_active` is true; (3) `_recircAtStart` checks both `recirculation_active` and the 15-minute window.
+> **Diagnostic:** if Measured efficiency shows 0.0% for days with a significant demand-event count, the cause is that `_recircAtStart` is never true. Verify: (1) `onNavienState()` receives `water->recirculation_active` (not `water->recirculation_running`); (2) `_lastRecircActiveTime` is updated whenever `recirculation_active` is true; (3) `_recircAtStart` checks both `recirculation_active` and the 15-minute window.
 
-**Queue failure:** If the FreeRTOS cold-start queue cannot be created, `begin()` sets `_learnerDisabled = true` and returns false. All subsequent `onNavienState()` calls return immediately. The rest of the firmware continues normally using the existing NVS/Eve schedule.
+**Queue failure:** If the FreeRTOS demand-event queue cannot be created, `begin()` sets `_learnerDisabled = true` and returns false. All subsequent `onNavienState()` calls return immediately. The rest of the firmware continues normally using the existing NVS/Eve schedule.
 
 ### Background Recompute — Core 0 Task
 
@@ -742,11 +741,11 @@ Two efficiency metrics are maintained continuously and cached for display.
 - A bucket is *covered* if it falls inside a slot.
 - A bucket is *schedulable* if it falls inside a slot **or** within 15 minutes after a slot ends (the hot-water window).
 - `predicted% = covered / schedulable × 100`
-- Predicted coverage is evaluated per **local** day using the local-day bucket view and local slot times. `_predictedEfficiency[dow]` uses the same Sun–Sat index as the learned schedule. Measured cold-start counts in the table remain **UTC** `tm_wday` (live ingest uses `gmtime()`).
+- Predicted coverage is evaluated per **local** day using the local-day bucket view and local slot times. `_predictedEfficiency[dow]` uses the same Sun–Sat index as the learned schedule. Measured demand-event counts in the table remain **UTC** `tm_wday` (live ingest uses `gmtime()`).
 
-**Measured efficiency** — rolling 4-week window of actual observations. Each cold-start event records whether recirculation was already running at tap-open time (`recircAtStart`). The counters (`total[dow]` and `covered[dow]`) are updated on Core 0 when each `PendingColdStart` is consumed from the queue. On Sunday midnight the oldest week slot is zeroed and the head advances.
+**Measured efficiency** — rolling 4-week window of actual observations. Each demand event records whether recirculation was already running at tap-open time (`recircAtStart`). The counters (`total[dow]` and `covered[dow]`) are updated on Core 0 when each `PendingDemandEvent` is consumed from the queue. On Sunday midnight the oldest week slot is zeroed and the head advances.
 
-`measured% = covered / total × 100` summed across all 4 weeks per day. Days with no cold-starts in the window report N/A rather than zero.
+`measured% = covered / total × 100` summed across all 4 weeks per day. Days with no demand events in the window report N/A rather than zero.
 
 **Measured efficiency persistence** — the window (`_measured[4]` + `_measuredHead`) is persisted to `/navien/measured.bin` on LittleFS and reloaded on `begin()`, so it survives reboots and OTA firmware updates. The file uses the same atomic `.tmp` → rename write strategy as `buckets.bin`. It is saved automatically at three points:
 - **Sunday midnight** — when `advanceMeasuredWeek()` rotates the window.
@@ -765,7 +764,7 @@ gap[dow] = predicted[dow] - measured[dow]
 | 10–25% | Normal drift — nightly recompute should self-correct within days |
 | > 25% | Habits have shifted significantly; consider rerunning bootstrap |
 | Predicted N/A | Insufficient bucket data for this day |
-| Measured N/A | No cold-starts observed yet in the rolling window |
+| Measured N/A | No demand events observed yet in the rolling window |
 
 ### Bootstrap
 
@@ -778,7 +777,7 @@ Without seeding, the device starts cold: `buckets.bin` is empty and the nightly 
 
 Both steps must be run in order after first flash. They are also used when `buckets.bin` is suspected corrupt or after parameter re-tuning.
 
-**When to run bootstrap:** first flash, LittleFS wiped, corrupt `buckets.bin` suspected, or after algorithm parameter changes. Run only when the device is quiet — avoid the 00:00–00:05 recompute window and any time with active cold-start events being processed.
+**When to run bootstrap:** first flash, LittleFS wiped, corrupt `buckets.bin` suspected, or after algorithm parameter changes. Run only when the device is quiet — avoid the 00:00–00:05 recompute window and any time with active demand events being processed.
 
 **Fallback without bootstrap:** if bootstrap is skipped, meaningful peaks emerge after ~2 weeks of live data; the schedule stabilizes after ~4 weeks. The existing NVS/Eve schedule (if any) remains active and unchanged until the first successful recompute.
 

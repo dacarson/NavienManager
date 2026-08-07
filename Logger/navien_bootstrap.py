@@ -93,18 +93,25 @@ def main():
     # Bootstrap always uses a full-year window so all available history is included
     args.window_weeks = 52
 
+    # Number of historical instances of a given weekday inside the queried
+    # window (2 * window_weeks per year * years of recency weights) — now
+    # load-bearing for buckets_to_windows()'s $-based window search, not just
+    # a reporting figure, so it must reflect the actual window_weeks=52 here
+    # rather than navien_schedule_learner's ±4-week default.
+    historical_days = 2 * args.window_weeks * len(args.recency_weights)
+
     today = _datetime.now(_timezone.utc).date()
     years = [today.year - i for i in range(len(args.recency_weights))]
     print(f"Bootstrap mode: window_weeks=52 (full year per recency entry)")
     print(f"Years: {years}  Weights: {args.recency_weights}")
 
     print(f"Querying InfluxDB ({args.influxdb_host}:{args.influxdb_port}/{args.influxdb_db}) "
-          f"for full-history cold-start events...")
+          f"for full-history demand events...")
     events = nsl.fetch_consumption_events(args)
     if not events:
         print("No events found. Check InfluxDB connection.")
         sys.exit(1)
-    print(f"Found {len(events)} cold-start events across full history.")
+    print(f"Found {len(events)} demand events across full history.")
 
     raw_counts, weighted_scores = nsl.events_to_minutes(events, verbose=args.verbose)
 
@@ -117,11 +124,12 @@ def main():
         min_peak_separation=args.min_peak_separation,
         min_weighted_score=args.min_weighted_score,
         min_score_floor=args.min_score_floor,
+        historical_days=historical_days,
         verbose=args.verbose,
     )
 
     nsl.print_schedule(week, raw_counts=raw_counts, weighted_scores=weighted_scores,
-                       verbose=args.verbose, args=args)
+                       verbose=args.verbose, historical_days=historical_days, args=args)
 
     if args.push and not args.dry_run:
         nsl.push_schedule(week, args)

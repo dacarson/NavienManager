@@ -35,7 +35,7 @@ import navien_schedule_learner as nsl
 
 def build_bucket_payload(args, replace=False):
     """
-    Fetch cold-start events from InfluxDB, convert them to 5-minute buckets,
+    Fetch hot water demand events from InfluxDB, convert them to 5-minute buckets,
     and build the sparse JSON payload for POST /buckets.
 
     Returns a dict ready for json.dumps().
@@ -179,7 +179,7 @@ def main():
     print(f"Years: {years}  Weights: {args.recency_weights}")
 
     print(f"Querying InfluxDB ({args.influxdb_host}:{args.influxdb_port}/{args.influxdb_db}) "
-          f"for full-history cold-start events...")
+          f"for full-history demand events...")
 
     payload = build_bucket_payload(args, replace=args.replace)
 

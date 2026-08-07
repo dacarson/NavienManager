@@ -89,7 +89,12 @@ DEFAULT_RECENCY_WEIGHTS = [3, 2]
 
 # ---------------------------------------------------------------------------
 # Cost model (from config.py)
-# Used to scale demand weights by the dollar value of getting recirc right/wrong.
+# COLD_START_WASTE_USD and RECIRC_WASTE_USD are the real dollar values that
+# buckets_to_windows()'s per-peak width search (see _best_slot_for_peak) weighs
+# against each other to decide how wide a recirc window should be and whether
+# a peak is worth a slot at all. A cold-start (~$0.097) costs roughly 40x a
+# single wasted recirc cycle (~$0.0024), so the search is biased toward
+# scheduling recirc rather than withholding it, but not unconditionally.
 # ---------------------------------------------------------------------------
 # Wasted water cost per cold-start: 3 min of drain at typical residential flow.
 # We use a representative 8 L/min (mid-range between handwash ~3 and shower ~13).
@@ -106,10 +111,6 @@ RECIRC_PARTIAL_KCAL_HR  = 5000.0
 RECIRC_WASTE_USD        = (RECIRC_CYCLE_MINUTES / 60.0
                            * RECIRC_PARTIAL_KCAL_HR
                            * config.GAS_RATE_USD_PER_KCAL)  # ~$0.0024 per wasted cycle
-
-# Normalise both costs to [0,1] so they act as multipliers on demand_weight.
-# We use the cold-start waste (larger of the two) as the reference ceiling.
-_COST_REF               = COLD_START_WASTE_USD              # reference = max possible saving
 
 DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday",
              "Thursday", "Friday", "Saturday"]
@@ -158,19 +159,21 @@ def _format_influx_time_utc(dt):
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _extract_cold_starts(points, local_tz, recency_weight, cold_gap_minutes,
-                          min_duration_genuine, min_duration_recirc,
-                          verbose=False):
+def _extract_demand_events(points, local_tz, recency_weight, cold_gap_minutes,
+                            min_duration_genuine, min_duration_recirc,
+                            verbose=False):
     """
-    Extract cold-start events from a chronologically sorted list of dicts,
+    Extract hot water demand events from a chronologically sorted list of dicts,
     each containing:
         "time"               — RFC3339 UTC timestamp string (1-minute resolution)
         "consumption_active" — 1 if tap is on
         "recirculation_running" — 1 if recirculation pump was running at that minute
 
-    A cold-start is the first active minute after >= cold_gap_minutes of inactivity.
-    Each cold-start is assigned a combined weight = recency_weight × demand_weight,
-    where demand_weight reflects how much this event is worth scheduling for:
+    A demand event is the first active minute after >= cold_gap_minutes of
+    inactivity — i.e. the start of a burst of tap usage, whether or not the
+    pipe was actually cold at that moment (see recirc_on below). Each event is
+    assigned a combined weight = recency_weight × demand_weight, where
+    demand_weight reflects how much this event is worth scheduling for:
 
         recirculation_running=0, run_duration < min_duration_genuine  → 0.5
             (accidental/trivial tap with cold pipes — still count, but half weight)
@@ -183,7 +186,7 @@ def _extract_cold_starts(points, local_tz, recency_weight, cold_gap_minutes,
              compensating for the artificially shortened duration)
 
     Run duration is measured as the number of consecutive active minutes
-    following the cold-start before a gap appears.
+    following the demand event before a gap appears.
 
     Returns a list of (dt_local, combined_weight) tuples.
     """
@@ -216,7 +219,7 @@ def _extract_cold_starts(points, local_tz, recency_weight, cold_gap_minutes,
     if current_run:
         runs.append(current_run)
 
-    cold_starts = []
+    demand_events = []
     for run in runs:
         start_ts  = run[0]
         duration  = len(run)                        # buckets of continuous activity (10s each)
@@ -236,55 +239,40 @@ def _extract_cold_starts(points, local_tz, recency_weight, cold_gap_minutes,
         if demand_weight == 0.0:
             continue
 
-        # Cost multiplier: scale demand_weight by the dollar value of this event.
-        # Cold-pipe event → scheduling recirc here would save COLD_START_WASTE_USD.
-        # Recirc-hot event → scheduling recirc here has already proven useful;
-        #   cost saving is proportional to the saved drain waste.
-        # In both cases we normalise to [0, 1] against _COST_REF so the multiplier
-        # sits naturally in the same range as the existing 0.5/1.0 demand weights.
-        if recirc_on:
-            # Pipes were hot — recirc worked; cost value = water saved at this tap
-            cost_multiplier = min(1.0, COLD_START_WASTE_USD / _COST_REF)   # = 1.0 by definition
-        else:
-            # Pipes were cold — cost value = what would have been saved by recirc
-            cost_multiplier = min(1.0, COLD_START_WASTE_USD / _COST_REF)   # = 1.0 for genuine
-            # Short taps that didn't need hot water still get reduced cost value
-            if duration < min_duration_genuine:
-                cost_multiplier *= 0.5   # already half-weighted; cost also halved
-
-        combined_weight = recency_weight * demand_weight * cost_multiplier
+        combined_weight = recency_weight * demand_weight
 
         ts_str2  = start_ts.rstrip("Z")
         dt_utc   = datetime.fromisoformat(ts_str2).replace(tzinfo=timezone.utc)
         dt_local = dt_utc.astimezone(local_tz)
-        cold_starts.append((dt_local, combined_weight))
+        demand_events.append((dt_local, combined_weight))
 
         if verbose:
             tag = ("recirc-on" if recirc_on else "cold-pipe")
             dur_sec = duration * 10
             dur_str = f"{dur_sec//60}min{dur_sec%60:02d}s" if dur_sec < 3600 else f"{dur_sec//3600}h{(dur_sec%3600)//60}min"
-            print(f"  cold-start {dt_local.strftime('%Y-%m-%d %H:%M')} "
+            print(f"  demand-event {dt_local.strftime('%Y-%m-%d %H:%M')} "
                   f"dur={dur_str} {tag} demand_w={demand_weight:.1f} "
-                  f"cost_mult={cost_multiplier:.3f} combined_w={combined_weight:.2f}")
+                  f"combined_w={combined_weight:.2f}")
 
-    return cold_starts
+    return demand_events
 
 
 def fetch_consumption_events(args, local_tz=None):
     """
-    Returns a list of (local_datetime, weight) tuples representing cold-start
-    events: the first tap-on after ≥cold_gap_minutes of inactivity, across
-    the rolling ±window_weeks seasonal band for all configured years.
+    Returns a list of (local_datetime, weight) tuples representing hot water
+    demand events: the first tap-on after ≥cold_gap_minutes of inactivity,
+    across the rolling ±window_weeks seasonal band for all configured years.
 
-    Why cold-starts only:
-      Recirculation is only beneficial before a cold-start — warming pipes that
-      are already warm from ongoing use wastes gas with no benefit to the user.
-      By learning WHEN cold-starts occur (characteristic morning shower time,
-      dinner prep, bedtime routine), we schedule recirculation to fire 5 minutes
-      before each of those predicted first-tap times.
+    Why the first tap-on of a burst, not every tap-on:
+      Recirculation only needs to be running once, before the burst starts —
+      once pipes are warm from that use, later taps within the same burst
+      don't need a fresh recirc cycle. By learning WHEN these demand events
+      occur (characteristic morning shower time, dinner prep, bedtime
+      routine), we schedule recirculation to fire 5 minutes before each of
+      those predicted first-tap times.
 
-    Each year's cold-starts are weighted by recency so that this year's habits
-    dominate the learned schedule.
+    Each year's demand events are weighted by recency so that this year's
+    habits dominate the learned schedule.
     """
     from influxdb import InfluxDBClient
     from datetime import date
@@ -306,7 +294,7 @@ def fetch_consumption_events(args, local_tz=None):
     if args.verbose:
         print(f"[influx] Rolling window: ±{args.window_weeks} weeks around "
               f"{today.month:02d}-{today.day:02d}")
-        print(f"[influx] Cold-start gap threshold: {args.cold_gap_minutes} minutes")
+        print(f"[influx] Demand-event gap threshold: {args.cold_gap_minutes} minutes")
         for yr, w in year_weights:
             print(f"  Year {yr}: weight ×{w}")
 
@@ -318,7 +306,7 @@ def fetch_consumption_events(args, local_tz=None):
         # Fetch consumption_active AND recirculation_running at 10-second resolution.
         # Query in short calendar windows so each response stays under InfluxDB's
         # max-select-point limit; overlap preserves cold-gap / run detection across
-        # chunk boundaries.  Results are merged by timestamp before cold-start extraction.
+        # chunk boundaries.  Results are merged by timestamp before demand-event extraction.
         if args.verbose:
             print(f"[influx] {year}: {start_str[:10]} → {end_str[:10]}")
 
@@ -363,18 +351,18 @@ def fetch_consumption_events(args, local_tz=None):
 
         points = sorted(points_by_time.values(), key=lambda p: p["time"])
         active_count = sum(1 for p in points if p.get("consumption_active") == 1)
-        cold_starts = _extract_cold_starts(
+        demand_events = _extract_demand_events(
             points, local_tz, weight,
             cold_gap_minutes=args.cold_gap_minutes,
             min_duration_genuine=args.min_duration_genuine,
             min_duration_recirc=args.min_duration_recirc,
             verbose=args.verbose,
         )
-        all_events.extend(cold_starts)
+        all_events.extend(demand_events)
 
         if args.verbose:
             print(f"  → {active_count} active minutes → "
-                  f"{len(cold_starts)} cold-start events")
+                  f"{len(demand_events)} demand events")
 
     return all_events
 
@@ -476,20 +464,90 @@ def _find_peaks(score_map, min_separation, smooth_radius=2):
     return sorted(accepted, key=lambda x: x[0])   # re-sort by time
 
 
+def _best_slot_for_peak(day_raw, day_weighted, peak_bucket, preheat_minutes,
+                         min_peak_separation, historical_days, hot_window_min=15,
+                         width_step=5, max_half_width=None):
+    """
+    Search candidate window half-widths around a single peak and pick the one
+    that maximizes net dollar benefit:
+
+        net_benefit = covered_per_day * COLD_START_WASTE_USD - gas_waste_usd
+
+    i.e. the dollar value of the demand this window actually covers
+    (via _score_day()'s covered_per_day) minus the gas cost of the empty
+    recirc cycles it runs (_score_day()'s gas_waste_usd). Widening the window
+    only helps once it starts capturing real demand; past that point the added
+    empty cycles cost more than the marginal demand it's likely to catch.
+
+    Deliberately does NOT compare against _score_day() run with slots=[]: that
+    "schedulable" concept is defined *relative to* the given slots (a cold-
+    start only counts as schedulable if it falls inside or near one), so a
+    zero-slot baseline always scores $0 regardless of how much demand exists —
+    it can't be used as a "cost of doing nothing" reference.
+
+    The search is scoped to a local neighbourhood (± min_peak_separation) around
+    the peak so a different peak's demand doesn't distort this peak's cost
+    evaluation — each peak is judged only against the demand it could
+    plausibly cover.
+
+    Returns (best_half_width, best_slot_dict, best_net_benefit_usd). When no
+    candidate width has positive net benefit, best_half_width and
+    best_slot_dict are None and best_net_benefit_usd is 0.0.
+    """
+    if max_half_width is None:
+        max_half_width = min_peak_separation
+
+    lo = max(0, peak_bucket - min_peak_separation)
+    hi = min(1439, peak_bucket + min_peak_separation)
+    local_raw      = {b: c for b, c in day_raw.items()      if lo <= b <= hi}
+    local_weighted = {b: s for b, s in day_weighted.items() if lo <= b <= hi}
+
+    best_width   = None
+    best_slot    = None
+    best_benefit = 0.0   # not worth a slot unless some width beats "no slot"
+
+    for half_width in range(width_step, max_half_width + 1, width_step):
+        win_start = max(0,    peak_bucket - half_width)
+        win_end   = min(1439, peak_bucket + half_width)
+        start_min = max(0,    win_start   - preheat_minutes)
+        start_min = round(start_min / 10) * 10
+        win_end   = min(1430, round(win_end / 10) * 10)
+        slot = {
+            "startHour":   start_min // 60,
+            "startMinute": start_min % 60,
+            "endHour":     win_end   // 60,
+            "endMinute":   win_end   % 60,
+        }
+        m = _score_day(local_raw, local_weighted, [slot], historical_days, hot_window_min)
+        benefit = (m["covered_per_day"] * COLD_START_WASTE_USD) - m["gas_waste_usd"]
+        if benefit > best_benefit:
+            best_benefit, best_width, best_slot = benefit, half_width, slot
+
+    return best_width, best_slot, best_benefit
+
+
 def buckets_to_windows(raw_counts, weighted_scores, gap_minutes, min_occurrences,
                         preheat_minutes, peak_half_width=20, min_peak_separation=45,
                         min_weighted_score=DEFAULT_MIN_WEIGHTED_SCORE,
                         min_score_floor=DEFAULT_MIN_SCORE_FLOOR,
                         score_step=1.0,
+                        historical_days=16, hot_window_min=15,
                         verbose=False):
     """
-    For each day-of-week, uses peak-finding to identify dominant activity clusters.
+    For each day-of-week, uses peak-finding to identify dominant activity clusters,
+    then sizes and ranks the window around each peak by real dollar cost.
 
     Adaptive threshold: starts at min_weighted_score and steps down by score_step
     until MAX_SLOTS_PER_DAY peaks are found or min_score_floor is reached. This
-    ensures days with irregular patterns (e.g. weekends) still produce useful slots
-    rather than returning fewer slots than available, while regular weekdays with
-    strong peaks satisfy the threshold immediately without relaxation.
+    is a statistical noise filter — it just decides which peaks are a real
+    recurring pattern worth considering, not how wide or valuable a window is.
+
+    For each surviving peak, _best_slot_for_peak() searches window half-widths
+    up to peak_half_width and picks the one that minimizes
+    missed_waste_usd + gas_waste_usd (see _score_day). Peaks are then ranked by
+    net dollar savings (not raw occurrence score) and the top MAX_SLOTS_PER_DAY
+    are kept — this is where COLD_START_WASTE_USD vs RECIRC_WASTE_USD actually
+    decides which peaks earn a slot and how wide it is.
 
     Returns a list of 7 dicts, each with a 'slots' list of:
         { startHour, startMinute, endHour, endMinute }
@@ -539,8 +597,28 @@ def buckets_to_windows(raw_counts, weighted_scores, gap_minutes, min_occurrences
             week.append({"slots": []})
             continue
 
-        # Rank by score, keep top MAX_SLOTS_PER_DAY
-        ranked = sorted(peaks, key=lambda p: p[1], reverse=True)
+        # For each statistically-real peak, search for the $-optimal window
+        # width (up to peak_half_width) and its net dollar savings vs leaving
+        # it unscheduled. Drop peaks that aren't worth a slot at all.
+        candidates = []
+        for (peak_bucket, peak_score) in peaks:
+            half_width, slot, net_savings = _best_slot_for_peak(
+                day_raw, day_weighted, peak_bucket, preheat_minutes,
+                min_peak_separation, historical_days, hot_window_min,
+                max_half_width=peak_half_width,
+            )
+            if slot is not None and net_savings > 0:
+                candidates.append((peak_bucket, peak_score, half_width, slot, net_savings))
+
+        if not candidates:
+            week.append({"slots": []})
+            continue
+
+        # Rank by net dollar savings — not raw occurrence score — and keep
+        # the top MAX_SLOTS_PER_DAY. This is the $ balance in action: a peak
+        # with a high occurrence count but little uncovered demand nearby can
+        # rank below a smaller peak whose window cheaply avoids real waste.
+        ranked = sorted(candidates, key=lambda c: c[4], reverse=True)
         kept   = ranked[:MAX_SLOTS_PER_DAY]
 
         if verbose:
@@ -550,38 +628,22 @@ def buckets_to_windows(raw_counts, weighted_scores, gap_minutes, min_occurrences
             if final_occurrences < min_occurrences:
                 relaxed_parts.append(f"occurrences→{final_occurrences}")
             relaxed = f" [relaxed: {', '.join(relaxed_parts)}]" if relaxed_parts else ""
-            print(f"  [{DAY_NAMES[dow]}] {len(peaks)} peaks found "
-                  f"(sep={min_peak_separation}min, ±{peak_half_width}min, "
+            print(f"  [{DAY_NAMES[dow]}] {len(peaks)} peaks found, "
+                  f"{len(candidates)} worth a slot "
+                  f"(sep={min_peak_separation}min, ≤±{peak_half_width}min searched, "
                   f"threshold={final_threshold:.1f}, occ≥{final_occurrences}{relaxed}) "
-                  f"→ keeping top {len(kept)}:")
-            for p in sorted(peaks, key=lambda p: p[1], reverse=True):
-                tag = " ✓" if p in kept else "  "
-                t = p[0]
-                print(f"    {tag} peak@{t//60:02d}:{t%60:02d}  "
-                      f"score={p[1]:.1f}  "
-                      f"window={max(0,t-peak_half_width)//60:02d}:"
-                      f"{max(0,t-peak_half_width)%60:02d}–"
-                      f"{min(1439,t+peak_half_width)//60:02d}:"
-                      f"{min(1439,t+peak_half_width)%60:02d}")
+                  f"→ keeping top {len(kept)} by net $ savings:")
+            for c in sorted(candidates, key=lambda c: c[4], reverse=True):
+                peak_bucket, peak_score, half_width, slot, net_savings = c
+                tag = " ✓" if c in kept else "  "
+                print(f"    {tag} peak@{peak_bucket//60:02d}:{peak_bucket%60:02d}  "
+                      f"score={peak_score:.1f}  ±{half_width}min  "
+                      f"net_savings=${net_savings:.4f}  "
+                      f"window={slot['startHour']:02d}:{slot['startMinute']:02d}"
+                      f"–{slot['endHour']:02d}:{slot['endMinute']:02d}")
 
-        # Build ±peak_half_width windows, apply preheat, sort by time.
-        # Round to the nearest 10-minute boundary so that the firmware's
-        # 10-minute-resolution offset encoding (value / 6 = hour,
-        # value % 6 × 10 = minute) stores the intended times exactly.
-        kept_chrono = sorted(kept, key=lambda p: p[0])
-        slots = []
-        for (peak_bucket, _score) in kept_chrono:
-            win_start = max(0,    peak_bucket - peak_half_width)
-            win_end   = min(1439, peak_bucket + peak_half_width)
-            start_min = max(0,    win_start   - preheat_minutes)
-            start_min = round(start_min / 10) * 10
-            win_end   = min(1430, round(win_end / 10) * 10)
-            slots.append({
-                "startHour":   start_min // 60,
-                "startMinute": start_min % 60,
-                "endHour":     win_end   // 60,
-                "endMinute":   win_end   % 60,
-            })
+        kept_chrono = sorted(kept, key=lambda c: c[0])
+        slots = [c[3] for c in kept_chrono]
 
         week.append({"slots": slots})
 
@@ -611,7 +673,7 @@ def _slot_near_minute(slot, minute_of_day, hot_window_min=15):
 
 def _score_day(day_raw, day_weighted, slots, historical_days=16, hot_window_min=15):
     """
-    Reframed efficiency: of the cold-starts that are *schedulable*
+    Reframed efficiency: of the demand events that are *schedulable*
     (fall within a slot OR within hot_window_min minutes after slot end),
     what fraction did the schedule actually cover (i.e. fell inside the slot)?
 
@@ -700,14 +762,15 @@ def estimate_schedule_cost(week, raw_counts, weighted_scores,
 def compare_slot_widths(raw_counts, weighted_scores, args,
                         widths=(25, 30), historical_days=16, hot_window_min=15):
     """
-    Build schedules at each peak_half_width and print a side-by-side coverage
-    comparison so the user can choose the best slot width.
-    Returns a dict of {width: week} for both widths.
+    Build schedules at each peak_half_width search cap and print a side-by-side
+    coverage comparison, so the user can see how much the $-cost search actually
+    changes when allowed to search wider windows.
+    Returns a dict of {width: week} for both caps.
     """
-    print("\n=== Slot Width Comparison (±25min vs ±30min windows) ===")
+    print("\n=== Slot Width Comparison (≤±25min vs ≤±30min search cap) ===")
     col = "  {:>14}  {:>9}  {:>9}"
     header = f"  {'Day':<10}" + "".join(
-        col.format(f"±{w}min Effic%", "Sched/day", "Covrd/day") for w in widths
+        col.format(f"≤±{w}min Effic%", "Sched/day", "Covrd/day") for w in widths
     )
     print(header)
     print("  " + "-" * (len(header) - 2))
@@ -723,6 +786,7 @@ def compare_slot_widths(raw_counts, weighted_scores, args,
             min_peak_separation=args.min_peak_separation,
             min_weighted_score=args.min_weighted_score,
             min_score_floor=args.min_score_floor,
+            historical_days=historical_days,
         )
 
     for dow in range(7):
@@ -770,8 +834,8 @@ def print_schedule(week, raw_counts=None, weighted_scores=None, verbose=False,
         cost_results = estimate_schedule_cost(
             week, raw_counts, weighted_scores, historical_days, hot_window_min)
         print(f"=== Expected Efficiency for Coming Week ===")
-        print(f"  Efficiency = schedulable cold-starts covered / all schedulable")
-        print(f"  Schedulable = cold-starts falling inside a slot or within "
+        print(f"  Efficiency = schedulable demand events covered / all schedulable")
+        print(f"  Schedulable = demand events falling inside a slot or within "
               f"{hot_window_min}min after slot end")
         print()
         hdr = (f"  {'Date':<12} {'Day':<10} {'Effic%':>7} {'Sched/d':>8} "
@@ -858,7 +922,7 @@ def main():
     parser.add_argument("--cold_gap_minutes", default=DEFAULT_COLD_GAP, type=int,
                         help="Inactivity gap in minutes after which pipes are considered "
                              "cold (default: 10). Only the first tap-on after this gap "
-                             "is counted as a cold-start event worth scheduling for.")
+                             "is counted as a demand event worth scheduling for.")
     parser.add_argument("--min_duration_genuine", default=DEFAULT_MIN_DURATION_GENUINE,
                         type=int,
                         help="Minimum tap-on duration in 10-second buckets (cold pipes) "
@@ -900,8 +964,10 @@ def main():
                              "relax to when a day has fewer than 4 peaks (default: 3.0). "
                              "Raise to keep schedules tighter; lower to accept weaker patterns.")
     parser.add_argument("--peak_half_width",    default=30,  type=int,
-                        help="Half-width in minutes of the window built around each "
-                             "activity peak (default: 20 → ±20min = 40min total window)")
+                        help="Maximum half-width in minutes the $-cost search may choose "
+                             "for the window around each activity peak (default: 30). "
+                             "The actual width is chosen per peak to minimize "
+                             "missed_waste_usd + gas_waste_usd, up to this cap.")
     parser.add_argument("--min_peak_separation", default=45, type=int,
                         help="Minimum minutes between two accepted peaks — prevents "
                              "finding two peaks inside the same activity cluster "
@@ -910,17 +976,24 @@ def main():
 
     args = parser.parse_args()
 
+    # Number of historical instances of a given weekday inside the queried
+    # window — e.g. window_weeks=4 (±4 weeks) × 2 recency-weight years = 16.
+    # Must track args.window_weeks/args.recency_weights (not a fixed 16) since
+    # bootstrap mode overrides window_weeks=52; this is now load-bearing for
+    # the $-based window search in buckets_to_windows(), not just a report.
+    historical_days = 2 * args.window_weeks * len(args.recency_weights)
+
     # Step 0: Detect local timezone
     local_tz, tz_name = detect_local_timezone()
     print(f"Using timezone: {tz_name}")
 
-    # Step 1: Fetch cold-start events from InfluxDB (rolling window, all years)
+    # Step 1: Fetch hot water demand events from InfluxDB (rolling window, all years)
     from datetime import date as _date
     today = _date.today()
     print(f"Querying InfluxDB ({args.influxdb_host}:{args.influxdb_port}/{args.influxdb_db}) "
           f"— rolling ±{args.window_weeks}-week window around "
           f"{today.strftime('%b %d')}, years weighted {args.recency_weights}...")
-    print(f"Extracting cold-start events (first tap-on after "
+    print(f"Extracting demand events (first tap-on after "
           f"≥{args.cold_gap_minutes}min inactivity, "
           f"genuine threshold: {args.min_duration_genuine} buckets cold / "
           f"{args.min_duration_recirc} buckets with recirc "
@@ -928,11 +1001,11 @@ def main():
     events = fetch_consumption_events(args, local_tz)
 
     if not events:
-        print("No cold-start events found. Check your InfluxDB connection and database name.")
+        print("No demand events found. Check your InfluxDB connection and database name.")
         sys.exit(1)
 
     dts = [e[0] for e in events]
-    print(f"Found {len(events)} cold-start events across "
+    print(f"Found {len(events)} demand events across "
           f"{len(args.recency_weights)} year(s) of seasonal data.")
     if args.verbose:
         print(f"  First event (local): {dts[0].strftime('%Y-%m-%d %H:%M %Z')}")
@@ -1047,12 +1120,13 @@ def main():
         min_peak_separation=args.min_peak_separation,
         min_weighted_score=args.min_weighted_score,
         min_score_floor=args.min_score_floor,
+        historical_days=historical_days,
         verbose=args.verbose,
     )
 
     # Step 4: Print for review (--verbose adds slot comparison + efficiency table)
     print_schedule(week, raw_counts=raw_counts, weighted_scores=weighted_scores,
-                   verbose=args.verbose, args=args)
+                   verbose=args.verbose, historical_days=historical_days, args=args)
 
     # Step 5: Push (unless dry run)
     if args.push and not args.dry_run:

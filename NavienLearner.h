@@ -36,10 +36,10 @@ SOFTWARE.
 class String;
 
 // ---------------------------------------------------------------------------
-// Cold-start event transported from Core 1 → Core 0
+// Demand event transported from Core 1 → Core 0
 // ---------------------------------------------------------------------------
 
-struct PendingColdStart {
+struct PendingDemandEvent {
     int   dow;             // day of week at tap-open time (0=Sun)
     int   bucket;          // 5-minute bucket index at tap-open time (0–287)
     float demand_weight;   // 0.5 (short cold-pipe tap) or 1.0 (genuine demand)
@@ -53,8 +53,8 @@ struct PendingColdStart {
 // ---------------------------------------------------------------------------
 
 struct WeekMeasured {
-    uint16_t total[7];    // cold-starts observed per day-of-week this week
-    uint16_t covered[7];  // cold-starts where recirc was already running
+    uint16_t total[7];    // demand events observed per day-of-week this week
+    uint16_t covered[7];  // demand events where recirc was already running
 };
 
 // ---------------------------------------------------------------------------
@@ -71,14 +71,14 @@ public:
     bool begin();
 
     // Called from the water packet callback on Core 1 for every RS-485 packet.
-    // Detects cold-starts and enqueues PendingColdStart events for Core 0.
+    // Detects demand events and enqueues PendingDemandEvent events for Core 0.
     // Returns immediately if the learner is disabled.
     void onNavienState(bool consumption_active,
                        bool recirculation_active,
                        time_t now);
 
-    // Access to the cross-core cold-start queue (consumed by Core 0 task).
-    QueueHandle_t coldStartQueue() const { return _coldStartQueue; }
+    // Access to the cross-core demand-event queue (consumed by Core 0 task).
+    QueueHandle_t demandEventQueue() const { return _demandEventQueue; }
 
     // Access to the BucketStore for Core 0 updates.
     BucketStore &bucketStore() { return _store; }
@@ -131,7 +131,7 @@ public:
 
     bool isDisabled() const { return _learnerDisabled; }
 
-    // Cold-start detection thresholds (seconds)
+    // Demand-event detection thresholds (seconds)
     static constexpr uint32_t COLD_GAP_SEC             = 600; // 10 min
     static constexpr uint32_t MIN_DURATION_GENUINE_SEC  = 60;  // 6 × 10s
     static constexpr uint32_t MIN_DURATION_RECIRC_SEC   = 30;  // 3 × 10s
@@ -156,7 +156,7 @@ private:
     void decayCheck();      // apply annual weighted_score decay if year has rolled over
     void recomputeWrite();  // builds JSON, hands off to Core 1, and broadcasts UDP
 
-    // --- Cold-start detector state (Core 1 only) ---
+    // --- Demand-event detector state (Core 1 only) ---
     time_t   _lastActiveTime;    // last time consumption_active was true
     bool     _inRun;             // currently inside an active run
     time_t   _runStart;          // when the current run started
@@ -167,7 +167,7 @@ private:
     time_t   _lastRecircActiveTime; // last time recirculation_active was true (0 = never)
 
     // --- Cross-core queue (capacity 1, Core 1 writes, Core 0 reads) ---
-    QueueHandle_t _coldStartQueue;
+    QueueHandle_t _demandEventQueue;
 
     // --- Core 0 task ---
     TaskHandle_t  _taskHandle;
@@ -197,7 +197,7 @@ private:
     float    _predictedEfficiency[7];            // per local day (Sun..Sat), Phase 7
 
     // --- Measured efficiency rolling window (Core 0 writes only) ---
-    // Updated in idleStep() when consuming cold-start events from the queue.
+    // Updated in idleStep() when consuming demand events from the queue.
     // Phase 7 Telnet/UI readers on Core 1 should treat these as coarse stats
     // (no lock needed for read-only display, but values may be mid-update).
     WeekMeasured _measured[4];

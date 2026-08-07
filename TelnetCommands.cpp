@@ -568,7 +568,7 @@ void commandLearnerStatus(const String& params) {
                 nonZero, total, nonZero * 100.0f / total);
 
   // Per-day table header.
-  telnet.println(F("  Day         Predicted  Measured   Gap      Cold-starts (4wk)"));
+  telnet.println(F("  Day         Predicted  Measured   Gap      Demand events (4wk)"));
   telnet.println(F("  -----------------------------------------------------------------"));
 
   const float       *pred = learner->predictedEfficiency();
@@ -618,7 +618,14 @@ void commandLearnerStatus(const String& params) {
   telnet.printf("  %-11s  %s   %s\n", "Weekly avg", avgPred, avgMeas);
 
   // Final schedule: 3 slots per local day (same grouping as scheduler command).
-  telnet.println(F("\n  Slots and Scores (3 per local day)"));
+  // fireCount reports which table is actually driving recirc firing decisions
+  // (SchedulerBase::_utcFireSlotCount > 0 gates getNextStateFromFireSlots()/
+  // isActiveOnFireSlots() in SchedulerBase.cpp) — 0 here means the device has
+  // silently fallen back to the UTC-day-capped weekSchedule[] (eviction-prone
+  // when adjacent local days share a UTC day), not the learner's fresh,
+  // uncapped-per-local-day schedule.
+  int fireCount = scheduler ? scheduler->getUtcFireSlotCount() : 0;
+  telnet.printf("\n  Slots and Scores (3 per local day, %d fire-slots loaded)\n", fireCount);
   telnet.println(F("  Day         Slot  Local Range     (UTC)           Score"));
   telnet.println(F("  --------------------------------------------------------------"));
   bool printedAny = false;
@@ -629,7 +636,6 @@ void commandLearnerStatus(const String& params) {
       float score;
     } slots[SchedulerBase::MAX_UTC_FIRE_SLOTS];
     int n = 0;
-    int fireCount = scheduler->getUtcFireSlotCount();
     if (fireCount > 0) {
       for (int i = 0; i < fireCount && n < SchedulerBase::MAX_UTC_FIRE_SLOTS; i++) {
         uint8_t sh, sm, eh, em, ud;
