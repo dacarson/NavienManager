@@ -99,41 +99,73 @@ reality: the reference script now uses both rates to size and rank windows;
 the on-device port still uses fixed, hand-tuned constants for the reasons
 above.
 
-## Design — On-device (`PeakFinder.h`)
+## Design — On-device (`PeakFinder.h`) — done
 
-No architecture change to `PeakFinder.cpp`/`NavienLearner.cpp`. After the
-Python change lands, run `navien_bootstrap.py` (dry run) against real InfluxDB
-history and observe the half-widths and effective thresholds the new $-search
-converges to across representative days (strong daily peaks vs. sparse/weekend
-ones). Hand-adjust `PeakFinder.h`'s `PEAK_HALF_WIDTH_MIN` (and
-`MIN_WEIGHTED_SCORE`/`MIN_SCORE_FLOOR` only if the data clearly warrants it) to
-sit in that observed range, with a comment citing the $0.097-vs-$0.0024 ratio
-as the reasoning, e.g.:
+No architecture change to `PeakFinder.cpp`/`NavienLearner.cpp`, as planned.
+Ran `navien_bootstrap.py` (dry run) against a full year of real InfluxDB
+history at several `--peak_half_width` caps (30, 40, 60) to find where the
+per-peak $-search actually converges rather than guessing:
 
-```cpp
-// Retuned toward the $-optimal widths navien_schedule_learner.py's per-peak
-// cost search converges to on real usage data (demand event ≈$0.097 vs wasted
-// recirc cycle ≈$0.0024 — see archive/OnDeviceScheduleLearner.md Goal section).
-static constexpr int PEAK_HALF_WIDTH_MIN = ...;
-```
+| Cap tried | Kept-slot half-widths (21 slots = 3/day × 7 days) |
+|---|---|
+| 30 | 16×30 (ceiling), 4×25, 1×20 — mostly hitting the cap |
+| 40 | 14×40 (ceiling), 7×35 — still mostly hitting the cap |
+| 60 | 1×35, 5×40, 8×45, 5×50, 2×55 — spread, no longer pinned to the cap |
 
-## Verification
+At cap 60 the search stops hugging the ceiling and settles into a real
+distribution: mode and mean both land at **~45 minutes**. This makes sense —
+`_best_slot_for_peak()`'s local search scope is bounded at
+`±min_peak_separation` (45min), and real demand trickles in across a wider
+span than a sharp single-bucket spike, so covered demand keeps growing out
+toward that full scope for most peaks rather than plateauing early.
 
-- Run `python3 navien_bootstrap.py` (dry run, no `--push`) before and after the
-  change against real InfluxDB history; compare the printed per-day schedule,
-  chosen window widths, and `total_waste_usd` from `estimate_schedule_cost`.
-  Expect: windows widen around strong/reliable peaks, shrink or disappear
-  around marginal/sparse ones, and total predicted waste (missed + gas) drops
-  or stays flat relative to the old fixed-width schedule for the same data.
-- If InfluxDB isn't reachable from this environment, build a small synthetic
-  `raw_counts`/`weighted_scores` fixture (a couple of strong daily peaks, a
-  couple of marginal ones, one pure-noise bucket) and call
-  `buckets_to_windows()` directly to sanity-check the search picks sensible
-  widths and correctly drops the noise peak.
-- No existing automated tests cover `navien_schedule_learner.py` (none found
-  under `Logger/`) — this stays a manual/dry-run verification.
-- C++ side: constants-only change, no new logic — confirm it still compiles
-  (existing build) and, if feasible, compare `PeakFinder::findDaySlots()`
-  output against the same synthetic fixture used above for a sanity cross-check
-  against the Python result shape (not required to match exactly, since the
-  on-device version intentionally stays fixed-width).
+`PeakFinder.h`'s `PEAK_HALF_WIDTH_MIN` was retuned from 30 to **45** to match,
+with a comment recording this convergence data and a caveat: since it now
+equals `MIN_PEAK_SEPARATION_MIN`, two accepted peaks at exactly the minimum
+allowed separation could produce heavily overlapping fixed windows (already a
+latent risk at 30, just less severe) — not observed in practice, since real
+kept peaks were consistently 70+ min apart. `MIN_WEIGHTED_SCORE`/
+`MIN_SCORE_FLOOR` were left unchanged: `threshold=6.0` (the unrelaxed default)
+held for all 7 days across the full-year run, so the adaptive threshold never
+needed to relax — a full year of data doesn't stress that noise filter.
+
+The Python side's own `--peak_half_width` default was also raised from 30 to
+45 in both `navien_schedule_learner.py` and `navien_bootstrap.py` — leaving it
+at 30 would have artificially capped the search below its own empirical
+optimum on every normal (non-override) run.
+
+## Verification — done
+
+- Ran `python3 navien_bootstrap.py` (dry run, no `--push`) against real
+  InfluxDB history at multiple `--peak_half_width` caps; compared chosen
+  window widths and `net_savings` per peak (see table above). Confirmed via
+  `python3 navien_schedule_learner.py` (default ±4-week window) that the
+  post-fix search produces sensible, non-empty schedules — the pre-fix
+  baseline-comparison bug (see `_best_slot_for_peak()`'s docstring) caused
+  every day to come back with zero slots before the formula was corrected.
+- InfluxDB was reachable from this environment for the whole session, so the
+  synthetic-fixture fallback wasn't needed for the Python side.
+- C++ side: `arduino-cli` is not available in this environment, so the actual
+  ESP32 build was not compiled with it. A real Arduino IDE build *was* tried
+  and caught a real mistake: `PeakFinder_test.cpp` was first placed directly
+  in the sketch root (repo root) alongside `TimeUtils_test.cpp`. The
+  Arduino/ESP32 builder auto-compiles every `.cpp` file it finds there into
+  the firmware, so two host-test files each defining `main()` collided at
+  link time (`multiple definition of 'main'`). Fixed by moving
+  `PeakFinder_test.cpp` and its `test_stubs/HomeSpan.h` stub into a `test/`
+  subfolder, which the Arduino builder does not auto-sweep. `TimeUtils_test.cpp`
+  remains in the sketch root (pre-existing, harmless on its own since it was
+  the only stray `main()` there) — worth relocating too at some point, but
+  that's a separate, un-requested change.
+- Added `test/PeakFinder_test.cpp` — a host-side g++ test harness (same
+  pattern as `TimeUtils_test.cpp`), built with a synthetic 288-bucket day
+  (one strong peak, one moderate, one at the score floor, plus filtered
+  noise) and a stub `test/test_stubs/HomeSpan.h` since `PeakFinder.cpp`'s
+  `#include "HomeSpan.h"` is unused dead weight it never actually calls
+  into. Confirms `PeakFinder::findDaySlots()` still compiles and produces
+  well-formed, non-overlapping slots after the `PEAK_HALF_WIDTH_MIN` retune.
+  Run (from repo root):
+  `g++ -std=c++14 -I . -I test/test_stubs -o test/PeakFinder_test test/PeakFinder_test.cpp PeakFinder.cpp && ./test/PeakFinder_test`.
+  Not a correctness oracle against the Python reference — the on-device port
+  intentionally keeps a fixed-width architecture, so exact output parity was
+  never the goal.

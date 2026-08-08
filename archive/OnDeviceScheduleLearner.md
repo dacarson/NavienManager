@@ -336,11 +336,11 @@ The Python `_find_peaks()` and `buckets_to_windows()` functions port cleanly. Al
 - No dynamic allocation in the recompute path itself (PeakFinder, schedule JSON buffer, efficiency calculation)
 - `broadcastUDP()` called at the end of `RECOMPUTE_WRITE` uses ArduinoJson (`JsonDocument`) and a transient `String` for serialisation — same pattern as all other UDP broadcast functions
 
-### Parameters (matching Python defaults)
+### Parameters
 
 | Parameter | Value |
 |---|---|
-| `peak_half_width` | 30 minutes |
+| `peak_half_width` (on-device fixed; Python default search cap) | 45 minutes — retuned from the original 30 based on where `navien_schedule_learner.py`'s per-peak $-cost search converges on real usage data; see `archive/CostGroundedWindowSizing.md` |
 | `min_peak_separation` | 45 minutes |
 | `preheat_minutes` | 3 minutes (= `COLD_PIPE_DRAIN_MINUTES` from `config.py`) |
 | `min_weighted_score` | 6.0 |

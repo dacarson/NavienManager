@@ -64,8 +64,31 @@ struct TimeSlot {
 
 class PeakFinder {
 public:
-    // Algorithm parameters — match Python script defaults.
-    static constexpr int   PEAK_HALF_WIDTH_MIN     = 30;   // ±30 min window
+    // Algorithm parameters.
+    //
+    // PEAK_HALF_WIDTH_MIN: retuned from the original ±30min to ±45min based on
+    // navien_schedule_learner.py's per-peak $-cost search (_best_slot_for_peak,
+    // see archive/CostGroundedWindowSizing.md) run against a full year of real
+    // InfluxDB history. That search picks each peak's width independently to
+    // maximize covered_per_day*COLD_START_WASTE_USD - gas_waste_usd; across the
+    // 21 slots kept for a real week (3/day x 7 days) the chosen half-widths
+    // ranged 35-55min with both the mode and mean landing at ~45min — real
+    // demand trickles in across a wider span than a sharp single-bucket spike,
+    // so covered demand keeps growing out to the search's full local scope
+    // (±MIN_PEAK_SEPARATION_MIN) for most peaks. On-device can't run that
+    // per-peak search (would need a new "elapsed weeks since decay" concept to
+    // turn accumulating weighted_score into a $-comparable rate — see the
+    // archive doc), so this fixed constant approximates where the search
+    // actually converges rather than a hand-picked guess.
+    //
+    // Caveat: since this now equals MIN_PEAK_SEPARATION_MIN, two accepted
+    // peaks at exactly the minimum allowed separation would produce heavily
+    // overlapping fixed windows (this overlap risk already existed at the old
+    // 30min value, just less severely, since NMS only guarantees peak
+    // *centers* are >= MIN_PEAK_SEPARATION_MIN apart, not that ±half-width
+    // windows around them don't overlap). Not observed in practice — real
+    // kept peaks in the reference run were consistently 70+ min apart.
+    static constexpr int   PEAK_HALF_WIDTH_MIN     = 45;   // ±45 min window
     static constexpr int   MIN_PEAK_SEPARATION_MIN = 45;   // 9 buckets
     static constexpr int   PREHEAT_MINUTES         = 3;    // COLD_PIPE_DRAIN_MINUTES
     static constexpr float MIN_WEIGHTED_SCORE      = 6.0f;

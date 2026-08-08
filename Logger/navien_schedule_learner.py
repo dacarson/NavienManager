@@ -963,11 +963,13 @@ def main():
                         help="Lowest score threshold the adaptive algorithm will "
                              "relax to when a day has fewer than 4 peaks (default: 3.0). "
                              "Raise to keep schedules tighter; lower to accept weaker patterns.")
-    parser.add_argument("--peak_half_width",    default=30,  type=int,
+    parser.add_argument("--peak_half_width",    default=45,  type=int,
                         help="Maximum half-width in minutes the $-cost search may choose "
-                             "for the window around each activity peak (default: 30). "
-                             "The actual width is chosen per peak to minimize "
-                             "missed_waste_usd + gas_waste_usd, up to this cap.")
+                             "for the window around each activity peak (default: 45 — "
+                             "empirically where the search converges on real usage data, "
+                             "see archive/CostGroundedWindowSizing.md). The actual width is "
+                             "chosen per peak to maximize covered_per_day*COLD_START_WASTE_USD "
+                             "- gas_waste_usd, up to this cap.")
     parser.add_argument("--min_peak_separation", default=45, type=int,
                         help="Minimum minutes between two accepted peaks — prevents "
                              "finding two peaks inside the same activity cluster "

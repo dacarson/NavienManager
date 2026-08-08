@@ -71,8 +71,11 @@ def main():
     parser.add_argument("--min_score_floor",      default=nsl.DEFAULT_MIN_SCORE_FLOOR,
                         type=float,
                         help="Lowest score the adaptive threshold will relax to")
-    parser.add_argument("--peak_half_width",      default=30, type=int,
-                        help="Half-width in minutes of the window built around each peak")
+    parser.add_argument("--peak_half_width",      default=45, type=int,
+                        help="Maximum half-width in minutes the $-cost search may choose "
+                             "for the window around each peak (default: 45 — empirically "
+                             "where the search converges on real usage data, see "
+                             "archive/CostGroundedWindowSizing.md)")
     parser.add_argument("--min_peak_separation",  default=45, type=int,
                         help="Minimum minutes between two accepted peaks")
 
