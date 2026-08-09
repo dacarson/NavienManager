@@ -125,7 +125,12 @@ protected:
   uint8_t temperature_offset = 0;
   int currentScheduleDay = -1;
   
-  bool scheduleActive;  // legacy name; new private members use underscore prefix
+  bool scheduleActive = false;  // legacy name; new private members use underscore prefix
+
+  // Last schedule_on value published to Eve after Eve has sent SCHEDULE_STATE
+  // this boot. Used to reject stale Off write-backs after OTA/reboot.
+  uint8_t _lastPublishedScheduleOn = 0;
+  bool _eveScheduleStateSeen = false;
 
   // True once Phase 3 has verified stored slots are UTC.
   // Learner-generated schedules (which are UTC) must not be applied to the

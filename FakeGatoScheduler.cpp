@@ -40,19 +40,22 @@ FakeGatoScheduler::FakeGatoScheduler()
   
   size_t len;
   nvs_open("SAVED_DATA",NVS_READWRITE,&savedData);       // open a new namespace called SAVED_DATA in the NVS
+
+  // SCHED_ACTIVE is authoritative and must be read even if PROG_SEND_DATA is missing.
+  uint8_t savedScheduleActive = 0;
+  bool haveSchedActive = (nvs_get_u8(savedData, "SCHED_ACTIVE", &savedScheduleActive) == ESP_OK);
+  if (haveSchedActive) {
+    scheduleActive = (savedScheduleActive != 0);
+  }
+
   if(!nvs_get_blob(savedData,"PROG_SEND_DATA",NULL,&len)) {        // if PROG_SEND_DATA data found
     nvs_get_blob(savedData,"PROG_SEND_DATA",&prog_send_data,&len);       // retrieve data
     loadSlotScoresFromStorage();
     
     WEBLOG("SCHEDULER Loaded Program State");
-      // Restore scheduleActive from its own key.
-      // SCHED_ACTIVE is the authoritative persisted source; fall back to
-      // prog_send_data.schedule_state.schedule_on for backwards compatibility.
-    uint8_t savedScheduleActive = 0;
-    if (nvs_get_u8(savedData, "SCHED_ACTIVE", &savedScheduleActive) == ESP_OK) {
-      scheduleActive = (savedScheduleActive != 0);
-    } else if (prog_send_data.schedule_state.schedule_on) {
-      scheduleActive = true;  // backwards-compat fallback for old firmware
+    // Fall back to schedule_on only for pre-SCHED_ACTIVE firmware images.
+    if (!haveSchedActive && prog_send_data.schedule_state.schedule_on) {
+      scheduleActive = true;
     }
     setVacationState(false);
     if (prog_send_data.vacation.enabled)
@@ -64,7 +67,9 @@ FakeGatoScheduler::FakeGatoScheduler()
     prog_send_data.vacation.enabled = 0x00;
     setVacationState(false);
     prog_send_data.schedule_state.schedule_on = 0x00;
-    scheduleActive = false;
+    if (!haveSchedActive) {
+      scheduleActive = false;
+    }
       // clear every day of the weekly schedule
     memset(&prog_send_data.weekSchedule.day, 0xFF, sizeof(prog_send_data.weekSchedule.day));
       // clear today's schedule
@@ -313,22 +318,24 @@ void FakeGatoScheduler::parseProgramData(uint8_t *data, int len) {
       case SCHEDULE_STATE:
       {
         PROG_CMD_SCHEDULE_STATE *schedule_state = (PROG_CMD_SCHEDULE_STATE *)(&data[byte_offset]);
-        // Update the current state to what the user wants.
         // We report schedule_on=1 only during Active/Override, and 0 during Inactive.
-        // Eve writes back whatever it last read, so a schedule_on=0 arriving while we are
-        // Inactive is just Eve echoing our own 0 — not a genuine user disable request.
-        // A genuine disable can only arrive when Eve was showing 1, i.e. Active/Override.
+        // Eve writes back whatever it last read (including a cached 0 from before
+        // OTA/reboot). Honor Off only if this boot already published On to Eve
+        // after Eve contacted us — otherwise a reconnect while Active would wipe
+        // SCHED_ACTIVE.
+        _eveScheduleStateSeen = true;
         if (schedule_state->schedule_on) {
           scheduleActive = true;
           Serial.println("Schedule: On");
           nvs_set_u8(savedData, "SCHED_ACTIVE", 1);
           if (isInitialized) initializeCurrentState();
-        } else if (currentState == SchedulerBase::Active || currentState == SchedulerBase::Override) {
+        } else if (_lastPublishedScheduleOn == 1 &&
+                   (currentState == SchedulerBase::Active || currentState == SchedulerBase::Override)) {
           scheduleActive = false;
           Serial.println("Schedule: Off");
           nvs_set_u8(savedData, "SCHED_ACTIVE", 0);
         } else {
-          Serial.println("Schedule: Off ignored (Inactive write-back from Eve)");
+          Serial.println("Schedule: Off ignored (stale Eve write-back)");
         }
         // Report 1 only when a slot is currently active, so Eve doesn't try to change
         // the set point during Inactive periods between slots.
@@ -771,6 +778,18 @@ void FakeGatoScheduler::loop() {
       int eveDow = (ts->tm_wday + 6) % 7;
       memcpy(&sendData.currentSchedule.current,
              &sendData.weekSchedule.day[eveDow], sizeof(CMD_DAY_SCHEDULE));
+    }
+
+    // Match Eve reporting semantics: schedule_on reflects Active/Override only.
+    // Arm Off-acceptance only after Eve has sent SCHEDULE_STATE this boot, so a
+    // proactive publish before reconnect cannot make a stale Off look genuine.
+    uint8_t reportedOn = (scheduleActive &&
+                          (currentState == SchedulerBase::Active ||
+                           currentState == SchedulerBase::Override)) ? 1 : 0;
+    sendData.schedule_state.schedule_on = reportedOn;
+    prog_send_data.schedule_state.schedule_on = reportedOn;
+    if (_eveScheduleStateSeen) {
+      _lastPublishedScheduleOn = reportedOn;
     }
 
     // Don't announce when there is new program data, Eve app will fetch it when it wants it.

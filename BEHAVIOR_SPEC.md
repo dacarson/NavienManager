@@ -144,7 +144,7 @@ HomeKit integration uses the [HomeSpan](https://github.com/HomeSpan/HomeSpan) li
 | `CurrentTemperature` | Read | Outlet temperature from gas packet, updated when it changes by > 0.5°C and at least 5 seconds have elapsed. |
 | `TargetTemperature` | Read/Write | Set-point temperature from gas packet. Write range: 37.0°C–60.0°C in 0.5°C steps. Writes are sent to the heater via `setTemp()`. |
 | `TemperatureDisplayUnits` | Read | Mirrors the Navien panel's own Metric/Imperial setting from the water packet. |
-| `ProgramMode` | Read | `0` = no program; `1` = scheduled; `2` = override active. |
+| `ProgramMode` | Read | Reflects scheduler control intent (not recirculation hardware): `0` = scheduler disabled; `1` = scheduler enabled (following the weekly program, including Inactive gaps between slots); `2` = temporary manual override (`Hot Water` / `HEAT`). |
 | `ValvePosition` (custom) | Read | Operating capacity from water packet (0–100%). Labeled "Actuation", unit "percentage". |
 | `ProgramCommand` (custom) | Write | Receives Eve app schedule data; dispatched to `FakeGatoScheduler::parseProgramData()`. |
 
@@ -189,7 +189,7 @@ The Eve app's thermostat schedule is parsed and stored in NVS (`SAVED_DATA` / `P
 
 **Schedule state reporting to Eve:** The `schedule_on` field returned to the Eve app inside `ProgramData` is `1` only when `scheduleActive` is true **and** the current state is `Active` or `Override`; otherwise it is `0`. Reporting `1` during an `Inactive` period (between slots) would cause Eve to try to change the Navien set point. Reporting `0` during `Inactive` causes Eve to write back `0`, which is detected and ignored (see below). If Eve responds to a `1` by sending `TargetHeatingCoolingState = HEAT` during an active slot, that is harmless because the unit is already heating.
 
-**Eve write-back suppression:** When Eve reads `schedule_on = 0` (because we are in an `Inactive` period) it writes the value back as `0`. A genuine user disable can only arrive while Eve was showing `1`, which only happens during `Active` or `Override` states. Therefore, a `schedule_on = 0` write received while in `Inactive` state is silently ignored. A `schedule_on = 0` write received during `Active` or `Override` is honoured and disables the scheduler.
+**Eve write-back suppression:** When Eve reads `schedule_on = 0` (because we are in an `Inactive` period) it writes the value back as `0`. After OTA/reboot Eve may also write a cached `0` while the device is already in `Active`. A genuine user disable is accepted only when (1) Eve has sent a `SCHEDULE_STATE` this boot, (2) we have since published `schedule_on = 1` (`_lastPublishedScheduleOn`), and (3) the device is in `Active` or `Override`. Any other `schedule_on = 0` write is ignored so `SCHED_ACTIVE` survives firmware updates and Inactive echo write-backs.
 
 **State transitions:** When a scheduled transition time arrives, `initializeCurrentState()` is called to evaluate the current time against the week schedule and determine the correct state. This uses `isTimeWithinSlot()` (which uses `>=` for the slot start boundary), ensuring that a transition firing at exactly the slot start time correctly enters `Active`. When an override expires, `initializeCurrentState()` is similarly called to revert to the correct scheduled state immediately rather than waiting for the next scheduled transition.
 
