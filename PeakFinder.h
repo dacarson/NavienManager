@@ -150,17 +150,23 @@ private:
                          float threshold, int occ_floor, int sep_buckets,
                          Peak *out_accepted);
 
+    // Net dollar benefit of window [start_min,end_min) — covered_per_week *
+    // COLD_START_WASTE_USD - gas_waste_usd — counting demand only from
+    // buckets [lo_bucket,hi_bucket]. The scope and the window need not
+    // match: bestSlotForPeak() passes a fixed ±MIN_PEAK_SEPARATION_MIN
+    // neighbourhood around one peak regardless of candidate width (so a
+    // different peak's demand doesn't distort this peak's search), while
+    // buildSlots() re-scores an already-decided (possibly merged) window
+    // by passing the window's own extent as the scope, so its reported
+    // benefit reflects everything actually inside it.
+    static float scoreWindow(const BucketFile::Bucket *day_buckets,
+                             int lo_bucket, int hi_bucket,
+                             int start_min, int end_min, float elapsedWeeks);
+
     // For one peak, search candidate half-widths (WIDTH_STEP_MIN steps, up to
-    // PEAK_HALF_WIDTH_MIN) and return the one maximizing net dollar benefit:
-    //   net_benefit = covered_per_week * COLD_START_WASTE_USD - gas_waste_usd
-    // covered_per_week sums raw_count for buckets inside the candidate slot
-    // (scanning only ±MIN_PEAK_SEPARATION_MIN around the peak, matching the
-    // Python search's local-scope rationale) divided by elapsedWeeks.
-    // gas_waste_usd values empty 15-min sub-windows inside the slot (every
-    // bucket in that sub-window has weighted_score == 0) at RECIRC_WASTE_USD.
-    // Mirrors navien_schedule_learner.py's _best_slot_for_peak(), scored via
-    // direct array indexing instead of a dict since day_buckets is already
-    // array-indexed by 5-min bucket.
+    // PEAK_HALF_WIDTH_MIN) and return the one maximizing scoreWindow(), scoped
+    // to ±MIN_PEAK_SEPARATION_MIN around the peak. Mirrors
+    // navien_schedule_learner.py's _best_slot_for_peak().
     //
     // Returns false (out_slot untouched) if no candidate width has positive
     // net benefit — the peak isn't worth a slot at all.
@@ -169,8 +175,13 @@ private:
                                 TimeSlot *out_slot);
 
     // Convert accepted peaks to TimeSlot windows via bestSlotForPeak().
-    // Drops peaks with non-positive net benefit. Returns number of slots
-    // written, sorted chronologically.
+    // Drops peaks with non-positive net benefit. Adjacent peaks whose windows
+    // overlap or touch are merged into one wider slot, re-scored via
+    // scoreWindow() over the merged window's own full extent (see
+    // archive/OnDeviceDollarCostWindowSearch.md) rather than summing the
+    // pre-merge values, which would undercount demand outside either
+    // original peak's narrow search scope. Returns number of slots written,
+    // sorted chronologically.
     static int buildSlots(const BucketFile::Bucket *day_buckets,
                           const Peak *accepted, int n_accepted,
                           float elapsedWeeks, TimeSlot *out_slots);

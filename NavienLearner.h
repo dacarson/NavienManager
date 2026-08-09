@@ -125,6 +125,12 @@ public:
     // bucket data).  Index 0=Sunday .. 6=Saturday.
     const float *predictedEfficiency() const { return _predictedEfficiency; }
 
+    // Per-day expected net dollar benefit ($/week) from the last recompute —
+    // sum of kept TimeSlot::score values (PeakFinder's
+    // covered_per_week*COLD_START_WASTE_USD − gas_waste). NAN before the first
+    // recompute. Index 0=Sunday .. 6=Saturday.
+    const float *predictedBenefitUsd() const { return _predictedBenefitUsd; }
+
     // Append a Learner Status HTML section to page.  Called from the web status
     // callback on Core 1; reads _measured[] as coarse stats without locking.
     void appendStatusHTML(String &page) const;
@@ -198,6 +204,7 @@ private:
                                                     // once per pass; converts weighted_score into a
                                                     // $/week rate for PeakFinder's cost-based search
     float    _predictedEfficiency[7];            // per local day (Sun..Sat), Phase 7
+    float    _predictedBenefitUsd[7];            // per local day expected net $/week
 
     // --- Measured efficiency rolling window (Core 0 writes only) ---
     // Updated in idleStep() when consuming demand events from the queue.

@@ -93,6 +93,7 @@ NavienLearner::NavienLearner()
     // This ensures N/A is displayed before the first recompute completes.
     for (int i = 0; i < BUCKET_DAYS; i++) {
         _predictedEfficiency[i] = NAN;
+        _predictedBenefitUsd[i] = NAN;
     }
 }
 
@@ -759,6 +760,7 @@ void NavienLearner::recomputeWrite() {
     static constexpr int HOT_WINDOW_MIN = 15;
     for (int local_dow = 0; local_dow < BUCKET_DAYS; local_dow++) {
         int covered = 0, schedulable = 0;
+        float benefitUsd = 0.0f;
         for (int lb = 0; lb < BUCKET_PER_DAY; lb++) {
             int utc_min = lb * 5 + offsetMin;
             int utc_dow = local_dow;
@@ -782,9 +784,15 @@ void NavienLearner::recomputeWrite() {
             }
             if (in_slot || near_after) covered++;
         }
+        for (int i = 0; i < nPruned; i++) {
+            if (pruned[i].local_dow == local_dow)
+                benefitUsd += pruned[i].score;
+        }
         _predictedEfficiency[local_dow] = (schedulable > 0)
             ? (covered * 100.0f / schedulable)
             : NAN;
+        // Always record benefit after a recompute (0.0 = no positive-net slots).
+        _predictedBenefitUsd[local_dow] = benefitUsd;
     }
     _lastRecomputeTime = time(nullptr);
 
@@ -1037,13 +1045,17 @@ void NavienLearner::appendStatusHTML(String &page) const {
             "<tr>"
             "<th style='padding:4px 12px;text-align:left'>Day</th>"
             "<th style='padding:4px 12px'>Predicted</th>"
+            "<th style='padding:4px 12px'>Expected $</th>"
             "<th style='padding:4px 12px'>Measured</th>"
+            "<th style='padding:4px 12px'>Measured $</th>"
             "<th style='padding:4px 12px'>Gap</th>"
             "<th style='padding:4px 12px'>Demand events (4wk)</th>"
             "</tr>";
 
     float sumPred = 0.0f, sumMeas = 0.0f;
+    float sumPredUsd = 0.0f, sumMeasUsd = 0.0f;
     int   cntPred = 0,    cntMeas = 0;
+    int   cntPredUsd = 0, cntMeasUsd = 0;
 
     for (int dow = 0; dow < BUCKET_DAYS; dow++) {
         uint32_t tot = 0, cov = 0;
@@ -1053,8 +1065,15 @@ void NavienLearner::appendStatusHTML(String &page) const {
         }
         float measPct = (tot > 0) ? (cov * 100.0f / tot) : NAN;
         float predPct = _predictedEfficiency[dow];
+        float predUsd = _predictedBenefitUsd[dow];
+        // Covered events avoided a cold-start; normalise the 4-week window to
+        // $/week so it is comparable to PeakFinder's expected net benefit.
+        float measUsd = (tot > 0)
+            ? ((float)cov / 4.0f) * PeakFinder::COLD_START_WASTE_USD
+            : NAN;
 
         char predStr[12], measStr[12], gapStr[16];
+        char predUsdStr[16], measUsdStr[16];
         const char *gapColor = "white";
 
         if (!isnan(predPct)) {
@@ -1064,12 +1083,26 @@ void NavienLearner::appendStatusHTML(String &page) const {
         } else {
             snprintf(predStr, sizeof(predStr), "N/A");
         }
+        if (!isnan(predUsd)) {
+            snprintf(predUsdStr, sizeof(predUsdStr), "$%.3f", predUsd);
+            sumPredUsd += predUsd;
+            cntPredUsd++;
+        } else {
+            snprintf(predUsdStr, sizeof(predUsdStr), "N/A");
+        }
         if (!isnan(measPct)) {
             snprintf(measStr, sizeof(measStr), "%.1f%%", measPct);
             sumMeas += measPct;
             cntMeas++;
         } else {
             snprintf(measStr, sizeof(measStr), "N/A");
+        }
+        if (!isnan(measUsd)) {
+            snprintf(measUsdStr, sizeof(measUsdStr), "$%.3f", measUsd);
+            sumMeasUsd += measUsd;
+            cntMeasUsd++;
+        } else {
+            snprintf(measUsdStr, sizeof(measUsdStr), "N/A");
         }
         if (!isnan(predPct) && !isnan(measPct)) {
             float gap = predPct - measPct;
@@ -1087,7 +1120,11 @@ void NavienLearner::appendStatusHTML(String &page) const {
         page += "</td><td style='padding:4px 12px;text-align:center'>";
         page += predStr;
         page += "</td><td style='padding:4px 12px;text-align:center'>";
+        page += predUsdStr;
+        page += "</td><td style='padding:4px 12px;text-align:center'>";
         page += measStr;
+        page += "</td><td style='padding:4px 12px;text-align:center'>";
+        page += measUsdStr;
         page += "</td><td style='padding:4px 12px;text-align:center;color:";
         page += gapColor;
         page += "'>";
@@ -1099,14 +1136,23 @@ void NavienLearner::appendStatusHTML(String &page) const {
 
     // Weekly average row.
     char avgPred[12] = "N/A", avgMeas[12] = "N/A";
+    char avgPredUsd[16] = "N/A", avgMeasUsd[16] = "N/A";
     if (cntPred > 0) snprintf(avgPred, sizeof(avgPred), "%.1f%%", sumPred / cntPred);
     if (cntMeas > 0) snprintf(avgMeas, sizeof(avgMeas), "%.1f%%", sumMeas / cntMeas);
+    if (cntPredUsd > 0)
+        snprintf(avgPredUsd, sizeof(avgPredUsd), "$%.3f", sumPredUsd / cntPredUsd);
+    if (cntMeasUsd > 0)
+        snprintf(avgMeasUsd, sizeof(avgMeasUsd), "$%.3f", sumMeasUsd / cntMeasUsd);
     page += "<tr style='border-top:1px solid #555'>"
             "<td style='padding:4px 12px;text-align:left'><b>Weekly avg</b></td>"
             "<td style='padding:4px 12px;text-align:center'><b>";
     page += avgPred;
     page += "</b></td><td style='padding:4px 12px;text-align:center'><b>";
+    page += avgPredUsd;
+    page += "</b></td><td style='padding:4px 12px;text-align:center'><b>";
     page += avgMeas;
+    page += "</b></td><td style='padding:4px 12px;text-align:center'><b>";
+    page += avgMeasUsd;
     page += "</b></td><td></td><td></td></tr>";
     page += "</table>";
 }

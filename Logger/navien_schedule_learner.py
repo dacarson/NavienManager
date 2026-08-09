@@ -464,6 +464,19 @@ def _find_peaks(score_map, min_separation, smooth_radius=2):
     return sorted(accepted, key=lambda x: x[0])   # re-sort by time
 
 
+def _net_benefit(day_raw, day_weighted, slot, historical_days, hot_window_min=15):
+    """
+    Net dollar benefit of a single fixed slot: covered_per_day * COLD_START_WASTE_USD
+    - gas_waste_usd, via _score_day(). Scope is entirely determined by the
+    day_raw/day_weighted the caller passes in — a peak-local subset (see
+    _best_slot_for_peak) when searching a single peak's candidate widths, or
+    the full day when re-scoring an already-decided (possibly merged) window
+    so its reported benefit reflects everything actually inside it.
+    """
+    m = _score_day(day_raw, day_weighted, [slot], historical_days, hot_window_min)
+    return (m["covered_per_day"] * COLD_START_WASTE_USD) - m["gas_waste_usd"]
+
+
 def _best_slot_for_peak(day_raw, day_weighted, peak_bucket, preheat_minutes,
                          min_peak_separation, historical_days, hot_window_min=15,
                          width_step=5, max_half_width=None):
@@ -518,32 +531,37 @@ def _best_slot_for_peak(day_raw, day_weighted, peak_bucket, preheat_minutes,
             "endHour":     win_end   // 60,
             "endMinute":   win_end   % 60,
         }
-        m = _score_day(local_raw, local_weighted, [slot], historical_days, hot_window_min)
-        benefit = (m["covered_per_day"] * COLD_START_WASTE_USD) - m["gas_waste_usd"]
+        benefit = _net_benefit(local_raw, local_weighted, slot, historical_days, hot_window_min)
         if benefit > best_benefit:
             best_benefit, best_width, best_slot = benefit, half_width, slot
 
     return best_width, best_slot, best_benefit
 
 
-def _merge_overlapping_candidates(candidates):
+def _merge_overlapping_candidates(candidates, day_raw, day_weighted,
+                                   historical_days, hot_window_min=15):
     """
     Merge (peak_bucket, peak_score, half_width, slot, net_savings) candidates
-    whose windows overlap or touch into a single wider candidate, summing
-    net_savings. Requires candidates already sorted chronologically (by
-    peak_bucket / window start time) -- a single linear pass then suffices.
+    whose windows overlap or touch into a single wider candidate. Requires
+    candidates already sorted chronologically (by peak_bucket / window start
+    time) -- a single linear pass then suffices, re-extending the previous
+    merged window on each overlap so chains of 3+ overlapping peaks merge
+    correctly.
 
-    The merged window's net_savings is approximated as the sum of its parts'
-    rather than a fresh _score_day() evaluation of the wider boundaries --
-    close enough for ranking purposes without the complexity of re-scoring
-    arbitrary merged windows; same category of approximation as the other
-    simplifications documented in archive/CostGroundedWindowSizing.md. The
-    kept peak_score/half_width fields reflect only the first constituent peak
-    (diagnostic/verbose-print use only, not used for ranking).
+    A merged window's net_savings is RE-EVALUATED from scratch over its full
+    final boundaries via _net_benefit(day_raw, day_weighted, ...) -- i.e.
+    against the *entire* day's demand, not summed from the pre-merge
+    candidates. Summing would undercount: each pre-merge net_savings was
+    computed by _best_slot_for_peak() with covered_raw scoped to only
+    +-min_peak_separation around a single peak's own center, so demand that
+    falls inside the final merged window but outside either original peak's
+    narrow local scope would never be counted. The kept peak_score/half_width
+    fields reflect only the first constituent peak (diagnostic/verbose-print
+    use only, not used for ranking).
     """
     merged = []
     for c in candidates:
-        _, _, _, slot, net_savings = c
+        _, _, _, slot, _ = c
         if merged:
             prev_slot = merged[-1][3]
             prev_end  = prev_slot["endHour"] * 60 + prev_slot["endMinute"]
@@ -552,8 +570,10 @@ def _merge_overlapping_candidates(candidates):
                 this_end = slot["endHour"] * 60 + slot["endMinute"]
                 new_end  = max(prev_end, this_end)
                 prev_slot["endHour"], prev_slot["endMinute"] = divmod(new_end, 60)
+                new_benefit = _net_benefit(day_raw, day_weighted, prev_slot,
+                                           historical_days, hot_window_min)
                 prev = merged[-1]
-                merged[-1] = (prev[0], prev[1], prev[2], prev_slot, prev[4] + net_savings)
+                merged[-1] = (prev[0], prev[1], prev[2], prev_slot, new_benefit)
                 continue
         merged.append(c)
     return merged
@@ -654,7 +674,8 @@ def buckets_to_windows(raw_counts, weighted_scores, gap_minutes, min_occurrences
         # them sorted by bucket time), so a single linear pass suffices.
         # Result may end up with fewer candidates than peaks found — that's
         # fine, a day can end up with 1-3 slots.
-        candidates = _merge_overlapping_candidates(candidates)
+        candidates = _merge_overlapping_candidates(
+            candidates, day_raw, day_weighted, historical_days, hot_window_min)
 
         # Rank by net dollar savings — not raw occurrence score — and keep
         # the top MAX_SLOTS_PER_DAY. This is the $ balance in action: a peak

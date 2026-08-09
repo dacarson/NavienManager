@@ -568,14 +568,17 @@ void commandLearnerStatus(const String& params) {
                 nonZero, total, nonZero * 100.0f / total);
 
   // Per-day table header.
-  telnet.println(F("  Day         Predicted  Measured   Gap      Demand events (4wk)"));
-  telnet.println(F("  -----------------------------------------------------------------"));
+  telnet.println(F("  Day         Predicted  Expected$  Measured   Measured$  Gap      Demand events (4wk)"));
+  telnet.println(F("  -------------------------------------------------------------------------------------"));
 
-  const float       *pred = learner->predictedEfficiency();
-  const WeekMeasured *mw  = learner->measuredWindow();
+  const float       *pred    = learner->predictedEfficiency();
+  const float       *predUsd = learner->predictedBenefitUsd();
+  const WeekMeasured *mw     = learner->measuredWindow();
 
   float sumPred = 0.0f, sumMeas = 0.0f;
+  float sumPredUsd = 0.0f, sumMeasUsd = 0.0f;
   int   cntPred = 0,    cntMeas = 0;
+  int   cntPredUsd = 0, cntMeasUsd = 0;
 
   for (int dow = 0; dow < 7; dow++) {
     uint32_t tot = 0, cov = 0;
@@ -585,14 +588,26 @@ void commandLearnerStatus(const String& params) {
     }
     float measPct = (tot > 0) ? (cov * 100.0f / tot) : NAN;
     float predPct = pred[dow];
+    float expUsd  = predUsd[dow];
+    float measUsd = (tot > 0)
+        ? ((float)cov / 4.0f) * PeakFinder::COLD_START_WASTE_USD
+        : NAN;
 
     char predStr[12], measStr[12], gapStr[12];
+    char expUsdStr[12], measUsdStr[12];
     if (!isnan(predPct)) {
       snprintf(predStr, sizeof(predStr), "%6.1f%%", predPct);
       sumPred += predPct;
       cntPred++;
     } else {
       snprintf(predStr, sizeof(predStr), "    N/A");
+    }
+    if (!isnan(expUsd)) {
+      snprintf(expUsdStr, sizeof(expUsdStr), "$%6.3f", expUsd);
+      sumPredUsd += expUsd;
+      cntPredUsd++;
+    } else {
+      snprintf(expUsdStr, sizeof(expUsdStr), "    N/A");
     }
     if (!isnan(measPct)) {
       snprintf(measStr, sizeof(measStr), "%6.1f%%", measPct);
@@ -601,21 +616,35 @@ void commandLearnerStatus(const String& params) {
     } else {
       snprintf(measStr, sizeof(measStr), "    N/A");
     }
+    if (!isnan(measUsd)) {
+      snprintf(measUsdStr, sizeof(measUsdStr), "$%6.3f", measUsd);
+      sumMeasUsd += measUsd;
+      cntMeasUsd++;
+    } else {
+      snprintf(measUsdStr, sizeof(measUsdStr), "    N/A");
+    }
     if (!isnan(predPct) && !isnan(measPct)) {
       snprintf(gapStr, sizeof(gapStr), "%+7.1f%%", predPct - measPct);
     } else {
       snprintf(gapStr, sizeof(gapStr), "     N/A");
     }
 
-    telnet.printf("  %-11s  %s   %s   %s   %u\n",
-                  dayNames[dow], predStr, measStr, gapStr, (unsigned)tot);
+    telnet.printf("  %-11s  %s   %s   %s   %s   %s   %u\n",
+                  dayNames[dow], predStr, expUsdStr, measStr, measUsdStr,
+                  gapStr, (unsigned)tot);
   }
 
-  telnet.println(F("  -----------------------------------------------------------------"));
+  telnet.println(F("  -------------------------------------------------------------------------------------"));
   char avgPred[12] = "    N/A", avgMeas[12] = "    N/A";
+  char avgPredUsd[12] = "    N/A", avgMeasUsd[12] = "    N/A";
   if (cntPred > 0) snprintf(avgPred, sizeof(avgPred), "%6.1f%%", sumPred / cntPred);
   if (cntMeas > 0) snprintf(avgMeas, sizeof(avgMeas), "%6.1f%%", sumMeas / cntMeas);
-  telnet.printf("  %-11s  %s   %s\n", "Weekly avg", avgPred, avgMeas);
+  if (cntPredUsd > 0)
+    snprintf(avgPredUsd, sizeof(avgPredUsd), "$%6.3f", sumPredUsd / cntPredUsd);
+  if (cntMeasUsd > 0)
+    snprintf(avgMeasUsd, sizeof(avgMeasUsd), "$%6.3f", sumMeasUsd / cntMeasUsd);
+  telnet.printf("  %-11s  %s   %s   %s   %s\n",
+                "Weekly avg", avgPred, avgPredUsd, avgMeas, avgMeasUsd);
 
   // Final schedule: 3 slots per local day (same grouping as scheduler command).
   // fireCount reports which table is actually driving recirc firing decisions

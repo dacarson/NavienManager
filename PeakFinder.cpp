@@ -255,10 +255,53 @@ int PeakFinder::findPeaks(const BucketFile::Bucket *day_buckets,
 }
 
 // ---------------------------------------------------------------------------
+// scoreWindow() — private
+// Net dollar benefit of [start_min,end_min), counting demand only from
+// buckets [lo_bucket,hi_bucket]. See PeakFinder.h for how bestSlotForPeak()
+// and buildSlots() use different scopes for this.
+// ---------------------------------------------------------------------------
+
+float PeakFinder::scoreWindow(const BucketFile::Bucket *day_buckets,
+                               int lo_bucket, int hi_bucket,
+                               int start_min, int end_min, float elapsedWeeks) {
+    // covered_raw: sum raw_count for buckets inside the window, restricted
+    // to [lo_bucket,hi_bucket].
+    uint32_t covered_raw = 0;
+    for (int b = lo_bucket; b <= hi_bucket; b++) {
+        int bmin = b * BUCKET_MINUTES;
+        if (bmin >= start_min && bmin < end_min) {
+            covered_raw += day_buckets[b].raw_count;
+        }
+    }
+    float covered_per_week = (float)covered_raw / elapsedWeeks;
+
+    // gas_waste_usd: empty 15-min sub-windows inside the window (every
+    // bucket in that sub-window has weighted_score == 0), same scope.
+    int wasted_cycles = 0;
+    for (int m = start_min; m < end_min; m += 15) {
+        int  sub_end    = m + 15;
+        bool has_demand = false;
+        for (int b = lo_bucket; b <= hi_bucket; b++) {
+            int bmin = b * BUCKET_MINUTES;
+            if (bmin >= m && bmin < sub_end &&
+                day_buckets[b].weighted_score > 0.0f) {
+                has_demand = true;
+                break;
+            }
+        }
+        if (!has_demand) wasted_cycles++;
+    }
+    float gas_waste_usd = (float)wasted_cycles * RECIRC_WASTE_USD;
+
+    return covered_per_week * COLD_START_WASTE_USD - gas_waste_usd;
+}
+
+// ---------------------------------------------------------------------------
 // bestSlotForPeak() — private
 // Mirrors navien_schedule_learner.py's _best_slot_for_peak(): search
-// candidate half-widths around one peak and pick the one maximizing net
-// dollar benefit. See archive/OnDeviceDollarCostWindowSearch.md.
+// candidate half-widths around one peak and pick the one maximizing
+// scoreWindow(), scoped to ±MIN_PEAK_SEPARATION_MIN around the peak so a
+// neighbouring peak's demand doesn't distort this peak's evaluation.
 //
 // Window construction for each candidate half-width mirrors the original
 // fixed-width buildSlots() exactly:
@@ -296,38 +339,8 @@ bool PeakFinder::bestSlotForPeak(const BucketFile::Bucket *day_buckets,
         int end_min = roundNearest10(win_end);
         if (end_min > 1430) end_min = 1430;
 
-        // covered_raw: sum raw_count for buckets inside this candidate slot,
-        // restricted to the local scope (±MIN_PEAK_SEPARATION_MIN) so a
-        // neighbouring peak's demand doesn't distort this peak's evaluation.
-        uint32_t covered_raw = 0;
-        for (int b = lo_bucket; b <= hi_bucket; b++) {
-            int bmin = b * BUCKET_MINUTES;
-            if (bmin >= start_min && bmin < end_min) {
-                covered_raw += day_buckets[b].raw_count;
-            }
-        }
-        float covered_per_week = (float)covered_raw / elapsedWeeks;
-
-        // gas_waste_usd: empty 15-min sub-windows inside the slot (every
-        // bucket in that sub-window has weighted_score == 0), same local
-        // scope restriction.
-        int wasted_cycles = 0;
-        for (int m = start_min; m < end_min; m += 15) {
-            int  sub_end     = m + 15;
-            bool has_demand  = false;
-            for (int b = lo_bucket; b <= hi_bucket; b++) {
-                int bmin = b * BUCKET_MINUTES;
-                if (bmin >= m && bmin < sub_end &&
-                    day_buckets[b].weighted_score > 0.0f) {
-                    has_demand = true;
-                    break;
-                }
-            }
-            if (!has_demand) wasted_cycles++;
-        }
-        float gas_waste_usd = (float)wasted_cycles * RECIRC_WASTE_USD;
-
-        float net_benefit = covered_per_week * COLD_START_WASTE_USD - gas_waste_usd;
+        float net_benefit = scoreWindow(day_buckets, lo_bucket, hi_bucket,
+                                        start_min, end_min, elapsedWeeks);
         if (net_benefit > best_benefit) {
             best_benefit = net_benefit;
             best_start   = start_min;
@@ -350,13 +363,13 @@ bool PeakFinder::bestSlotForPeak(const BucketFile::Bucket *day_buckets,
 // For each statistically-accepted peak (from findPeaks()'s adaptive
 // threshold), runs bestSlotForPeak() to search its $-optimal window and
 // drops it entirely if no width has positive net benefit. Adjacent peaks
-// whose windows overlap or touch are merged into one wider slot (summing
-// net benefit) rather than kept as separate, redundant slots — mirrors
-// navien_schedule_learner.py's _merge_overlapping_candidates(). Windows are
-// produced in non-decreasing start order by construction (peak centers are
-// always >= MIN_PEAK_SEPARATION_MIN apart, which is >= PEAK_HALF_WIDTH_MIN),
-// so a single linear pass against the immediately-preceding output slot
-// suffices — no need to re-sort after merging.
+// whose windows overlap or touch are merged into one wider slot rather than
+// kept as separate, redundant slots — mirrors navien_schedule_learner.py's
+// _merge_overlapping_candidates(). Windows are produced in non-decreasing
+// start order by construction (peak centers are always
+// >= MIN_PEAK_SEPARATION_MIN apart, which is >= PEAK_HALF_WIDTH_MIN), so a
+// single linear pass against the immediately-preceding output slot suffices
+// — no need to re-sort after merging.
 // ---------------------------------------------------------------------------
 
 int PeakFinder::buildSlots(const BucketFile::Bucket *day_buckets,
@@ -389,13 +402,16 @@ int PeakFinder::buildSlots(const BucketFile::Bucket *day_buckets,
         }
         if (n_slots > 0 && slot.start_min <= out_slots[n_slots - 1].end_min) {
             // Overlaps (or touches) the previous slot — merge instead of
-            // appending. net benefit is approximated as the sum of the two
-            // parts' (not a fresh evaluation of the wider window) — same
-            // category of approximation as elsewhere in this search; see
-            // archive/OnDeviceDollarCostWindowSearch.md.
+            // appending, then re-score the merged window from scratch over
+            // its own full extent (not summing the pre-merge scores, which
+            // would undercount demand outside either original peak's narrow
+            // ±MIN_PEAK_SEPARATION_MIN search scope).
             TimeSlot &prev = out_slots[n_slots - 1];
             if (slot.end_min > prev.end_min) prev.end_min = slot.end_min;
-            prev.score += slot.score;
+            int lo_bucket = prev.start_min / BUCKET_MINUTES;
+            int hi_bucket = (prev.end_min - 1) / BUCKET_MINUTES;
+            prev.score = scoreWindow(day_buckets, lo_bucket, hi_bucket,
+                                     prev.start_min, prev.end_min, elapsedWeeks);
         } else {
             out_slots[n_slots++] = slot;
         }

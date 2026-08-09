@@ -250,14 +250,13 @@ both sides:
   step. `candidates` is already chronologically sorted (peaks come from
   `_find_peaks()`, which returns them sorted by bucket time), so a single
   linear pass suffices — merge into the previous entry when
-  `this_start <= prev_end`, summing `net_savings`.
+  `this_start <= prev_end`.
 - `PeakFinder.cpp`: same merge folded directly into `buildSlots()`'s
   append loop, since `TimeSlot`s are already produced in non-decreasing
   start order by construction (peak centers `>= MIN_PEAK_SEPARATION_MIN`
   apart, which is `>= PEAK_HALF_WIDTH_MIN`) — merges into
   `out_slots[n_slots-1]` instead of appending when the new slot's
-  `start_min <= ` the previous slot's `end_min`, extending `end_min` and
-  summing `.score` (net benefit).
+  `start_min <= ` the previous slot's `end_min`, extending `end_min`.
 
 Both merge **before** the top-`MAX_SLOTS_PER_DAY` ranking, not after — so two
 peaks that individually wouldn't each make the top 3 can still combine into a
@@ -266,13 +265,6 @@ discovering some overlap afterward. Days can now produce 1, 2, or 3 slots
 depending on how much merging occurs — already-supported downstream (`slots`
 arrays already allow fewer than 3; `0xFF` sentinels mark unused slots
 throughout the Eve/NVS/firing path).
-
-**Approximation:** the merged window's net benefit is the *sum* of its
-parts', not a fresh cost evaluation of the wider merged boundaries (which
-would need a new "evaluate an arbitrary fixed window" helper distinct from
-the peak-centered search). Reasonable for ranking purposes — same category
-of approximation as elsewhere in this design — not used for anything more
-precise than "does this candidate beat others for a slot."
 
 **Verified:**
 - Re-ran `navien_schedule_learner.py` against real InfluxDB history: Thursday
@@ -283,10 +275,85 @@ precise than "does this candidate beat others for a slot."
   demand, which without merging would produce two overlapping windows.
   Confirms `findDaySlots()` now returns exactly one merged slot
   (`06:40–09:00`) covering both.
-- **Not yet done:** the device is still running the firmware flashed
-  *before* this fix, so its own recomputes don't have the merge logic yet —
-  a re-flash is needed for the on-device side to pick it up, not just a
-  recompute trigger. The currently-live schedule (from the Step 1 push
-  before this fix) also still has the old overlapping windows on the Python
-  side — re-running `navien_bootstrap.py --push` would refresh those
-  independently of the firmware.
+- **Deployed and confirmed live** (before the re-scoring fix below): Step 1
+  push showed no overlaps on any day; on-device predicted efficiency rose on
+  several days (e.g. Sunday 30.5%→41.4%, Monday 30.6%→39.4%, Thursday
+  29.3%→42.5%; weekly avg 30.4%→35.1%) since a `MAX_SLOTS_PER_DAY` slot was
+  no longer being spent on a window redundant with its neighbor.
+
+### Follow-up to the follow-up: merged score was a real undercount, not just an approximation
+
+The first version of this fix scored a merged window as the **sum** of its
+pre-merge peaks' `net_savings`/`.score` values — flagged at the time as "a
+reasonable approximation." Adding the "Expected $"/"Measured $" columns to
+the status page (see below) made this visible as a real problem, not a minor
+rounding difference: each pre-merge value was computed by
+`_best_slot_for_peak()`/`bestSlotForPeak()` with `covered_raw` scoped to only
+`±min_peak_separation`/`±MIN_PEAK_SEPARATION_MIN` around *that peak's own
+center* — so summing two of them either **undercounts** real demand that
+falls inside the final wider merged window but outside both original narrow
+scopes (the common case — this is what made `Expected $` read roughly an
+order of magnitude below `Measured $` on the live device), or in some data
+shapes **double-counts** demand that both original scopes happened to
+overlap on (confirmed in `test/PeakFinder_test.cpp`'s overlap fixture: the
+merged slot's benefit dropped from `$22.89` under the old sum to the correct
+`$14.35` once re-scored, since both peaks' local scopes had counted the
+shared middle region twice).
+
+**Fix:** re-evaluate the merged window's net benefit from scratch over its
+own full final boundaries, instead of summing:
+
+- `navien_schedule_learner.py`: new `_net_benefit()` helper (`_score_day()` +
+  the benefit formula, extracted so both call sites share it).
+  `_best_slot_for_peak()` now calls it with the peak-local `local_raw`/
+  `local_weighted` subset (unchanged behavior); `_merge_overlapping_candidates()`
+  now takes `day_raw`/`day_weighted`/`historical_days`/`hot_window_min` and
+  calls `_net_benefit()` with the **full, unclipped** day data against the
+  merged window's new boundaries on every merge step (so chains of 3+
+  overlapping peaks re-evaluate correctly at each extension).
+- `PeakFinder.cpp`: new `scoreWindow(day_buckets, lo_bucket, hi_bucket,
+  start_min, end_min, elapsedWeeks)` extracted from `bestSlotForPeak()`'s
+  inner loop. `bestSlotForPeak()` calls it with the fixed peak-local
+  `±MIN_PEAK_SEPARATION_MIN` scope (unchanged behavior); `buildSlots()`'s
+  merge step now calls it with the merged window's **own** extent as the
+  scope (`lo_bucket = prev.start_min/5`, `hi_bucket = (prev.end_min-1)/5`)
+  instead of summing `.score`.
+
+This is no longer an approximation on either side — both now compute the
+merged window's benefit the same way a freshly-found single peak's would,
+just over different (and in the merge case, correct) boundaries.
+
+**Verified:**
+- `test/PeakFinder_test.cpp`'s overlap fixture: merged slot benefit changed
+  from the old sum (`$22.8872`) to the re-scored, correct value (`$14.3512`).
+- Re-ran `navien_schedule_learner.py` against real InfluxDB history:
+  Thursday's merged `05:40–11:40` window now reports `net_savings=$0.4591`
+  (was silently wrong under the old summing approach).
+- **Not yet deployed:** this fix landed after the schedule above was already
+  pushed and the firmware already flashed — both need to be redone
+  (`navien_bootstrap.py --push` / re-flash) for the corrected `Expected $`
+  figures to show up live.
+
+### Follow-up: per-day $ visibility on the status page
+
+Added an "Expected $"/"Measured $" column pair to both the web status page
+(`NavienLearner::appendStatusHTML()`) and Telnet `learnerStatus`
+(`TelnetCommands.cpp`), alongside the existing Predicted/Measured percentage
+columns:
+- `NavienLearner::_predictedBenefitUsd[7]` — new member, summed from kept
+  `TimeSlot::score` values per local day in `recomputeWrite()`'s existing
+  per-day loop (NAN before the first recompute, mirroring
+  `_predictedEfficiency`).
+- `Measured $` — derived from the existing 4-week `WeekMeasured` rolling
+  window: `(covered_4wk / 4) * COLD_START_WASTE_USD`, i.e. the same $/week
+  unit as `Expected $` but computed from real `recircAtStart` observations
+  rather than the schedule's own prediction.
+
+This is what surfaced the merged-score undercount above — Expected $ and
+Measured $ landing an order of magnitude apart on the same day is what made
+the summing approximation visible as a real bug rather than a rounding
+nit. Worth keeping as an ongoing diagnostic: once both figures are
+re-deployed with the re-scoring fix, persistent large gaps between them
+would point at something else worth investigating (e.g. `elapsedWeeks`
+mis-seeded, or the 32-week bootstrap-implied rate genuinely differing from
+recent behavior) rather than the merge math itself.
