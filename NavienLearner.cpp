@@ -1048,14 +1048,14 @@ void NavienLearner::appendStatusHTML(String &page) const {
             "<th style='padding:4px 12px'>Expected $</th>"
             "<th style='padding:4px 12px'>Measured</th>"
             "<th style='padding:4px 12px'>Measured $</th>"
-            "<th style='padding:4px 12px'>Gap</th>"
+            "<th style='padding:4px 12px'>Missed $</th>"
             "<th style='padding:4px 12px'>Demand events (4wk)</th>"
             "</tr>";
 
     float sumPred = 0.0f, sumMeas = 0.0f;
-    float sumPredUsd = 0.0f, sumMeasUsd = 0.0f;
+    float sumPredUsd = 0.0f, sumMeasUsd = 0.0f, sumMissedUsd = 0.0f;
     int   cntPred = 0,    cntMeas = 0;
-    int   cntPredUsd = 0, cntMeasUsd = 0;
+    int   cntPredUsd = 0, cntMeasUsd = 0, cntMissedUsd = 0;
 
     for (int dow = 0; dow < BUCKET_DAYS; dow++) {
         uint32_t tot = 0, cov = 0;
@@ -1071,10 +1071,21 @@ void NavienLearner::appendStatusHTML(String &page) const {
         float measUsd = (tot > 0)
             ? ((float)cov / 4.0f) * PeakFinder::COLD_START_WASTE_USD
             : NAN;
+        // Missed $: dollar value of demand events NOT covered, same 4-week
+        // population as Measured $ (no cross-normalisation with Expected $'s
+        // ~elapsedWeeks-week rate) -- the direct "$ still being left on the
+        // table" figure. The old Predicted-vs-Measured % Gap answers a
+        // different question (has the schedule drifted from recent habits)
+        // and can look "good" (small/negative) on a day with a large dollar
+        // opportunity still uncaptured, since % and $ come from different
+        // populations entirely.
+        float missedUsd = (tot > 0)
+            ? ((float)(tot - cov) / 4.0f) * PeakFinder::COLD_START_WASTE_USD
+            : NAN;
 
-        char predStr[12], measStr[12], gapStr[16];
+        char predStr[12], measStr[12], missedUsdStr[16];
         char predUsdStr[16], measUsdStr[16];
-        const char *gapColor = "white";
+        const char *missedColor = "white";
 
         if (!isnan(predPct)) {
             snprintf(predStr, sizeof(predStr), "%.1f%%", predPct);
@@ -1104,15 +1115,18 @@ void NavienLearner::appendStatusHTML(String &page) const {
         } else {
             snprintf(measUsdStr, sizeof(measUsdStr), "N/A");
         }
-        if (!isnan(predPct) && !isnan(measPct)) {
-            float gap = predPct - measPct;
-            snprintf(gapStr, sizeof(gapStr), "%+.1f%%", gap);
-            float absGap = fabsf(gap);
-            gapColor = (absGap < 10.0f) ? "#28a745"
-                     : (absGap < 25.0f) ? "#ffc107"
-                                        : "#dc3545";
+        if (!isnan(missedUsd)) {
+            snprintf(missedUsdStr, sizeof(missedUsdStr), "$%.3f", missedUsd);
+            sumMissedUsd += missedUsd;
+            cntMissedUsd++;
+            // Absolute-dollar thresholds, not percentage -- the goal is
+            // maximizing $ saved, so a day with a small coverage % but also
+            // a small absolute $ opportunity isn't actually a priority.
+            missedColor = (missedUsd < 0.5f)  ? "#28a745"
+                        : (missedUsd < 1.5f)  ? "#ffc107"
+                                               : "#dc3545";
         } else {
-            snprintf(gapStr, sizeof(gapStr), "N/A");
+            snprintf(missedUsdStr, sizeof(missedUsdStr), "N/A");
         }
 
         page += "<tr><td style='padding:4px 12px;text-align:left'>";
@@ -1126,9 +1140,9 @@ void NavienLearner::appendStatusHTML(String &page) const {
         page += "</td><td style='padding:4px 12px;text-align:center'>";
         page += measUsdStr;
         page += "</td><td style='padding:4px 12px;text-align:center;color:";
-        page += gapColor;
+        page += missedColor;
         page += "'>";
-        page += gapStr;
+        page += missedUsdStr;
         page += "</td><td style='padding:4px 12px;text-align:center'>";
         page += String((uint32_t)tot);
         page += "</td></tr>";
@@ -1136,13 +1150,15 @@ void NavienLearner::appendStatusHTML(String &page) const {
 
     // Weekly average row.
     char avgPred[12] = "N/A", avgMeas[12] = "N/A";
-    char avgPredUsd[16] = "N/A", avgMeasUsd[16] = "N/A";
+    char avgPredUsd[16] = "N/A", avgMeasUsd[16] = "N/A", avgMissedUsd[16] = "N/A";
     if (cntPred > 0) snprintf(avgPred, sizeof(avgPred), "%.1f%%", sumPred / cntPred);
     if (cntMeas > 0) snprintf(avgMeas, sizeof(avgMeas), "%.1f%%", sumMeas / cntMeas);
     if (cntPredUsd > 0)
         snprintf(avgPredUsd, sizeof(avgPredUsd), "$%.3f", sumPredUsd / cntPredUsd);
     if (cntMeasUsd > 0)
         snprintf(avgMeasUsd, sizeof(avgMeasUsd), "$%.3f", sumMeasUsd / cntMeasUsd);
+    if (cntMissedUsd > 0)
+        snprintf(avgMissedUsd, sizeof(avgMissedUsd), "$%.3f", sumMissedUsd / cntMissedUsd);
     page += "<tr style='border-top:1px solid #555'>"
             "<td style='padding:4px 12px;text-align:left'><b>Weekly avg</b></td>"
             "<td style='padding:4px 12px;text-align:center'><b>";
@@ -1153,7 +1169,9 @@ void NavienLearner::appendStatusHTML(String &page) const {
     page += avgMeas;
     page += "</b></td><td style='padding:4px 12px;text-align:center'><b>";
     page += avgMeasUsd;
-    page += "</b></td><td></td><td></td></tr>";
+    page += "</b></td><td style='padding:4px 12px;text-align:center'><b>";
+    page += avgMissedUsd;
+    page += "</b></td><td></td></tr>";
     page += "</table>";
 }
 

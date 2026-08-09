@@ -568,17 +568,17 @@ void commandLearnerStatus(const String& params) {
                 nonZero, total, nonZero * 100.0f / total);
 
   // Per-day table header.
-  telnet.println(F("  Day         Predicted  Expected$  Measured   Measured$  Gap      Demand events (4wk)"));
-  telnet.println(F("  -------------------------------------------------------------------------------------"));
+  telnet.println(F("  Day         Predicted  Expected$  Measured   Measured$  Missed$  Demand events (4wk)"));
+  telnet.println(F("  -----------------------------------------------------------------------------------"));
 
   const float       *pred    = learner->predictedEfficiency();
   const float       *predUsd = learner->predictedBenefitUsd();
   const WeekMeasured *mw     = learner->measuredWindow();
 
   float sumPred = 0.0f, sumMeas = 0.0f;
-  float sumPredUsd = 0.0f, sumMeasUsd = 0.0f;
+  float sumPredUsd = 0.0f, sumMeasUsd = 0.0f, sumMissedUsd = 0.0f;
   int   cntPred = 0,    cntMeas = 0;
-  int   cntPredUsd = 0, cntMeasUsd = 0;
+  int   cntPredUsd = 0, cntMeasUsd = 0, cntMissedUsd = 0;
 
   for (int dow = 0; dow < 7; dow++) {
     uint32_t tot = 0, cov = 0;
@@ -592,8 +592,16 @@ void commandLearnerStatus(const String& params) {
     float measUsd = (tot > 0)
         ? ((float)cov / 4.0f) * PeakFinder::COLD_START_WASTE_USD
         : NAN;
+    // Missed $: dollar value of uncovered demand, same 4-week population as
+    // Measured $ -- the direct "$ still left on the table" figure. See
+    // NavienLearner::appendStatusHTML() for why this replaces the old
+    // Predicted-vs-Measured % Gap (different populations, can mislead about
+    // dollar opportunity).
+    float missedUsd = (tot > 0)
+        ? ((float)(tot - cov) / 4.0f) * PeakFinder::COLD_START_WASTE_USD
+        : NAN;
 
-    char predStr[12], measStr[12], gapStr[12];
+    char predStr[12], measStr[12], missedUsdStr[12];
     char expUsdStr[12], measUsdStr[12];
     if (!isnan(predPct)) {
       snprintf(predStr, sizeof(predStr), "%6.1f%%", predPct);
@@ -623,28 +631,32 @@ void commandLearnerStatus(const String& params) {
     } else {
       snprintf(measUsdStr, sizeof(measUsdStr), "    N/A");
     }
-    if (!isnan(predPct) && !isnan(measPct)) {
-      snprintf(gapStr, sizeof(gapStr), "%+7.1f%%", predPct - measPct);
+    if (!isnan(missedUsd)) {
+      snprintf(missedUsdStr, sizeof(missedUsdStr), "$%6.3f", missedUsd);
+      sumMissedUsd += missedUsd;
+      cntMissedUsd++;
     } else {
-      snprintf(gapStr, sizeof(gapStr), "     N/A");
+      snprintf(missedUsdStr, sizeof(missedUsdStr), "    N/A");
     }
 
     telnet.printf("  %-11s  %s   %s   %s   %s   %s   %u\n",
                   dayNames[dow], predStr, expUsdStr, measStr, measUsdStr,
-                  gapStr, (unsigned)tot);
+                  missedUsdStr, (unsigned)tot);
   }
 
-  telnet.println(F("  -------------------------------------------------------------------------------------"));
+  telnet.println(F("  -----------------------------------------------------------------------------------"));
   char avgPred[12] = "    N/A", avgMeas[12] = "    N/A";
-  char avgPredUsd[12] = "    N/A", avgMeasUsd[12] = "    N/A";
+  char avgPredUsd[12] = "    N/A", avgMeasUsd[12] = "    N/A", avgMissedUsd[12] = "    N/A";
   if (cntPred > 0) snprintf(avgPred, sizeof(avgPred), "%6.1f%%", sumPred / cntPred);
   if (cntMeas > 0) snprintf(avgMeas, sizeof(avgMeas), "%6.1f%%", sumMeas / cntMeas);
   if (cntPredUsd > 0)
     snprintf(avgPredUsd, sizeof(avgPredUsd), "$%6.3f", sumPredUsd / cntPredUsd);
   if (cntMeasUsd > 0)
     snprintf(avgMeasUsd, sizeof(avgMeasUsd), "$%6.3f", sumMeasUsd / cntMeasUsd);
-  telnet.printf("  %-11s  %s   %s   %s   %s\n",
-                "Weekly avg", avgPred, avgPredUsd, avgMeas, avgMeasUsd);
+  if (cntMissedUsd > 0)
+    snprintf(avgMissedUsd, sizeof(avgMissedUsd), "$%6.3f", sumMissedUsd / cntMissedUsd);
+  telnet.printf("  %-11s  %s   %s   %s   %s   %s\n",
+                "Weekly avg", avgPred, avgPredUsd, avgMeas, avgMeasUsd, avgMissedUsd);
 
   // Final schedule: 3 slots per local day (same grouping as scheduler command).
   // fireCount reports which table is actually driving recirc firing decisions

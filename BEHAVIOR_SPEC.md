@@ -378,7 +378,7 @@ The page header firmware version (controller / panel) is displayed as a sub-head
 
 The system log table (HomeSpan's built-in `tab1`) is hidden; only the custom status content is shown.
 
-A **Learner Status** section is appended to the page by `NavienLearner::appendStatusHTML()`. It renders the same data as `learnerStatus` Telnet: last recompute time, bucket fill, and a per-day table with Predicted %, Measured %, Gap, and 4-week demand-event count. The Gap column is colour-coded: green (< 10%), amber (10–25%), red (> 25%). The HTML is built on demand into the existing page buffer and is not cached.
+A **Learner Status** section is appended to the page by `NavienLearner::appendStatusHTML()`. It renders the same data as `learnerStatus` Telnet: last recompute time, bucket fill, and a per-day table with Predicted %, Expected $, Measured %, Measured $, Missed $, and 4-week demand-event count. Missed $ — the dollar value of demand events not covered, from the same 4-week population as Measured $ — replaced a Predicted-vs-Measured % Gap column: with the goal being to maximize dollar savings, a small percentage gap can still coexist with a large uncaptured dollar opportunity (they come from different populations — Predicted % over all-time accumulated buckets, Measured % over the recent 4-week window), so the percentage figure was actively misleading as an at-a-glance priority signal. Missed $ is colour-coded on absolute dollar thresholds, not percentage: green (< $0.50), amber ($0.50–$1.50), red (> $1.50). The HTML is built on demand into the existing page buffer and is not cached.
 
 ---
 
@@ -754,19 +754,33 @@ Two efficiency metrics are maintained continuously and cached for display.
 - **OTA start** — via the `HS_OTA_STARTED` HomeSpan status callback, just before the device reboots to apply the update.
 - **On demand** — via the Telnet `saveLearner` command, for planned reboots not triggered through OTA.
 
-**The gap metric:**
+**Missed $ — the dollar-value gap metric shown in the UI:**
 
 ```
-gap[dow] = predicted[dow] - measured[dow]
+missed_usd[dow] = ((total[dow] - covered[dow]) / 4) * COLD_START_WASTE_USD
 ```
 
-| Gap | Interpretation |
+The dollar value of demand events *not* covered, summed across the rolling
+4-week window and normalised to $/week — the same population as Measured $
+(see `PeakFinder::COLD_START_WASTE_USD`), so it isn't confounded by
+`Predicted %`'s different (all-time bucket) normalisation the way a
+percentage-based `predicted − measured` gap would be. A day can show a small
+or even negative percentage gap (measured coverage beating predicted) while
+still leaving a large dollar amount of demand uncaptured, if that day simply
+has a lot of total demand — Missed $ surfaces that directly, in line with
+the goal of maximizing dollar savings rather than matching a prediction.
+
+| Missed $ (weekly avg) | Interpretation |
 |---|---|
-| < 10% | Schedule and habits are well aligned |
-| 10–25% | Normal drift — nightly recompute should self-correct within days |
-| > 25% | Habits have shifted significantly; consider rerunning bootstrap |
-| Predicted N/A | Insufficient bucket data for this day |
-| Measured N/A | No demand events observed yet in the rolling window |
+| < $0.50 | Small dollar opportunity left uncaptured |
+| $0.50 – $1.50 | Moderate — worth a look if it persists across recomputes |
+| > $1.50 | Significant — schedule is leaving real savings on the table |
+| N/A | No demand events observed yet in the rolling window for this day |
+
+`predicted[dow] - measured[dow]` (percentages) is still computed internally
+for `Predicted %`/`Measured %` display, but is no longer diffed into a
+separate displayed metric — Missed $ is the actionable one for the stated
+"maximize savings" goal.
 
 ### Bootstrap
 

@@ -87,8 +87,10 @@ The ESP32 itself learns your household's hot-water habits and recomputes the rec
 | Metric | What it means |
 |---|---|
 | **Predicted** | Fraction of demand buckets that fall inside (or within 15 min after) a scheduled slot |
+| **Expected $** | Predicted dollar value of the schedule's chosen windows, $/week |
 | **Measured** | Fraction of actual demand events that had recirculation already running — rolling 4-week window |
-| **Gap** | Predicted − Measured: green < 10%, amber 10–25%, red > 25% |
+| **Measured $** | Dollar value of that covered demand, $/week |
+| **Missed $** | Dollar value of *uncovered* demand, $/week — green < $0.50, amber $0.50–$1.50, red > $1.50. The direct "how much money is this day still leaving on the table" figure, since a small percentage gap can hide a large dollar opportunity on a high-traffic day. |
 
 ```
 > learnerStatus
@@ -96,10 +98,10 @@ Learner Status
   Last recompute:  2026-04-01 00:02  (8h ago)
   Bucket fill:     1621 / 2016 non-zero (80.4%)
 
-  Day         Predicted  Measured   Gap      Demand events (4wk)
-  -----------------------------------------------------------------
-  Sunday         79.1%      76.3%     -2.8%   18
-  Monday         83.3%      81.0%     -2.3%   22
+  Day         Predicted  Expected$  Measured   Measured$  Missed$  Demand events (4wk)
+  -----------------------------------------------------------------------------------
+  Sunday         79.1%    $0.410      76.3%    $0.512    $0.159   18
+  Monday         83.3%    $0.398      81.0%    $0.601    $0.141   22
   ...
 ```
 
