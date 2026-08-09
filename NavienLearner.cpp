@@ -367,6 +367,17 @@ void NavienLearner::learnerTask(void *pvParam) {
                   - (rlt_local.tm_hour * 60 + rlt_local.tm_min);
                 if (self->_recomputeOffsetMin >  720) self->_recomputeOffsetMin -= 1440;
                 if (self->_recomputeOffsetMin < -720) self->_recomputeOffsetMin += 1440;
+
+                // Snapshot weeks-of-accumulation once for the entire pass, same
+                // reasoning as the offset above. Signed 64-bit subtraction avoids
+                // wraparound if accumulation_start_epoch is 0 (unset) or the clock
+                // has done something unexpected; clamp to a 1-week minimum so a
+                // fresh/just-reset file doesn't produce a divide-by-near-zero rate.
+                int64_t deltaSec = (int64_t)rlt_now
+                                  - (int64_t)self->_store.data().accumulation_start_epoch;
+                self->_recomputeElapsedWeeks =
+                    (deltaSec > 604800) ? (float)deltaSec / 604800.0f : 1.0f;
+
                 memset(self->_weekSlotCount, 0, sizeof(self->_weekSlotCount));
                 self->_recomputeDay = 0;
                 self->_taskState    = RECOMPUTING;
@@ -387,7 +398,7 @@ void NavienLearner::learnerTask(void *pvParam) {
                     local_buckets[lb] = self->_store.data().buckets[utc_dow][utc_min / 5];
                 }
                 self->_weekSlotCount[local_dow] = PeakFinder::findDaySlots(
-                    local_buckets, self->_weekSlots[local_dow]);
+                    local_buckets, self->_weekSlots[local_dow], self->_recomputeElapsedWeeks);
                 self->_recomputeDay++;
                 if (self->_recomputeDay >= BUCKET_DAYS) {
                     self->_taskState = RECOMPUTE_WRITE;
@@ -546,7 +557,11 @@ void NavienLearner::decayCheck() {
     }
 
     // Update the year in the header and persist (with or without decay).
-    _store.data().current_year = this_year;
+    // Also reset accumulation_start_epoch: decay already means "this data now
+    // counts as last year's," so the $-window-search's elapsed-time reference
+    // resets at the same moment (see PeakFinder's elapsedWeeks parameter).
+    _store.data().current_year             = this_year;
+    _store.data().accumulation_start_epoch = (uint32_t)now;
     if (!_store.save()) {
         Serial.println("NavienLearner: decay save failed");
     }
@@ -884,7 +899,8 @@ int NavienLearner::ingestBucketPayload(const char *json, bool &replaced) {
         return -1;
     }
 
-    int current_year = doc["current_year"] | 0;
+    int current_year      = doc["current_year"]      | 0;
+    float weeks_represented = doc["weeks_represented"] | 0.0f;
     replaced = doc["replace"] | false;
     // finalize=true (default) triggers an immediate recompute after ingest.
     // Set to false by navien_bucket_export.py for all but the last day chunk
@@ -914,6 +930,25 @@ int NavienLearner::ingestBucketPayload(const char *json, bool &replaced) {
             current_year = (t && t->tm_year > 100) ? (t->tm_year + 1900) : 2025;
         }
         bf.current_year = (uint16_t)current_year;
+
+        // Seed accumulation_start_epoch to reflect how much real history this
+        // payload's scores represent, rather than leaving it at "now" (set by
+        // BucketStore::initEmpty() moments earlier at boot). Left at "now",
+        // elapsedWeeks would compute to ~1 week even though the incoming
+        // raw_count/weighted_score values were accumulated over
+        // weeks_represented weeks of real InfluxDB history — inflating
+        // PeakFinder's covered_per_week rate by roughly that same factor and
+        // producing abnormally wide windows until the next annual decay.
+        // weeks_represented <= 0 (old export script, or a payload that omits
+        // it) leaves the epoch as already set by initEmpty() — same as today.
+        if (weeks_represented > 0.0f) {
+            time_t now = time(nullptr);
+            if (now > 0) {
+                uint32_t backSec = (uint32_t)(weeks_represented * 604800.0f);
+                bf.accumulation_start_epoch =
+                    (backSec < (uint32_t)now) ? (uint32_t)now - backSec : 0;
+            }
+        }
     } else if (current_year > 0) {
         bf.current_year = (uint16_t)current_year;
     }

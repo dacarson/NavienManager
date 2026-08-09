@@ -98,6 +98,8 @@ bool BucketStore::zeroBuckets(uint16_t current_year) {
     _buckets.magic          = BUCKET_MAGIC;
     _buckets.schema_version = BUCKET_SCHEMA_VERSION;
     _buckets.current_year   = current_year;
+    time_t now = time(nullptr);
+    _buckets.accumulation_start_epoch = (now > 0) ? (uint32_t)now : 0;
     return writeAtomic();
 }
 
@@ -186,4 +188,6 @@ void BucketStore::initEmpty(uint16_t current_year) {
     _buckets.magic          = BUCKET_MAGIC;
     _buckets.schema_version = BUCKET_SCHEMA_VERSION;
     _buckets.current_year   = current_year;
+    time_t now = time(nullptr);
+    _buckets.accumulation_start_epoch = (now > 0) ? (uint32_t)now : 0;
 }

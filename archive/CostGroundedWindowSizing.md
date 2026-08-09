@@ -1,5 +1,13 @@
 # Cost-Grounded Recirculation Window Sizing
 
+> **Superseded (on-device section only):** the "Design — On-device" section
+> below deliberately kept `PeakFinder.h` on a fixed, hand-tuned width rather
+> than running the real per-peak `$`-search on-device. That gap has since
+> been closed — see `archive/OnDeviceDollarCostWindowSearch.md`, which adds
+> `BucketFile::accumulation_start_epoch` and ports the actual search to
+> `PeakFinder.cpp`. The Python-side design/verification below is unaffected
+> and still accurate.
+
 ## Context
 
 `NavienLearner`/`navien_schedule_learner.py` picks up to 3 recirculation windows

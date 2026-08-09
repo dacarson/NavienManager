@@ -194,6 +194,9 @@ private:
     TimeSlot _weekSlots[7][MAX_PEAK_CANDIDATES];  // local-time slots per local day
     int      _weekSlotCount[7];                   // slot count per local day (0–MAX_PEAK_CANDIDATES)
     int      _recomputeOffsetMin;                 // UTC offset (UTC = local + offset) for this pass
+    float    _recomputeElapsedWeeks;              // weeks since accumulation_start_epoch, snapshotted
+                                                    // once per pass; converts weighted_score into a
+                                                    // $/week rate for PeakFinder's cost-based search
     float    _predictedEfficiency[7];            // per local day (Sun..Sat), Phase 7
 
     // --- Measured efficiency rolling window (Core 0 writes only) ---

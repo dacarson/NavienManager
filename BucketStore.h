@@ -30,19 +30,25 @@ SOFTWARE.
 
 // Magic number: "NAVI" in little-endian ASCII bytes
 #define BUCKET_MAGIC          0x4E415649u
-#define BUCKET_SCHEMA_VERSION 2
+#define BUCKET_SCHEMA_VERSION 3
 
 // 7 days x 288 five-minute buckets (1440 min / 5)
 #define BUCKET_DAYS    7
 #define BUCKET_PER_DAY 288
 
 // BucketFile is the on-disk and in-RAM representation.
-// Total size: 8 + 7*288*6 = 12,104 bytes
+// Total size: 12 + 7*288*6 = 12,108 bytes
 // IMPORTANT: always declare as a class member (heap), never as a local variable (stack overflow).
 struct BucketFile {
-    uint32_t magic;           // 0x4E415649 ("NAVI") — detects corruption
-    uint16_t schema_version;  // bump if struct layout changes
-    uint16_t current_year;    // year buckets[] was last written for
+    uint32_t magic;                    // 0x4E415649 ("NAVI") — detects corruption
+    uint16_t schema_version;           // bump if struct layout changes
+    uint16_t current_year;             // year buckets[] was last written for
+    uint32_t accumulation_start_epoch; // time(nullptr) when current_year's data
+                                        // started accumulating (reset at each
+                                        // annual decay) -- converts accumulating
+                                        // weighted_score into a $/week rate for
+                                        // PeakFinder's cost-based window search.
+                                        // 0 if unset (clock wasn't valid yet).
 
     struct Bucket {
         uint16_t raw_count;       // unweighted demand-event hits

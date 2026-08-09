@@ -60,7 +60,7 @@ static int roundNearest10(int x) {
 // ---------------------------------------------------------------------------
 
 int PeakFinder::findDaySlots(const BucketFile::Bucket *day_buckets,
-                              TimeSlot *out_slots) {
+                              TimeSlot *out_slots, float elapsedWeeks) {
     const int sep_buckets = MIN_PEAK_SEPARATION_MIN / BUCKET_MINUTES; // 9
 
     // Adaptive threshold: two-phase loop.
@@ -134,7 +134,7 @@ int PeakFinder::findDaySlots(const BucketFile::Bucket *day_buckets,
     // No UTC-day cap: all NMS-surviving candidates are returned so that
     // recomputeWrite() can prune to MAX_SLOTS_PER_DAY per LOCAL day instead,
     // correctly handling usage patterns that straddle a UTC-day boundary.
-    return buildSlots(best, n_best, out_slots);
+    return buildSlots(day_buckets, best, n_best, elapsedWeeks, out_slots);
 }
 
 // ---------------------------------------------------------------------------
@@ -255,29 +255,109 @@ int PeakFinder::findPeaks(const BucketFile::Bucket *day_buckets,
 }
 
 // ---------------------------------------------------------------------------
-// buildSlots() — private
-// Mirrors the Python window-building loop inside buckets_to_windows():
+// bestSlotForPeak() — private
+// Mirrors navien_schedule_learner.py's _best_slot_for_peak(): search
+// candidate half-widths around one peak and pick the one maximizing net
+// dollar benefit. See archive/OnDeviceDollarCostWindowSearch.md.
 //
-//   win_start = max(0,    peak_bucket - peak_half_width)   [minutes]
-//   win_end   = min(1439, peak_bucket + peak_half_width)
-//   start_min = max(0,    win_start   - preheat_minutes)
-//   start_min = round(start_min / 10) * 10
-//   win_end   = min(1430, round(win_end / 10) * 10)
-//
-// Rounding notes:
-//   win_end: uses roundNearest10() (banker's rounding) to match Python's
-//   round() exactly.  For odd bucket indices, win_end mod 10 == 5 so the
-//   tie-breaking rule matters.
-//
-//   start_min: peak_min - 33 has remainder 7 (even bucket) or 2 (odd bucket)
-//   mod 10 — never a half-step boundary — so +5 integer rounding matches
-//   Python's round() in all reachable cases.
+// Window construction for each candidate half-width mirrors the original
+// fixed-width buildSlots() exactly:
+//   win_start = max(0,    peak_bucket - half_width)   [minutes]
+//   win_end   = min(1439, peak_bucket + half_width)
+//   start_min = max(0,    win_start   - preheat_minutes), rounded to 10min
+//   win_end   = min(1430, round(win_end / 10) * 10)   (banker's rounding)
 // ---------------------------------------------------------------------------
 
-int PeakFinder::buildSlots(const Peak *accepted, int n_accepted,
-                            TimeSlot *out_slots) {
-    // Sort accepted peaks chronologically (ascending bucket).
-    // Copy to a local array so we can sort without modifying the caller's.
+bool PeakFinder::bestSlotForPeak(const BucketFile::Bucket *day_buckets,
+                                  int peak_bucket, float elapsedWeeks,
+                                  TimeSlot *out_slot) {
+    const int sep_buckets = MIN_PEAK_SEPARATION_MIN / BUCKET_MINUTES;
+    const int lo_bucket = (peak_bucket - sep_buckets < 0)
+                          ? 0 : peak_bucket - sep_buckets;
+    const int hi_bucket = (peak_bucket + sep_buckets >= BUCKET_PER_DAY)
+                          ? BUCKET_PER_DAY - 1 : peak_bucket + sep_buckets;
+    const int peak_min = peak_bucket * BUCKET_MINUTES;
+
+    float best_benefit = 0.0f;  // not worth a slot unless some width beats "no slot"
+    int   best_start   = -1;
+    int   best_end     = -1;
+
+    for (int half_width = WIDTH_STEP_MIN; half_width <= PEAK_HALF_WIDTH_MIN;
+         half_width += WIDTH_STEP_MIN) {
+        int win_start = peak_min - half_width;
+        if (win_start < 0) win_start = 0;
+        int win_end = peak_min + half_width;
+        if (win_end > 1439) win_end = 1439;
+
+        int start_min = win_start - PREHEAT_MINUTES;
+        if (start_min < 0) start_min = 0;
+        start_min = ((start_min + 5) / 10) * 10;
+
+        int end_min = roundNearest10(win_end);
+        if (end_min > 1430) end_min = 1430;
+
+        // covered_raw: sum raw_count for buckets inside this candidate slot,
+        // restricted to the local scope (±MIN_PEAK_SEPARATION_MIN) so a
+        // neighbouring peak's demand doesn't distort this peak's evaluation.
+        uint32_t covered_raw = 0;
+        for (int b = lo_bucket; b <= hi_bucket; b++) {
+            int bmin = b * BUCKET_MINUTES;
+            if (bmin >= start_min && bmin < end_min) {
+                covered_raw += day_buckets[b].raw_count;
+            }
+        }
+        float covered_per_week = (float)covered_raw / elapsedWeeks;
+
+        // gas_waste_usd: empty 15-min sub-windows inside the slot (every
+        // bucket in that sub-window has weighted_score == 0), same local
+        // scope restriction.
+        int wasted_cycles = 0;
+        for (int m = start_min; m < end_min; m += 15) {
+            int  sub_end     = m + 15;
+            bool has_demand  = false;
+            for (int b = lo_bucket; b <= hi_bucket; b++) {
+                int bmin = b * BUCKET_MINUTES;
+                if (bmin >= m && bmin < sub_end &&
+                    day_buckets[b].weighted_score > 0.0f) {
+                    has_demand = true;
+                    break;
+                }
+            }
+            if (!has_demand) wasted_cycles++;
+        }
+        float gas_waste_usd = (float)wasted_cycles * RECIRC_WASTE_USD;
+
+        float net_benefit = covered_per_week * COLD_START_WASTE_USD - gas_waste_usd;
+        if (net_benefit > best_benefit) {
+            best_benefit = net_benefit;
+            best_start   = start_min;
+            best_end     = end_min;
+        }
+    }
+
+    if (best_start < 0) {
+        return false;  // no candidate width beat "no slot"
+    }
+
+    out_slot->start_min = (uint16_t)best_start;
+    out_slot->end_min   = (uint16_t)best_end;
+    out_slot->score     = best_benefit;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// buildSlots() — private
+// For each statistically-accepted peak (from findPeaks()'s adaptive
+// threshold), runs bestSlotForPeak() to search its $-optimal window and
+// drops it entirely if no width has positive net benefit.
+// ---------------------------------------------------------------------------
+
+int PeakFinder::buildSlots(const BucketFile::Bucket *day_buckets,
+                            const Peak *accepted, int n_accepted,
+                            float elapsedWeeks, TimeSlot *out_slots) {
+    // Sort accepted peaks chronologically (ascending bucket) so surviving
+    // slots come out chronologically ordered, matching findDaySlots()'s
+    // documented return contract.
     // n_accepted must be <= MAX_PEAK_CANDIDATES; findDaySlots() no longer caps
     // at MAX_SLOTS_PER_DAY — pruning now happens per local day in recomputeWrite().
     Peak chrono[MAX_PEAK_CANDIDATES];
@@ -294,33 +374,13 @@ int PeakFinder::buildSlots(const Peak *accepted, int n_accepted,
         chrono[j + 1] = key;
     }
 
+    int n_slots = 0;
     for (int i = 0; i < n_accepted; i++) {
-        int peak_min = chrono[i].bucket * BUCKET_MINUTES;  // minute-of-day
-
-        int win_start = peak_min - PEAK_HALF_WIDTH_MIN;
-        if (win_start < 0) win_start = 0;
-
-        int win_end = peak_min + PEAK_HALF_WIDTH_MIN;
-        if (win_end > 1439) win_end = 1439;
-
-        // Apply preheat (start recirc early to warm the pipes).
-        int start_min = win_start - PREHEAT_MINUTES;
-        if (start_min < 0) start_min = 0;
-
-        // Round start_min to nearest 10-min boundary.
-        // start_min mod 10 is always 7 or 2 (never 5), so +5 rounding
-        // matches Python's round() exactly.
-        start_min = ((start_min + 5) / 10) * 10;
-
-        // Round win_end to nearest 10-min boundary using banker's rounding
-        // to match Python's round() exactly, then cap at 1430.
-        win_end = roundNearest10(win_end);
-        if (win_end > 1430) win_end = 1430;
-
-        out_slots[i].start_min = (uint16_t)start_min;
-        out_slots[i].end_min   = (uint16_t)win_end;
-        out_slots[i].score     = chrono[i].score;
+        TimeSlot slot;
+        if (bestSlotForPeak(day_buckets, chrono[i].bucket, elapsedWeeks, &slot)) {
+            out_slots[n_slots++] = slot;
+        }
     }
 
-    return n_accepted;
+    return n_slots;
 }

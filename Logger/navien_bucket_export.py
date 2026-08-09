@@ -65,11 +65,22 @@ def build_bucket_payload(args, replace=False):
         if buckets:
             days.append({"dow": dow, "buckets": buckets})
 
+    # How many weeks of real history this payload's scores represent, so the
+    # device can seed BucketFile.accumulation_start_epoch correctly on a
+    # --replace ingest instead of leaving it at "now" (which would make the
+    # on-device $-cost search think this data was observed in the last week,
+    # wildly inflating its covered_per_week rate). Same "instances of a
+    # weekday observed" logic as navien_schedule_learner.py's historical_days,
+    # expressed in weeks: a +-window_weeks band covers 2*window_weeks weeks
+    # per year, times how many years of recency_weights were queried.
+    weeks_represented = 2 * args.window_weeks * len(args.recency_weights)
+
     return {
-        "schema_version": 2,
-        "current_year":   _datetime.now(_timezone.utc).year,
-        "replace":        replace,
-        "days":           days,
+        "schema_version":    3,
+        "current_year":      _datetime.now(_timezone.utc).year,
+        "replace":           replace,
+        "weeks_represented": weeks_represented,
+        "days":              days,
     }
 
 
@@ -77,8 +88,9 @@ def push_buckets(payload, args):
     """POST the bucket payload to the ESP32 /buckets endpoint one day at a time.
 
     Sends 7 separate requests (one per day-of-week) to stay within the ESP32's
-    14 KB receive buffer.  The 'replace' flag is forwarded only on the first
-    chunk.  'finalize' is False for all chunks except the last, suppressing a
+    14 KB receive buffer.  The 'replace' flag (and 'weeks_represented', which
+    only matters when 'replace' is set) is forwarded only on the first chunk.
+    'finalize' is False for all chunks except the last, suppressing a
     premature recompute on partial data.
     """
     import requests
@@ -93,6 +105,7 @@ def push_buckets(payload, args):
             "schema_version": payload["schema_version"],
             "current_year":   payload["current_year"],
             "replace":        payload["replace"] if i == 0 else False,
+            "weeks_represented": payload["weeks_represented"] if i == 0 else 0,
             "finalize":       is_last,
             "days":           [day],
         }

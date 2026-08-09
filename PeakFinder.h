@@ -47,7 +47,11 @@ SOFTWARE.
 struct TimeSlot {
     uint16_t start_min;  // minutes since midnight (start of recirc window)
     uint16_t end_min;    // minutes since midnight (end of recirc window)
-    float    score;      // weighted score of the peak that produced this slot
+    float    score;      // net dollar benefit of this window (covered demand
+                          // value minus gas cost — see buildSlots()), NOT the
+                          // peak's raw weighted_score. recomputeWrite() sorts
+                          // and prunes to MAX_SLOTS_PER_DAY by this field, so
+                          // that pruning is $-based as a direct consequence.
 };
 
 // ---------------------------------------------------------------------------
@@ -88,7 +92,7 @@ public:
     // *centers* are >= MIN_PEAK_SEPARATION_MIN apart, not that ±half-width
     // windows around them don't overlap). Not observed in practice — real
     // kept peaks in the reference run were consistently 70+ min apart.
-    static constexpr int   PEAK_HALF_WIDTH_MIN     = 45;   // ±45 min window
+    static constexpr int   PEAK_HALF_WIDTH_MIN     = 45;   // ±45 min max search width
     static constexpr int   MIN_PEAK_SEPARATION_MIN = 45;   // 9 buckets
     static constexpr int   PREHEAT_MINUTES         = 3;    // COLD_PIPE_DRAIN_MINUTES
     static constexpr float MIN_WEIGHTED_SCORE      = 6.0f;
@@ -96,20 +100,33 @@ public:
     static constexpr int   MIN_OCCURRENCES         = 3;
     static constexpr float SCORE_STEP              = 1.0f;
     static constexpr int   SMOOTH_RADIUS           = 2;    // ±2 buckets
+    static constexpr int   WIDTH_STEP_MIN          = 5;    // candidate half-width step
+
+    // Real dollar costs used by buildSlots()'s per-peak width search — see
+    // archive/OnDeviceDollarCostWindowSearch.md. Mirrors Logger/config.py +
+    // navien_schedule_learner.py; there is no shared source between Python and
+    // C++, so keep these in sync by hand if the underlying rates change.
+    static constexpr float COLD_START_WASTE_USD = 0.097f;  // COLD_PIPE_DRAIN_MINUTES * AVG_FLOW_LPM * WATER_RATE_USD_PER_L
+    static constexpr float RECIRC_WASTE_USD     = 0.0024f; // RECIRC_CYCLE_MINUTES/60 * RECIRC_PARTIAL_KCAL_HR * GAS_RATE_USD_PER_KCAL
 
     // Find schedule slots for one day using the adaptive threshold algorithm.
     //
-    // day_buckets : array of BUCKET_PER_DAY buckets representing one local
-    //              calendar day (built by NavienLearner::RECOMPUTING from the
-    //              UTC-indexed BucketStore via the current UTC offset).
-    // out_slots   : caller-supplied array of at least MAX_PEAK_CANDIDATES entries.
+    // day_buckets  : array of BUCKET_PER_DAY buckets representing one local
+    //               calendar day (built by NavienLearner::RECOMPUTING from the
+    //               UTC-indexed BucketStore via the current UTC offset).
+    // out_slots    : caller-supplied array of at least MAX_PEAK_CANDIDATES entries.
+    // elapsedWeeks : weeks since BucketFile::accumulation_start_epoch, snapshotted
+    //               once per recompute pass by NavienLearner (RECOMPUTE_LOAD).
+    //               Converts accumulating weighted_score into a $/week rate
+    //               comparable to the flat per-cycle RECIRC_WASTE_USD.
     //
     // Returns the number of slots written (0 – MAX_PEAK_CANDIDATES), sorted
     // chronologically (ascending start_min) in local minutes-since-midnight.
     // No per-day cap is applied here; recomputeWrite() prunes to
-    // MAX_SLOTS_PER_DAY per local day by score before converting to UTC.
+    // MAX_SLOTS_PER_DAY per local day by score (now net dollar benefit, not
+    // raw occurrence score — see TimeSlot::score) before converting to UTC.
     static int findDaySlots(const BucketFile::Bucket *day_buckets,
-                            TimeSlot *out_slots);
+                            TimeSlot *out_slots, float elapsedWeeks);
 
 private:
     // A peak candidate: bucket index and raw weighted score.
@@ -133,9 +150,28 @@ private:
                          float threshold, int occ_floor, int sep_buckets,
                          Peak *out_accepted);
 
-    // Convert accepted peaks to TimeSlot windows.
-    // Applies preheat offset and rounds to nearest 10-minute boundary.
-    // Returns number of slots written, sorted chronologically.
-    static int buildSlots(const Peak *accepted, int n_accepted,
-                          TimeSlot *out_slots);
+    // For one peak, search candidate half-widths (WIDTH_STEP_MIN steps, up to
+    // PEAK_HALF_WIDTH_MIN) and return the one maximizing net dollar benefit:
+    //   net_benefit = covered_per_week * COLD_START_WASTE_USD - gas_waste_usd
+    // covered_per_week sums raw_count for buckets inside the candidate slot
+    // (scanning only ±MIN_PEAK_SEPARATION_MIN around the peak, matching the
+    // Python search's local-scope rationale) divided by elapsedWeeks.
+    // gas_waste_usd values empty 15-min sub-windows inside the slot (every
+    // bucket in that sub-window has weighted_score == 0) at RECIRC_WASTE_USD.
+    // Mirrors navien_schedule_learner.py's _best_slot_for_peak(), scored via
+    // direct array indexing instead of a dict since day_buckets is already
+    // array-indexed by 5-min bucket.
+    //
+    // Returns false (out_slot untouched) if no candidate width has positive
+    // net benefit — the peak isn't worth a slot at all.
+    static bool bestSlotForPeak(const BucketFile::Bucket *day_buckets,
+                                int peak_bucket, float elapsedWeeks,
+                                TimeSlot *out_slot);
+
+    // Convert accepted peaks to TimeSlot windows via bestSlotForPeak().
+    // Drops peaks with non-positive net benefit. Returns number of slots
+    // written, sorted chronologically.
+    static int buildSlots(const BucketFile::Bucket *day_buckets,
+                          const Peak *accepted, int n_accepted,
+                          float elapsedWeeks, TimeSlot *out_slots);
 };

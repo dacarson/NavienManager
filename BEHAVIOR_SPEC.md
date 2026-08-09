@@ -523,9 +523,10 @@ The endpoint is started in `setupScheduleEndpoint()` (called from `onWifiConnect
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "current_year": 2025,
   "replace": false,
+  "weeks_represented": 32,
   "days": [
     {
       "dow": 0,
@@ -538,9 +539,10 @@ The endpoint is started in `setupScheduleEndpoint()` (called from `onWifiConnect
 }
 ```
 
-- `schema_version` must equal `BUCKET_SCHEMA_VERSION` (2) — mismatches produce a 400. Bucket dow/bucket indices are UTC (matching the UTC-native firmware).
+- `schema_version` must equal `BUCKET_SCHEMA_VERSION` (3) — mismatches produce a 400. Bucket dow/bucket indices are UTC (matching the UTC-native firmware).
 - `current_year` — optional; if present and non-zero, written into the `BucketFile` header. If omitted or zero: in merge mode the existing header year is left unchanged; in replace mode the year is derived from the system clock (same fallback as `BucketStore::begin()`), so the header is never left at a stale value.
 - `replace` — `false` (default): merge into existing data; `true`: zero all buckets first.
+- `weeks_represented` — optional, only meaningful when `replace` is `true`. How many weeks of real history the incoming `raw`/`score` values were accumulated over (`navien_bucket_export.py` sends `2 * window_weeks * len(recency_weights)`). Used to seed `BucketFile.accumulation_start_epoch` as `now - weeks_represented weeks`, so `PeakFinder`'s `$`-cost search (see `archive/OnDeviceDollarCostWindowSearch.md`) computes a correct `covered_per_week` rate immediately after a bootstrap reseed instead of dividing by ~1 week (the true elapsed time since the empty file was created at boot). Omitted or ≤0 leaves the epoch as already set by `BucketStore::initEmpty()`.
 - `days[].dow` — day of week, 0 = Sunday … 6 = Saturday.
 - `days[].buckets[].b` — 5-minute bucket index (0–287).
 - `days[].buckets[].raw` — unweighted demand-event count to add.
