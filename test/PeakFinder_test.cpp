@@ -55,6 +55,21 @@ static void buildFixture(BucketFile::Bucket *day) {
     setBucket(day, 270, 1, 3.0f);
 }
 
+static void buildOverlapFixture(BucketFile::Bucket *day) {
+    memset(day, 0, BUCKET_PER_DAY * sizeof(BucketFile::Bucket));
+
+    // Two peaks exactly MIN_PEAK_SEPARATION_MIN (45min = 9 buckets) apart --
+    // the minimum NMS allows -- each with dense surrounding demand so the
+    // $-search wants a wide window for both, guaranteeing their windows
+    // overlap and must be merged rather than kept as two separate slots.
+    // Peak A at bucket 90 (07:30), peak B at bucket 99 (08:15).
+    for (int b = 85; b <= 104; b++) {
+        setBucket(day, b, 6, 15.0f);
+    }
+    setBucket(day, 90, 20, 50.0f);  // peak A
+    setBucket(day, 99, 20, 50.0f);  // peak B
+}
+
 // Well-formedness: no zero/negative-width slots, no overlaps.
 static void checkWellFormed(const char *label, const TimeSlot *slots, int n) {
     for (int i = 0; i < n; i++) {
@@ -149,6 +164,37 @@ int main(void) {
                 failures++;
             }
         }
+    }
+
+    // --- Scenario 3: two nearby peaks whose windows should overlap and get
+    // merged into one wider slot instead of being kept as two separate,
+    // partially-redundant slots.
+    buildOverlapFixture(day);
+    TimeSlot overlapSlots[MAX_PEAK_CANDIDATES];
+    int nOverlap = PeakFinder::findDaySlots(day, overlapSlots, /*elapsedWeeks=*/1.0f);
+    printf("overlap fixture: findDaySlots() returned %d slot(s):\n", nOverlap);
+    for (int i = 0; i < nOverlap; i++) {
+        printf("  [%d] %02d:%02d-%02d:%02d  net_benefit=$%.4f\n", i,
+               overlapSlots[i].start_min / 60, overlapSlots[i].start_min % 60,
+               overlapSlots[i].end_min   / 60, overlapSlots[i].end_min   % 60,
+               overlapSlots[i].score);
+    }
+    checkWellFormed("overlap fixture", overlapSlots, nOverlap);
+
+    const TimeSlot *slotA = slotCovering(overlapSlots, nOverlap, 90);
+    const TimeSlot *slotB = slotCovering(overlapSlots, nOverlap, 99);
+    if (!slotA || !slotB) {
+        printf("FAIL: expected both peaks (bucket 90 and 99) to be covered by a slot\n");
+        failures++;
+    } else if (slotA != slotB) {
+        printf("FAIL: expected peaks at bucket 90 and 99 (45min apart, dense demand) "
+               "to merge into the same slot, but landed in different slots "
+               "(%02d:%02d-%02d:%02d vs %02d:%02d-%02d:%02d)\n",
+               slotA->start_min/60, slotA->start_min%60, slotA->end_min/60, slotA->end_min%60,
+               slotB->start_min/60, slotB->start_min%60, slotB->end_min/60, slotB->end_min%60);
+        failures++;
+    } else {
+        printf("PASS: both peaks merged into one slot as expected.\n");
     }
 
     if (failures == 0) {

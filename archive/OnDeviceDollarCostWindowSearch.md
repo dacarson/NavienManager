@@ -220,3 +220,73 @@ reasonable single number for the on-device rate calculation, not an exact
 per-year reconstruction, and self-corrects the same way: at the next annual
 decay, `accumulation_start_epoch` resets to a precise `now` and the
 approximation window shrinks back to zero.
+
+## Follow-up: merge overlapping windows — done
+
+The real deployment's `navien_bootstrap.py --push` (Step 1) surfaced actual
+overlapping windows on two days (Thursday `06:20–08:00` / `07:50–09:20`;
+Friday `07:30–09:00` / `08:40–10:10`) — a real consequence of each peak's
+width being searched independently: nothing prevented two nearby peaks from
+both choosing wide windows that overlap, even though NMS guarantees their
+*centers* stay `>= MIN_PEAK_SEPARATION_MIN` apart. Traced through
+`SchedulerBase.cpp`/`FakeGatoScheduler.cpp` first to confirm this was safe as
+deployed — it was: `isActiveOnFireSlots()` ORs across all fire slots for
+state determination, and `getNextState()`'s returned `State` is never
+actually consulted by any caller, only its `nextStateChangeTime`
+out-parameter, and `NavienLearner::recomputeWrite()`'s Step 3 already sorts
+each local day's slots by `local_start_min` before building the schedule
+JSON, so `_utcFireSlots[]` ends up correctly time-ordered for same-day
+overlaps (the only case actually hit). But root-causing it is cleaner than
+relying on the runtime happening to tolerate it, and it also means a
+`MAX_SLOTS_PER_DAY` slot doesn't get spent on a window that's functionally
+redundant with the one next to it.
+
+**Fix:** merge candidate windows that overlap or touch, before ranking, on
+both sides:
+
+- `navien_schedule_learner.py`: new `_merge_overlapping_candidates()`, called
+  in `buckets_to_windows()` right after building `candidates` and before the
+  `ranked = sorted(candidates, key=... reverse=True)` / `kept[:MAX_SLOTS_PER_DAY]`
+  step. `candidates` is already chronologically sorted (peaks come from
+  `_find_peaks()`, which returns them sorted by bucket time), so a single
+  linear pass suffices — merge into the previous entry when
+  `this_start <= prev_end`, summing `net_savings`.
+- `PeakFinder.cpp`: same merge folded directly into `buildSlots()`'s
+  append loop, since `TimeSlot`s are already produced in non-decreasing
+  start order by construction (peak centers `>= MIN_PEAK_SEPARATION_MIN`
+  apart, which is `>= PEAK_HALF_WIDTH_MIN`) — merges into
+  `out_slots[n_slots-1]` instead of appending when the new slot's
+  `start_min <= ` the previous slot's `end_min`, extending `end_min` and
+  summing `.score` (net benefit).
+
+Both merge **before** the top-`MAX_SLOTS_PER_DAY` ranking, not after — so two
+peaks that individually wouldn't each make the top 3 can still combine into a
+merged candidate that competes fairly, rather than picking 3 first and
+discovering some overlap afterward. Days can now produce 1, 2, or 3 slots
+depending on how much merging occurs — already-supported downstream (`slots`
+arrays already allow fewer than 3; `0xFF` sentinels mark unused slots
+throughout the Eve/NVS/firing path).
+
+**Approximation:** the merged window's net benefit is the *sum* of its
+parts', not a fresh cost evaluation of the wider merged boundaries (which
+would need a new "evaluate an arbitrary fixed window" helper distinct from
+the peak-centered search). Reasonable for ranking purposes — same category
+of approximation as elsewhere in this design — not used for anything more
+precise than "does this candidate beat others for a slot."
+
+**Verified:**
+- Re-ran `navien_schedule_learner.py` against real InfluxDB history: Thursday
+  went from 3 overlapping slots to 2 merged slots (`05:40–11:40`,
+  `18:10–19:40`); no day shows any overlap anymore.
+- `test/PeakFinder_test.cpp`: added a dedicated overlap fixture — two peaks
+  exactly `MIN_PEAK_SEPARATION_MIN` (45min) apart with dense surrounding
+  demand, which without merging would produce two overlapping windows.
+  Confirms `findDaySlots()` now returns exactly one merged slot
+  (`06:40–09:00`) covering both.
+- **Not yet done:** the device is still running the firmware flashed
+  *before* this fix, so its own recomputes don't have the merge logic yet —
+  a re-flash is needed for the on-device side to pick it up, not just a
+  recompute trigger. The currently-live schedule (from the Step 1 push
+  before this fix) also still has the old overlapping windows on the Python
+  side — re-running `navien_bootstrap.py --push` would refresh those
+  independently of the firmware.

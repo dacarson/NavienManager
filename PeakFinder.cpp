@@ -349,7 +349,14 @@ bool PeakFinder::bestSlotForPeak(const BucketFile::Bucket *day_buckets,
 // buildSlots() — private
 // For each statistically-accepted peak (from findPeaks()'s adaptive
 // threshold), runs bestSlotForPeak() to search its $-optimal window and
-// drops it entirely if no width has positive net benefit.
+// drops it entirely if no width has positive net benefit. Adjacent peaks
+// whose windows overlap or touch are merged into one wider slot (summing
+// net benefit) rather than kept as separate, redundant slots — mirrors
+// navien_schedule_learner.py's _merge_overlapping_candidates(). Windows are
+// produced in non-decreasing start order by construction (peak centers are
+// always >= MIN_PEAK_SEPARATION_MIN apart, which is >= PEAK_HALF_WIDTH_MIN),
+// so a single linear pass against the immediately-preceding output slot
+// suffices — no need to re-sort after merging.
 // ---------------------------------------------------------------------------
 
 int PeakFinder::buildSlots(const BucketFile::Bucket *day_buckets,
@@ -377,7 +384,19 @@ int PeakFinder::buildSlots(const BucketFile::Bucket *day_buckets,
     int n_slots = 0;
     for (int i = 0; i < n_accepted; i++) {
         TimeSlot slot;
-        if (bestSlotForPeak(day_buckets, chrono[i].bucket, elapsedWeeks, &slot)) {
+        if (!bestSlotForPeak(day_buckets, chrono[i].bucket, elapsedWeeks, &slot)) {
+            continue;
+        }
+        if (n_slots > 0 && slot.start_min <= out_slots[n_slots - 1].end_min) {
+            // Overlaps (or touches) the previous slot — merge instead of
+            // appending. net benefit is approximated as the sum of the two
+            // parts' (not a fresh evaluation of the wider window) — same
+            // category of approximation as elsewhere in this search; see
+            // archive/OnDeviceDollarCostWindowSearch.md.
+            TimeSlot &prev = out_slots[n_slots - 1];
+            if (slot.end_min > prev.end_min) prev.end_min = slot.end_min;
+            prev.score += slot.score;
+        } else {
             out_slots[n_slots++] = slot;
         }
     }
