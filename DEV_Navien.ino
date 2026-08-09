@@ -186,12 +186,16 @@ struct DEV_Navien : Service::Thermostat {
       valvePosition->setVal(operatingCap);
     }
 
-    if (!scheduler->enabled() && !navienSerial.currentState()->water[0].external_recirculation && !navienSerial.currentState()->water[0].internal_recirculation) {
-      programMode.setVal(0);
-    } else if (scheduler->getCurrentState() == SchedulerBase::Override) {
+    // HomeKit ProgramMode reflects control intent, not pump/hardware state:
+    //   0 = no program (scheduler disabled)
+    //   1 = following the weekly schedule
+    //   2 = temporary manual override (Hot Water / HEAT)
+    if (scheduler->getCurrentState() == SchedulerBase::Override) {
       programMode.setVal(2);
-    } else {
+    } else if (scheduler->enabled()) {
       programMode.setVal(1);
+    } else {
+      programMode.setVal(0);
     }
 
     // Navien is actively maintaining the set point

@@ -54,6 +54,9 @@ Models the water heater as a thermostat so it appears naturally in the Home app 
 | **OFF** | System is idle |
 | Set-point temperature | The heater's configured hot water temperature |
 | **Valve / Actuation** graph | Burner operating capacity (0–100%) — shows exactly how hard the heater is working |
+| **Mode / ProgramMode** | `0` Off = scheduler disabled; `1` Schedule = scheduler enabled (including gaps between slots); `2` Override = temporary Hot Water / HEAT boost |
+
+**ProgramMode vs “Schedule: Off” in Eve:** these are different knobs. HomeKit `ProgramMode` is the real enable intent (same idea as the web dashboard’s **Scheduler Enabled**). Eve’s separate **Schedule** toggle is driven by `schedule_on` inside ProgramData and is deliberately reported **On only while a slot is Active or Override** — reporting On between slots makes Eve try to change the Navien set-point. So with the scheduler enabled you can still see Eve say Schedule Off between comfort periods; the web page and `ProgramMode` remain the source of truth for whether scheduling is enabled.
 
 The temperature graph in Eve gives a clean on/off history: the set-point drops to the minimum when idle, rises to your configured temperature when heating. The Valve graph tells you at a glance whether the heater was working lightly or at full capacity.
 
