@@ -24,6 +24,7 @@ SOFTWARE.
 #include "esp_mac.h"  // required - exposes esp_mac_type_t values
 #include "FakeGatoScheduler.h"
 #include "FakeGatoHistoryService.h"
+#include "Version.h"
 extern Navien navienSerial;
 
 // Global so that Telnet can dump history state.
@@ -237,7 +238,7 @@ struct DEV_Navien : Service::Thermostat {
 
     // Try updating the version number
     if (!accessoryInfoSet) {
-      firmwareRevision->setString(String(navienSerial.currentState()->gas.controller_version).c_str());
+      firmwareRevision->setString((String(navienSerial.currentState()->gas.controller_version) + " [" + APP_VERSION + "]").c_str());
       hardwareRevision->setString(String(navienSerial.currentState()->gas.panel_version).c_str());
       accessoryInfoSet = true;
     }

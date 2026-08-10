@@ -24,6 +24,7 @@ SOFTWARE.
 
 #include "FakeGatoScheduler.h"
 #include "NavienLearner.h"
+#include "Version.h"
 extern FakeGatoScheduler* scheduler;
 extern NavienLearner *learner;
 
@@ -107,6 +108,7 @@ void navienStatus(String &html) {
 
   html = "<h3>Controller: "
     + String(navienSerial.currentState()->gas.controller_version)
+    + " [" + APP_VERSION + "]"
     + " Panel: "
     + String(navienSerial.currentState()->gas.panel_version)
     + "</h3>";

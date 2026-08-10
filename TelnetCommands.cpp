@@ -31,6 +31,7 @@ SOFTWARE.
 #include "FakeGatoScheduler.h"
 #include "NavienLearner.h"
 #include "TimeUtils.h"
+#include "Version.h"
 
 ESPTelnet telnet;
 extern Navien navienSerial;
@@ -69,6 +70,11 @@ void onTelnetConnect(String ip) {
   telnet.print(F("\nWelcome "));
   telnet.println(telnet.getIP());
   telnet.println(F("(Use bye to disconnect.)"));
+  telnet.print(F("Firmware: "));
+  telnet.print(navienSerial.currentState()->gas.controller_version);
+  telnet.print(F(" ["));
+  telnet.print(APP_VERSION);
+  telnet.println(F("]"));
   telnet.print(F("> "));
 }
 

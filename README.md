@@ -205,6 +205,7 @@ pip3 install influxdb requests
 | File | Purpose |
 |---|---|
 | `NavienManager.ino` | Main startup and main loop |
+| `Version.h` | App firmware version (`APP_VERSION`) |
 | `Navien.*` | RS485 packet parsing and command sending |
 | `DEV_Navien.*` | HomeKit thermostat and Hot Water switch |
 | `FakeGatoScheduler.*` | Eve schedule parsing, built on `SchedulerBase` |
@@ -216,6 +217,19 @@ pip3 install influxdb requests
 | `NavienLearner.*` | On-device schedule learner (demand-event detection, peak-finding, efficiency tracking) |
 | `TelnetCommands.*` | Telnet CLI commands |
 | `Logger/` | UDP listener, InfluxDB logger, Grafana templates, bootstrap and schedule learner scripts |
+
+---
+
+## Releasing
+
+The app version lives in `Version.h` (`APP_VERSION`) and is shown alongside the Navien controller firmware version on the web dashboard, in the Telnet welcome banner, and in HomeKit's Firmware Revision field, formatted as `<Navien FW> [<App version>]`.
+
+To cut a release:
+
+1. Bump `APP_VERSION` in `Version.h` and commit.
+2. `git tag vX.Y.Z`
+3. `git push origin vX.Y.Z`
+4. `gh release create vX.Y.Z --title "vX.Y.Z" --notes "..."`
 
 ---
 
