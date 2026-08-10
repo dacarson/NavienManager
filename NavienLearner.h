@@ -157,6 +157,12 @@ private:
     // Returns 0.0 if the event should be discarded.
     float computeDemandWeight(bool recircAtStart, uint32_t durationSec) const;
 
+    // Bill the currently-closed run (if any) as a demand event and clear
+    // _runPendingClose. Called once a run is confirmed over — either
+    // COLD_GAP_SEC has elapsed with no resumption, or a genuinely new run
+    // is starting. Core 1 only.
+    void finalizeRun();
+
     // Core 0 state machine helpers.
     void idleStep();        // called every IDLE tick: queue drain, midnight check
     void decayCheck();      // apply annual weighted_score decay if year has rolled over
@@ -171,6 +177,9 @@ private:
     int      _runBucket;         // 5-min bucket index pinned at run start
     bool     _recircAtStart;     // was recirc active (or recently active) when run started?
     time_t   _lastRecircActiveTime; // last time recirculation_active was true (0 = never)
+    bool     _runPendingClose;   // run ended (consumption_active 1→0) but not yet billed —
+                                  // waiting to see if it resumes within COLD_GAP_SEC so a
+                                  // flickering flow signal doesn't get billed multiple times
 
     // --- Cross-core queue (capacity 1, Core 1 writes, Core 0 reads) ---
     QueueHandle_t _demandEventQueue;

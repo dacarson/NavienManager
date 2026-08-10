@@ -678,6 +678,8 @@ The `NavienLearner` class autonomously learns and recomputes the recirculation s
 - **`min_duration_genuine`** = 60 seconds — minimum tap duration (no recirc) to count at full weight.
 - **`min_duration_recirc`** = 30 seconds — minimum tap duration (recirc was on) to count at all.
 
+**Billing is deferred until the run is confirmed over.** A `consumption_active` 1→0 transition does *not* immediately enqueue a `PendingDemandEvent` — it only sets `_runPendingClose = true` and freezes the accumulated `_runDurationSec`. `finalizeRun()` (which does the actual enqueue) is called only when either (a) `cold_gap` elapses with no resumption (checked on every subsequent `onNavienState()` call, since the water packet callback fires continuously), or (b) a genuinely new run starts (`isNewDemandEvent`) while a previous one is still pending. If `consumption_active` flips back to 1 before `cold_gap` elapses, the run is treated as still open (`_runPendingClose` is cleared, `_runStart` is *not* reset) and duration keeps accruing from the original open time. This prevents a single continuous draw with a flickering flow signal (RS-485 noise, valve chatter) from being billed as multiple separate demand events.
+
 **Demand weight rules:**
 
 | Condition | `demand_weight` |

@@ -71,6 +71,7 @@ NavienLearner::NavienLearner()
       _runBucket(0),
       _recircAtStart(false),
       _lastRecircActiveTime(0),
+      _runPendingClose(false),
       _demandEventQueue(nullptr),
       _taskHandle(nullptr),
       _recomputeRequested(false),
@@ -170,6 +171,14 @@ void NavienLearner::onNavienState(bool consumption_active,
                            ((now - _lastActiveTime) >= (time_t)COLD_GAP_SEC);
 
         if (isNewDemandEvent) {
+            // Any earlier run that was still waiting to see if it would
+            // resume (see the 1→0 branch below) is confirmed over now that
+            // a genuinely new run is starting — bill it before its fields
+            // are overwritten below.
+            if (_runPendingClose) {
+                finalizeRun();
+            }
+
             // Pin dow and bucket to tap-open time.
             struct tm *t = gmtime(&now);
             _runDow    = t->tm_wday;                          // 0=Sun (UTC)
@@ -188,8 +197,11 @@ void NavienLearner::onNavienState(bool consumption_active,
             _inRun           = true;
             // Event not dispatched yet — duration unknown until run ends.
         } else {
-            // Warm restart within an existing run — just track it as active.
-            _inRun = true;
+            // Resuming within COLD_GAP_SEC of the last close — treat as the
+            // same logical run continuing after a brief flow-signal dropout
+            // (RS-485 noise, valve chatter), not a separate demand event.
+            _inRun           = true;
+            _runPendingClose = false;
         }
     }
 
@@ -199,29 +211,47 @@ void NavienLearner::onNavienState(bool consumption_active,
         _lastActiveTime = now;
     }
 
-    // --- consumption_active 1→0: run ended ---
+    // --- consumption_active 1→0: run paused, don't bill yet ---
     if (!consumption_active && _inRun) {
         _inRun = false;
+        // Don't enqueue immediately: if the tap reopens within COLD_GAP_SEC
+        // it's the same run (handled above), and billing here too would
+        // count one continuous draw as multiple demand events. Bill only
+        // once the gap below confirms the run is truly over.
+        _runPendingClose = true;
+    }
 
-        float demand_weight = computeDemandWeight(_recircAtStart, _runDurationSec);
-
-        if (demand_weight > 0.0f) {
-            // Enqueue for Core 0: bucket accumulation and measured-efficiency
-            // counter update.  Both operations now happen on Core 0 so that
-            // _measured[] and _measuredHead are only ever written by one core.
-            PendingDemandEvent cs;
-            cs.dow            = _runDow;
-            cs.bucket         = _runBucket;
-            cs.demand_weight  = demand_weight;
-            cs.recency_weight = RECENCY_WEIGHT_CURRENT;
-            cs.recircAtStart  = _recircAtStart;
-            xQueueOverwrite(_demandEventQueue, &cs);
-        }
+    // --- Pending close has aged past COLD_GAP_SEC with no resumption ---
+    if (_runPendingClose && ((now - _lastActiveTime) >= (time_t)COLD_GAP_SEC)) {
+        finalizeRun();
     }
 
     if (recirculation_active) {
         _lastRecircActiveTime = now;
     }
+}
+
+// ---------------------------------------------------------------------------
+// finalizeRun() — bill the just-closed run as a demand event (Core 1 only)
+// ---------------------------------------------------------------------------
+
+void NavienLearner::finalizeRun() {
+    float demand_weight = computeDemandWeight(_recircAtStart, _runDurationSec);
+
+    if (demand_weight > 0.0f) {
+        // Enqueue for Core 0: bucket accumulation and measured-efficiency
+        // counter update.  Both operations now happen on Core 0 so that
+        // _measured[] and _measuredHead are only ever written by one core.
+        PendingDemandEvent cs;
+        cs.dow            = _runDow;
+        cs.bucket         = _runBucket;
+        cs.demand_weight  = demand_weight;
+        cs.recency_weight = RECENCY_WEIGHT_CURRENT;
+        cs.recircAtStart  = _recircAtStart;
+        xQueueOverwrite(_demandEventQueue, &cs);
+    }
+
+    _runPendingClose = false;
 }
 
 // ---------------------------------------------------------------------------
