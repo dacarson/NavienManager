@@ -734,7 +734,26 @@ If the device is powered off over New Year and boots in January, the mismatch is
 
 **Local-day bucket view:** The `RECOMPUTING` state iterates local days 0..6. For each local day `L`, it builds a `Bucket[288]` scratch array by mapping local minute `lb × 5` to UTC via `utc_min = local_min + offsetMin` (wrapping day on midnight crossing) and copying from `buckets[utc_dow][utc_b]`. `PeakFinder::findDaySlots` is called on this local view; returned slots are in local minutes-since-midnight. `offsetMin` is snapshotted once in `RECOMPUTE_LOAD` so all seven days use the same offset.
 
-**Pruning — local-day only:** `PeakFinder` returns all NMS-surviving candidates without a per-day cap. `recomputeWrite()` sorts each local day's slots by score descending, keeps the top `MAX_SLOTS_PER_DAY` (3), and emits JSON with **local** times indexed by **local** day (same as `navien_schedule_learner.py`). There is **no** learner prune keyed on UTC day. `setWeekScheduleFromJSON()` loads all three slots per **local** day into Eve `prog_send_data`, builds `_utcFireSlots[]` (up to 21 UTC windows — one per local slot), then `convertEveSlotsToUTC(offsetMin)` for Eve/`weekSchedule[]` display (≤3 per UTC index). **`getNextState()` / `initializeCurrentState()` use `_utcFireSlots` when populated**, so all three local Tuesday windows can fire even if four UTC projections share a calendar index. Eve's UI limit remains three comfort periods per **local** day. When local-day pruning drops a candidate, firmware emits a `WEBLOG` entry.
+**Pruning — local-day only:** `PeakFinder` returns all NMS-surviving candidates without a per-day cap. `recomputeWrite()` sorts each local day's slots by score descending, keeps the top `MAX_SLOTS_PER_DAY` (3) — or fewer under the Low-Activity Guard below — and emits JSON with **local** times indexed by **local** day (same as `navien_schedule_learner.py`). There is **no** learner prune keyed on UTC day. `setWeekScheduleFromJSON()` loads all three slots per **local** day into Eve `prog_send_data`, builds `_utcFireSlots[]` (up to 21 UTC windows — one per local slot), then `convertEveSlotsToUTC(offsetMin)` for Eve/`weekSchedule[]` display (≤3 per UTC index). **`getNextState()` / `initializeCurrentState()` use `_utcFireSlots` when populated**, so all three local Tuesday windows can fire even if four UTC projections share a calendar index. Eve's UI limit remains three comfort periods per **local** day. When local-day pruning drops a candidate, firmware emits a `WEBLOG` entry.
+
+### Low-Activity Guard
+
+`weighted_score` is a lifetime average diluted only by `elapsedWeeks` since `accumulation_start_epoch` (see Annual Decay above) — a short quiet stretch (e.g. travel) barely moves it, so peak-finding keeps proposing normal-occupancy-sized windows even after real usage has dropped to near zero for days. `NavienLearner::checkLowActivity()` is a separate, real-time throttle layered on top of that output — it never touches `weighted_score`, `raw_count`, or `accumulation_start_epoch`, so the long-term learned history is unaffected and a normal recompute is one day away at all times.
+
+Called once per day from `idleStep()`'s 24-hour boundary check, evaluating the day that just ended (before `_measured[]`'s week rotation, if any, touches that day's count):
+
+| Parameter | Value |
+|---|---|
+| `typical` | lifetime `raw_count` average for that day-of-week: `Σ raw_count[dow][*] / elapsedWeeks` |
+| `LOW_ACTIVITY_QUIET_RATIO` | 0.25 — actual below 25% of typical counts as a quiet day |
+| `LOW_ACTIVITY_RESUME_RATIO` | 0.60 — actual at/above 60% of typical resumes immediately |
+| `LOW_ACTIVITY_ENTER_DAYS` | 3 — consecutive quiet days required to enter |
+
+Entry is deliberately slower than exit: three consecutive quiet days are required before `_lowActivityMode` is set, so one slow day doesn't trip it, but the first near-normal day clears it immediately, so service resumes the moment real usage does. If `typical < 1.0` (insufficient history for that weekday), the check is skipped rather than judged against a near-empty baseline. Days whose ratio falls strictly between the quiet and resume thresholds leave the streak and mode unchanged.
+
+**Effect:** while `_lowActivityMode` is true, the local-day prune above caps kept slots to **1** instead of `MAX_SLOTS_PER_DAY` — the single highest-scoring window for that day, since candidates are already sorted by score descending. `WEBLOG` records the on/off transition and, per pruned slot, whether the drop was low-activity-driven.
+
+**State is RAM-only** (`_quietDayStreak`, `_lowActivityMode`) — not persisted to `measured.bin` or `buckets.bin`. A reboot mid-guard costs at most one extra day to re-detect; this is a soft throttle, not a correctness-critical value.
 
 ### Efficiency Tracking
 

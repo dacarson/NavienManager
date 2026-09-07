@@ -146,6 +146,16 @@ public:
     // Recency weight for live (current-year) data, matching Python [3, 2]
     static constexpr float RECENCY_WEIGHT_CURRENT = 3.0f;
 
+    // Low-activity guard: a real-time output throttle for sustained absences
+    // (e.g. travel) that the long-term learned schedule doesn't react to on
+    // its own — see checkLowActivity(). Consecutive quiet days required to
+    // enter, and the actual/typical ratios that count as "quiet" vs "back to
+    // normal". Entry is deliberately slower than exit: one slow day shouldn't
+    // trip it, but service should resume the moment usage does.
+    static constexpr int   LOW_ACTIVITY_ENTER_DAYS   = 3;
+    static constexpr float LOW_ACTIVITY_QUIET_RATIO  = 0.25f;
+    static constexpr float LOW_ACTIVITY_RESUME_RATIO = 0.60f;
+
     // Core 0 task entry point — launched by begin().
     static void learnerTask(void *pvParam);
 
@@ -167,6 +177,14 @@ private:
     void idleStep();        // called every IDLE tick: queue drain, midnight check
     void decayCheck();      // apply annual weighted_score decay if year has rolled over
     void recomputeWrite();  // builds JSON, hands off to Core 1, and broadcasts UDP
+
+    // Evaluate the day that just ended (dow_that_ended) against its long-run
+    // typical activity and update the low-activity streak/mode. Called once
+    // per day from idleStep()'s 24h boundary check, before anything else
+    // touches _measured[]'s counts for that day. Core 0 only; RAM-only state
+    // (not persisted) — a reboot mid-guard just costs one extra day to
+    // re-detect, which is not correctness-critical.
+    void checkLowActivity(int dow_that_ended, time_t now);
 
     // --- Demand-event detector state (Core 1 only) ---
     time_t   _lastActiveTime;    // last time consumption_active was true
@@ -192,6 +210,10 @@ private:
     time_t        _lastRecomputeTime24h; // wall time of last 24h recompute trigger (0 = never)
     bool          _startupDecayDone;    // true once the one-shot startup decay check has run
     time_t        _lastRecomputeTime;   // wall time of last RECOMPUTE_WRITE (0 = never)
+
+    // --- Low-activity guard (Core 0 only, RAM-only — see checkLowActivity()) ---
+    uint8_t       _quietDayStreak;      // consecutive quiet days seen so far
+    bool          _lowActivityMode;     // true => recomputeWrite() caps kept slots to 1/day
 
     // Capacity for the schedule JSON buffer.
     // Includes per-slot score metadata (`"score":%.3f`) used by learnerStatus.

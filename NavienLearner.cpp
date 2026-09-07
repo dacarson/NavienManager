@@ -81,6 +81,8 @@ NavienLearner::NavienLearner()
       _lastRecomputeTime24h(0),
       _startupDecayDone(false),
       _lastRecomputeTime(0),
+      _quietDayStreak(0),
+      _lowActivityMode(false),
       _scheduleHandoffMutex(nullptr),
       _newScheduleReady(false),
       _measuredHead(0),
@@ -528,6 +530,11 @@ void NavienLearner::idleStep() {
             _lastRecomputeTime24h = now;
             struct tm tm_buf;
             struct tm *t = gmtime_r(&now, &tm_buf);
+
+            // Low-activity guard: evaluate the day that just ended before
+            // anything below rotates/resets _measured[]'s count for it.
+            checkLowActivity((t->tm_wday + 6) % 7, now);
+
             // UTC Sunday: advance the measured efficiency week slot.
             if (t->tm_wday == 0) {
                 advanceMeasuredWeek();  // advanceMeasuredWeek calls saveMeasured()
@@ -537,6 +544,64 @@ void NavienLearner::idleStep() {
             _taskState = DECAY_CHECK;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// checkLowActivity() — private; detects a sustained low-usage stretch (e.g.
+// travel) that the learned schedule itself won't react to quickly (its
+// weighted_score is a lifetime average diluted only by elapsedWeeks, so a
+// few quiet weeks barely move it — see recomputeWrite()). This is a separate,
+// real-time output throttle layered on top: it never touches weighted_score,
+// raw_count, or accumulation_start_epoch, so the long-term learned history is
+// unaffected and the very next recompute after activity resumes reverts to
+// the full normal schedule with no relearning needed.
+//
+// "Typical" for dow_that_ended is its lifetime raw_count average (raw_count
+// is never decayed — see decayCheck() above — so this is a stable, slow-
+// moving baseline). Entry requires LOW_ACTIVITY_ENTER_DAYS consecutive quiet
+// days so one slow day doesn't trip it; exit is immediate on the first
+// near-normal day, so service resumes the moment usage does. Core 0 only.
+// ---------------------------------------------------------------------------
+
+void NavienLearner::checkLowActivity(int dow_that_ended, time_t now) {
+    const BucketFile &bf = _store.data();
+
+    uint32_t rawTotal = 0;
+    for (int b = 0; b < BUCKET_PER_DAY; b++) {
+        rawTotal += bf.buckets[dow_that_ended][b].raw_count;
+    }
+
+    float elapsedWeeks = 1.0f;
+    if (bf.accumulation_start_epoch > 0 && now > (time_t)bf.accumulation_start_epoch) {
+        elapsedWeeks = (float)(now - (time_t)bf.accumulation_start_epoch) / 604800.0f;
+        if (elapsedWeeks < 1.0f) elapsedWeeks = 1.0f;
+    }
+
+    float typical = (float)rawTotal / elapsedWeeks;
+    if (typical < 1.0f) {
+        // Not enough history for this weekday to judge "quiet" reliably yet.
+        return;
+    }
+
+    uint16_t actual = _measured[_measuredHead].total[dow_that_ended];
+
+    if ((float)actual < LOW_ACTIVITY_QUIET_RATIO * typical) {
+        if (_quietDayStreak < 255) _quietDayStreak++;
+        if (_quietDayStreak >= LOW_ACTIVITY_ENTER_DAYS && !_lowActivityMode) {
+            _lowActivityMode = true;
+            WEBLOG("LEARNER low-activity mode ON (dow=%d actual=%d typical=%.1f)",
+                   dow_that_ended, actual, typical);
+        }
+    } else if ((float)actual >= LOW_ACTIVITY_RESUME_RATIO * typical) {
+        _quietDayStreak = 0;
+        if (_lowActivityMode) {
+            _lowActivityMode = false;
+            WEBLOG("LEARNER low-activity mode OFF (dow=%d actual=%d typical=%.1f)",
+                   dow_that_ended, actual, typical);
+        }
+    }
+    // Ratios strictly between QUIET and RESUME thresholds are ambiguous —
+    // leave the streak and mode unchanged rather than guessing either way.
 }
 
 // ---------------------------------------------------------------------------
@@ -648,7 +713,12 @@ void NavienLearner::recomputeWrite() {
             sorted[j + 1] = key;
         }
 
-        int kept = (n < MAX_SLOTS_PER_DAY) ? n : MAX_SLOTS_PER_DAY;
+        // Under the low-activity guard (see checkLowActivity()), throttle to
+        // the single best-scoring window per day instead of the normal
+        // MAX_SLOTS_PER_DAY — sorted[] is already ranked by score descending,
+        // so this keeps whichever window has the highest expected $ benefit.
+        int dayCap = _lowActivityMode ? 1 : MAX_SLOTS_PER_DAY;
+        int kept   = (n < dayCap) ? n : dayCap;
 
         for (int s = 0; s < n; s++) {
             int local_start = (int)sorted[s].start_min;
@@ -656,9 +726,10 @@ void NavienLearner::recomputeWrite() {
             float score     = sorted[s].score;
 
             if (s >= kept) {
-                WEBLOG("LEARNER local-day prune: local_dow=%d kept=%d dropped local=%02d:%02d score=%.2f",
-                       local_dow, MAX_SLOTS_PER_DAY,
-                       local_start / 60, local_start % 60, score);
+                WEBLOG("LEARNER local-day prune: local_dow=%d kept=%d dropped local=%02d:%02d score=%.2f%s",
+                       local_dow, kept,
+                       local_start / 60, local_start % 60, score,
+                       _lowActivityMode ? " (low-activity)" : "");
                 continue;
             }
 
