@@ -21,6 +21,9 @@ The ESP32 runs an **on-device schedule learner** that watches your actual hot-wa
 
 The web dashboard and Telnet CLI show live efficiency metrics — what fraction of your hot-water demand was pre-heated by the schedule, how that compares to the schedule's predicted coverage, and a per-day gap that highlights when habits have drifted.
 
+### Adjusts automatically during a quiet stretch
+If real usage drops well below normal for a few days running — travel, a slow week, a house-sitter with different habits — the on-device learner notices and throttles the schedule down to a single window a day instead of firing the full learned pattern, cutting wasted recirculation without you touching anything. It reverts to the full schedule automatically the first day usage looks normal again. This is separate from Vacation Mode below: it's for someone still home but using less hot water, not a full absence.
+
 ### Vacation Mode — set it and forget it
 Tell the Eve app you're on vacation. The heater powers off and all recirculation stops. When you're back, re-enable it and the schedule picks up exactly where it left off.
 
@@ -81,6 +84,7 @@ The ESP32 itself learns your household's hot-water habits and recomputes the rec
 2. Each event is weighted by **demand quality** (a long genuine draw counts more than a brief accidental tap) and stored into a compact per-day, per-5-minute-bucket histogram on flash (`buckets.bin`).
 3. Every night at midnight the device runs a **peak-finding pass** over the histogram, finds up to 3 dominant activity windows per day, and updates the active recirculation schedule immediately.
 4. An **annual decay** (applied on Jan 1) gradually down-weights older data so recent habit changes win over stale history.
+5. A **low-activity guard** watches for a sustained drop in real usage (3+ quiet days running) and throttles that night's schedule to a single window/day until usage looks normal again — the learned history itself changes too slowly to react to a short trip on its own.
 
 **Efficiency metrics** are tracked continuously and visible on the web dashboard and via `learnerStatus` in the Telnet CLI:
 
@@ -214,7 +218,7 @@ pip3 install influxdb requests
 | `FakeGatoHistoryService.*` | Eve history protocol |
 | `HomeSpanWeb.*` | Live status web page |
 | `NavienBroadcaster.*` | UDP broadcast of live packet data |
-| `NavienLearner.*` | On-device schedule learner (demand-event detection, peak-finding, efficiency tracking) |
+| `NavienLearner.*` | On-device schedule learner (demand-event detection, peak-finding, low-activity guard, efficiency tracking) |
 | `TelnetCommands.*` | Telnet CLI commands |
 | `Logger/` | UDP listener, InfluxDB logger, Grafana templates, bootstrap and schedule learner scripts |
 
