@@ -30,6 +30,7 @@ SOFTWARE.
 #include "freertos/task.h"
 #include "BucketStore.h"
 #include "PeakFinder.h"
+#include "Navien.h"  // for Navien::NAVIEN_STATE_WATER, used by onWaterPacket()
 
 // Arduino String (WString.h) — forward declare so this header does not depend
 // on Arduino.h; translation units that call checkNewSchedule() must include it.
@@ -65,17 +66,14 @@ class NavienLearner {
 public:
     NavienLearner();
 
-    // Initialise: create FreeRTOS queue and BucketStore.
+    // Initialise: create FreeRTOS queue and BucketStore, and subscribe to
+    // navienSerial's water-packet event so onWaterPacket() runs for every
+    // RS-485 water packet from then on. Safe to call pre-WiFi/NTP: this only
+    // registers a callback (a vector push_back) — the callback itself won't
+    // fire until Navien::loop() sees a real packet.
     // Returns false if queue allocation fails; the learner is then silently
-    // inactive but does not crash.  Must be called before onNavienState().
+    // inactive but does not crash.
     bool begin();
-
-    // Called from the water packet callback on Core 1 for every RS-485 packet.
-    // Detects demand events and enqueues PendingDemandEvent events for Core 0.
-    // Returns immediately if the learner is disabled.
-    void onNavienState(bool consumption_active,
-                       bool recirculation_active,
-                       time_t now);
 
     // Access to the cross-core demand-event queue (consumed by Core 0 task).
     QueueHandle_t demandEventQueue() const { return _demandEventQueue; }
@@ -162,6 +160,12 @@ public:
 private:
     // Task state machine states (Core 0).
     enum TaskState { IDLE, DECAY_CHECK, RECOMPUTE_LOAD, RECOMPUTING, RECOMPUTE_WRITE };
+
+    // Subscribed to navienSerial's water-packet event in begin(); called on
+    // Core 1 for every RS-485 water packet. Detects demand events and
+    // enqueues PendingDemandEvent events for Core 0. Returns immediately if
+    // the learner is disabled.
+    void onWaterPacket(Navien::NAVIEN_STATE_WATER *water);
 
     // Compute demand_weight from run characteristics.
     // Returns 0.0 if the event should be discarded.

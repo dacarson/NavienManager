@@ -38,11 +38,50 @@ extern Navien navienSerial;
 extern FakeGatoHistoryService *historyService;
 extern FakeGatoScheduler *scheduler;
 extern NavienLearner *learner;
-String trace;
 
 // Functions in NavienBroadcaster.ino
 extern String waterToJSON(const Navien::NAVIEN_STATE_WATER *water, String rawhexstring = "");
 extern String gasToJSON(const Navien::NAVIEN_STATE_GAS *gas, String rawhexstring = "");
+extern String commandToJSON(const Navien::NAVIEN_STATE *state, String rawhexstring = "");
+extern String announceToJSON(const Navien::NAVIEN_STATE *state, String rawhexstring = "");
+
+// Tracing: subscribes to navienSerial's packet events on demand and prints
+// them to telnet. Each id is 0 when not currently subscribed.
+Navien::SubscriptionId traceWaterId = 0;
+Navien::SubscriptionId traceGasId = 0;
+Navien::SubscriptionId traceCommandId = 0;
+Navien::SubscriptionId traceAnnounceId = 0;
+
+void stopTracing() {
+  if (traceWaterId)    { navienSerial.offWaterPacket(traceWaterId);       traceWaterId = 0; }
+  if (traceGasId)      { navienSerial.offGasPacket(traceGasId);           traceGasId = 0; }
+  if (traceCommandId)  { navienSerial.offCommandPacket(traceCommandId);   traceCommandId = 0; }
+  if (traceAnnounceId) { navienSerial.offAnnouncePacket(traceAnnounceId); traceAnnounceId = 0; }
+}
+
+void traceWater() {
+  traceWaterId = navienSerial.onWaterPacket([](Navien::NAVIEN_STATE_WATER *water) {
+    telnet.println(waterToJSON(water));
+  });
+}
+
+void traceGas() {
+  traceGasId = navienSerial.onGasPacket([](Navien::NAVIEN_STATE_GAS *gas) {
+    telnet.println(gasToJSON(gas));
+  });
+}
+
+void traceCommand() {
+  traceCommandId = navienSerial.onCommandPacket([](Navien::NAVIEN_STATE *state) {
+    telnet.println(commandToJSON(state));
+  });
+}
+
+void traceAnnounce() {
+  traceAnnounceId = navienSerial.onAnnouncePacket([](Navien::NAVIEN_STATE *state) {
+    telnet.println(announceToJSON(state));
+  });
+}
 
 
 // Define the type for the command callback as a function pointer
@@ -135,19 +174,26 @@ void commandMemory(const String& params) {
 }
 
 void commandTrace(const String& params) {
+  stopTracing();
   if (params == F("gas") || params == F("water") || params == F("command") || params == F("announce")) {
-    trace = params;
+    if (params == F("gas")) traceGas();
+    else if (params == F("water")) traceWater();
+    else if (params == F("command")) traceCommand();
+    else traceAnnounce();
     telnet.print(F("Tracing only "));
     telnet.print(params);
     telnet.println(F(" interactions."));
   } else {
-    trace = F("all");
+    traceWater();
+    traceGas();
+    traceCommand();
+    traceAnnounce();
     telnet.println(F("Tracing all interactions."));
   }
 }
 
 void commandStop(const String& params) {
-  trace = F("");
+  stopTracing();
   telnet.println(F("Tracing stopped."));
 }
 
@@ -804,6 +850,14 @@ void commandBye(const String& params) {
   telnet.disconnectClient();
 }
 
+// Report any Navien errors to telnet — always on, independent of tracing.
+void onNavienError(const char *function, const char *errorMessage) {
+  telnet.print(F("Error "));
+  telnet.print(function);
+  telnet.print(F(" "));
+  telnet.println(errorMessage);
+}
+
 // Register all commands in setup
 void setupTelnetCommands() {
   telnet.stop(); // Stop it if it is already running
@@ -843,6 +897,8 @@ void setupTelnetCommands() {
   telnet.onConnect(onTelnetConnect);
   telnet.onDisconnect(onTelnetDisconnect);
   telnet.onInputReceived(onTelnetInput);  // Register Telnet input callback
+
+  navienSerial.onError(onNavienError);
 
   telnet.begin(23);
   Serial.println(F("Telnet server started"));

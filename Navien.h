@@ -24,6 +24,9 @@ SOFTWARE.
 #include <cstddef>
 #include <cstdint>
 #include <array>
+#include <functional>
+#include <utility>
+#include <vector>
 #include <HardwareSerial.h>
 
 #ifndef Navien_h
@@ -173,7 +176,16 @@ enum CommandActionHotButton {
   // Typical packets: Water ~48 bytes (~25ms), Gas ~55 bytes (~29ms), Command ~20 bytes (~10ms)
   // We wait for silence to ensure we're between packets, not mid-transmission
   static constexpr unsigned long BUS_SILENCE_MS = 50;  // Wait 50ms after last byte received
-  static constexpr unsigned long PACKET_GAP_MS = 30;   // Wait 30ms after last complete packet
+  // Wait 30ms after last complete packet. NOTE: can_send() stamps
+  // last_received (BUS_SILENCE_MS's clock) at or before the moment a packet
+  // finishes parsing and last_packet_complete_time gets stamped, so
+  // last_packet_complete_time <= last_received always holds. Since
+  // BUS_SILENCE_MS (50) > PACKET_GAP_MS (30), the silence check is always the
+  // later/stricter of the two and this check can never independently block a
+  // send today — it's dead weight unless PACKET_GAP_MS is later raised above
+  // BUS_SILENCE_MS or that invariant changes. Kept as an explicit second gate
+  // (defense-in-depth) rather than removed.
+  static constexpr unsigned long PACKET_GAP_MS = 30;
 
 
   typedef struct {
@@ -401,10 +413,45 @@ enum CommandActionHotButton {
   static constexpr float TEMPERATURE_MIN = 37.0f;
   static constexpr float TEMPERATURE_MAX = 60.0f;
 
-  typedef void (*NavienWaterCallback)(NAVIEN_STATE_WATER *water);
-  typedef void (*NavienGasCallback)(NAVIEN_STATE_GAS *gas);
-  typedef void (*PacketCallbackFunction)(NAVIEN_STATE *state);
-  typedef void (*ErrorCallbackFunction)(const char* functionName, const char* error);
+  typedef std::function<void(NAVIEN_STATE_WATER *water)> NavienWaterCallback;
+  typedef std::function<void(NAVIEN_STATE_GAS *gas)> NavienGasCallback;
+  typedef std::function<void(NAVIEN_STATE *state)> PacketCallbackFunction;
+  typedef std::function<void(const char* functionName, const char* error)> ErrorCallbackFunction;
+
+public:
+  // Returned by onXxxPacket()/onError(); pass back to offXxxPacket()/offError()
+  // to unsubscribe.
+  typedef uint32_t SubscriptionId;
+
+private:
+  // A list of subscribers for one event, each identified by the SubscriptionId
+  // handed back from subscribe() so it can later be removed via unsubscribe().
+  // Shared by all five publish/subscribe events below instead of duplicating
+  // id-tracking logic per event.
+  template <typename CallbackT>
+  class SubscriberList {
+  public:
+    SubscriptionId subscribe(CallbackT f) {
+      SubscriptionId id = next_id++;
+      entries.push_back({id, f});
+      return id;
+    }
+    void unsubscribe(SubscriptionId id) {
+      for (size_t i = 0; i < entries.size(); i++) {
+        if (entries[i].first == id) {
+          entries.erase(entries.begin() + i);
+          return;
+        }
+      }
+    }
+    template <typename... Args>
+    void notify(Args&&... args) const {
+      for (auto &entry : entries) entry.second(args...);
+    }
+  private:
+    std::vector<std::pair<SubscriptionId, CallbackT>> entries;
+    SubscriptionId next_id = 1;
+  };
 
 public:
   Navien(uint8_t uart_nr)
@@ -416,24 +463,44 @@ public:
   // Call this in the loop function
   void loop();
 
-  // Set the callback functions, called when packet is processed
-  void onGasPacket(NavienGasCallback f) {
-    on_gas_packet_cb = f;
+  // Subscribe a callback, called when a packet is processed. Any number of
+  // subscribers may register for the same event (publish/subscribe). Returns
+  // a SubscriptionId that can later be passed to the matching offXxxPacket()
+  // to unsubscribe.
+  SubscriptionId onGasPacket(NavienGasCallback f) {
+    return gas_packet_subscribers.subscribe(f);
   }
-  void onWaterPacket(NavienWaterCallback f) {
-    on_water_packet_cb = f;
-  }
-  void onCommandPacket(PacketCallbackFunction f) {
-    on_command_packet_cb = f;
-  }
-
-  void onAnnouncePacket(PacketCallbackFunction f) {
-    on_announce_packet_cb = f;
+  void offGasPacket(SubscriptionId id) {
+    gas_packet_subscribers.unsubscribe(id);
   }
 
-  // Set the error callback function
-  void onError(ErrorCallbackFunction f) {
-    on_error_cb = f;
+  SubscriptionId onWaterPacket(NavienWaterCallback f) {
+    return water_packet_subscribers.subscribe(f);
+  }
+  void offWaterPacket(SubscriptionId id) {
+    water_packet_subscribers.unsubscribe(id);
+  }
+
+  SubscriptionId onCommandPacket(PacketCallbackFunction f) {
+    return command_packet_subscribers.subscribe(f);
+  }
+  void offCommandPacket(SubscriptionId id) {
+    command_packet_subscribers.unsubscribe(id);
+  }
+
+  SubscriptionId onAnnouncePacket(PacketCallbackFunction f) {
+    return announce_packet_subscribers.subscribe(f);
+  }
+  void offAnnouncePacket(SubscriptionId id) {
+    announce_packet_subscribers.unsubscribe(id);
+  }
+
+  // Subscribe/unsubscribe an error callback function
+  SubscriptionId onError(ErrorCallbackFunction f) {
+    return error_subscribers.subscribe(f);
+  }
+  void offError(SubscriptionId id) {
+    error_subscribers.unsubscribe(id);
   }
 
   // Get the current state
@@ -473,8 +540,8 @@ public:
 
 
 protected:
-  // Debug helper to print hex buffers
-  static void print_buffer(const uint8_t *data, size_t length, ErrorCallbackFunction on_error_cb);
+  // Debug helper to print hex buffers, fans out to every error subscriber
+  void print_buffer(const uint8_t *data, size_t length);
 
   // Can I send a command now - avoid collisions on RS485 line
   bool can_send(int curr_available);
@@ -499,14 +566,20 @@ protected:
    */
   static uint8_t checksum(const uint8_t *buffer, uint8_t len, uint16_t seed);
 
-  // Callback functions that will be called when packets are received
-  NavienGasCallback on_gas_packet_cb = NULL;
-  NavienWaterCallback on_water_packet_cb = NULL;
-  PacketCallbackFunction on_command_packet_cb = NULL;
-  PacketCallbackFunction on_announce_packet_cb = NULL;
+  // Subscribers notified when packets are received. Any number of listeners
+  // may register per event (publish/subscribe) via the onXxxPacket() methods.
+  SubscriberList<NavienGasCallback> gas_packet_subscribers;
+  SubscriberList<NavienWaterCallback> water_packet_subscribers;
+  SubscriberList<PacketCallbackFunction> command_packet_subscribers;
+  SubscriberList<PacketCallbackFunction> announce_packet_subscribers;
 
-  // General error callback function to call if an error is encountered.
-  ErrorCallbackFunction on_error_cb = NULL;
+  // Subscribers notified if an error is encountered.
+  SubscriberList<ErrorCallbackFunction> error_subscribers;
+
+  // Fan an error out to every subscriber.
+  void notifyError(const char* functionName, const char* error) {
+    error_subscribers.notify(functionName, error);
+  }
   
 
 protected:

@@ -104,7 +104,7 @@ void Navien::parse_water() {
     state.announce.navilink_present = false;
   }
 
-  if (on_water_packet_cb) on_water_packet_cb(&state.water[device_number]);
+  water_packet_subscribers.notify(&state.water[device_number]);
 }
 
 void Navien::parse_gas() {
@@ -152,7 +152,7 @@ void Navien::parse_gas() {
   state.gas.accumulated_domestic_usage_cnt = 10 * raw_usage;
   state.gas.recirculation_enabled = recv_buffer.gas.recirculation_enabled ? true : false;
 
-  if (on_gas_packet_cb) on_gas_packet_cb(&(state.gas));
+  gas_packet_subscribers.notify(&(state.gas));
 }
 
 void Navien::parse_status_packet() {
@@ -167,9 +167,8 @@ void Navien::parse_status_packet() {
       parse_gas();
       break;
     default:
-      if (on_error_cb)
-        on_error_cb(__func__, "Unknown status packet type received.");
-      Navien::print_buffer(recv_buffer.raw_data, recv_buffer.hdr.len + HDR_SIZE, on_error_cb);
+      notifyError(__func__, "Unknown status packet type received.");
+      print_buffer(recv_buffer.raw_data, recv_buffer.hdr.len + HDR_SIZE);
       break;
   }
 }
@@ -179,7 +178,7 @@ void Navien::parse_announce(bool from_local_send) {
     Serial.println("Unknown announce packet");
     return;
   }
-  //Navien::print_buffer(recv_buffer.raw_data, recv_buffer.hdr.len + HDR_SIZE, on_error_cb);
+  //print_buffer(recv_buffer.raw_data, recv_buffer.hdr.len + HDR_SIZE);
 
   size_t plen = HDR_SIZE + recv_buffer.hdr.len + 1;
   if (last_announced_raw_len == plen && plen <= sizeof(last_announced_raw) &&
@@ -202,7 +201,7 @@ void Navien::parse_announce(bool from_local_send) {
     last_announce_callback_ms = millis();
   }
 
-  if (on_announce_packet_cb) on_announce_packet_cb(&(state));
+  announce_packet_subscribers.notify(&(state));
 }
 
 void Navien::parse_command(bool from_local_send) {
@@ -211,7 +210,7 @@ void Navien::parse_command(bool from_local_send) {
     Serial.println("Unknown command packet");
     return;
   }
-  //Navien::print_buffer(recv_buffer.raw_data, recv_buffer.hdr.len + HDR_SIZE, on_error_cb);
+  //print_buffer(recv_buffer.raw_data, recv_buffer.hdr.len + HDR_SIZE);
 
   memset(&(state.command), 0x0, sizeof(state.command));
 
@@ -242,7 +241,7 @@ void Navien::parse_command(bool from_local_send) {
 
   state.command.cmd_data = recv_buffer.cmd.cmd_data;
 
-  if (on_command_packet_cb) on_command_packet_cb(&(state));
+  command_packet_subscribers.notify(&(state));
 }
 
 void Navien::parse_control_packet(bool from_local_send) {
@@ -254,9 +253,8 @@ void Navien::parse_control_packet(bool from_local_send) {
       parse_command(from_local_send);
       break;
     default:
-      if (on_error_cb)
-        on_error_cb(__func__, "Unknown control packet type received.");
-      Navien::print_buffer(recv_buffer.raw_data, recv_buffer.hdr.len + HDR_SIZE, on_error_cb);
+      notifyError(__func__, "Unknown control packet type received.");
+      print_buffer(recv_buffer.raw_data, recv_buffer.hdr.len + HDR_SIZE);
       break;
   }
 }
@@ -275,9 +273,8 @@ void Navien::parse_packet() {
       crc_c = Navien::checksum(recv_buffer.raw_data, HDR_SIZE + recv_buffer.hdr.len, CHECKSUM_SEED_4B);
       if (crc_c != crc_r) {
         sprintf(errBuffer, "Status Packet checksum error: 0x%02X (calc) != 0x%02X (recv)", crc_c, crc_r);
-        if (on_error_cb)
-          on_error_cb(__func__, errBuffer);
-        Navien::print_buffer(recv_buffer.raw_data, recv_buffer.hdr.len + HDR_SIZE, on_error_cb);
+        notifyError(__func__, errBuffer);
+        print_buffer(recv_buffer.raw_data, recv_buffer.hdr.len + HDR_SIZE);
         break;
       }
       parse_status_packet();
@@ -286,8 +283,7 @@ void Navien::parse_packet() {
       crc_c = Navien::checksum(recv_buffer.raw_data, HDR_SIZE + recv_buffer.hdr.len, CHECKSUM_SEED_62);
       if (crc_c != crc_r) {
         sprintf(errBuffer, "Control Packet checksum error: 0x%02X (calc) != 0x%02X (recv)", crc_c, crc_r);
-        if (on_error_cb)
-          on_error_cb(__func__, errBuffer);
+        notifyError(__func__, errBuffer);
         break;
       }
       size_t recv_len = HDR_SIZE + recv_buffer.hdr.len + 1;
@@ -354,8 +350,7 @@ void Navien::loop() {
 
         if (!read(recv_buffer.raw_data, HDR_SIZE)) {
           sprintf(errBuffer, "Failed to read header: %d when told %d is available", HDR_SIZE, availableBytes);
-          if (on_error_cb)
-            on_error_cb(__func__, errBuffer);
+          notifyError(__func__, errBuffer);
           recv_state = INITIAL;
           return;
         }
@@ -364,11 +359,10 @@ void Navien::loop() {
 
         if (recv_buffer.hdr.len == 0xFF || recv_buffer.hdr.len >= sizeof(PACKET_BUFFER)) {
           if (recv_buffer.hdr.len == 0xFF) {
-            if (on_error_cb)
-              on_error_cb(__func__, "Invalid header length, are the 485 wires reversed?");
-          } else if (on_error_cb) {
+            notifyError(__func__, "Invalid header length, are the 485 wires reversed?");
+          } else {
             sprintf(errBuffer, "Buffer too small for packet length data, dropping packet. len: %d, size: %d", recv_buffer.hdr.len, sizeof(PACKET_BUFFER) - 1);
-            on_error_cb(__func__, errBuffer);
+            notifyError(__func__, errBuffer);
           }
           recv_state = INITIAL;
           return;
@@ -384,8 +378,7 @@ void Navien::loop() {
 
         if (!read(recv_buffer.raw_data + HDR_SIZE, len)) {
           sprintf(errBuffer, "Failed to read %d bytes when told %d is available", len, availableBytes);
-          if (on_error_cb)
-            on_error_cb(__func__, errBuffer);
+          notifyError(__func__, errBuffer);
           recv_state = INITIAL;
           return;
         }
@@ -424,21 +417,19 @@ float Navien::t2c(uint8_t c) {
 }
 
 
-void Navien::print_buffer(const uint8_t *data, size_t length, ErrorCallbackFunction on_error_cb) {
+void Navien::print_buffer(const uint8_t *data, size_t length) {
   char hex_buffer[100];
   hex_buffer[(3 * 32) + 1] = 0;
   for (size_t i = 0; i < length; i++) {
     snprintf(&hex_buffer[3 * (i % 32)], sizeof(hex_buffer), "%02X ", data[i]);
     if (i % 32 == 31) {
-      if (on_error_cb)
-        on_error_cb(__func__, hex_buffer);
+      notifyError(__func__, hex_buffer);
     }
   }
   if (length % 32) {
     // null terminate if incomplete line
     hex_buffer[3 * (length % 32) + 2] = 0;
-    if (on_error_cb)
-      on_error_cb(__func__, hex_buffer);
+    notifyError(__func__, hex_buffer);
   }
 }
 
@@ -485,6 +476,12 @@ bool Navien::can_send(int curr_available) {
 
   // Also check time since last complete packet was parsed
   // This gives us an additional safety margin to avoid collisions
+  // NOTE: last_packet_complete_time is always <= last_received (a packet
+  // can't finish parsing before its bytes were seen as available above), and
+  // PACKET_GAP_MS (30) < BUS_SILENCE_MS (50), so this check is currently
+  // always already satisfied by the time the silence check above passes —
+  // see PACKET_GAP_MS's declaration in Navien.h. Left in as a second gate in
+  // case that relationship changes later.
   if (last_packet_complete_time > 0) {
     unsigned long time_since_packet = millis() - last_packet_complete_time;
     if (time_since_packet < PACKET_GAP_MS) {
@@ -563,14 +560,14 @@ int Navien::send_cmd() {
         }
         parse_control_packet(true);
       }
-    } else if (on_error_cb) {
-      on_error_cb(__func__, "Bus not clear for transmission, command queued again");
+    } else {
+      notifyError(__func__, "Bus not clear for transmission, command queued again");
       enqueue_send_cmd(send_buffer);
       return -1;
     }
-  } else if (on_error_cb) {
-    on_error_cb(__func__, "Failed to send the command (navilink present):");
-    Navien::print_buffer(send_buffer.raw_data, len, on_error_cb);
+  } else {
+    notifyError(__func__, "Failed to send the command (navilink present):");
+    print_buffer(send_buffer.raw_data, len);
     if (send_buffer.cmd.cmd_type == CONTROL_ANNOUNCE)
       periodic_announce_pending = false;
   }

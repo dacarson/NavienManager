@@ -21,6 +21,7 @@ SOFTWARE.
 */
 
 #include "NavienLearner.h"
+#include "Navien.h"
 #include "HomeSpan.h"
 #include <Arduino.h>
 #include <LittleFS.h>
@@ -28,7 +29,8 @@ SOFTWARE.
 #include <AsyncUDP.h>
 #include <ArduinoJson.h>
 
-extern AsyncUDP udp;  // defined in NavienBroadcaster.ino
+extern AsyncUDP udp;         // defined in NavienBroadcaster.ino
+extern Navien navienSerial;  // defined in NavienManager.ino
 static constexpr int UDP_BROADCAST_PORT = 2025;
 
 // ---------------------------------------------------------------------------
@@ -146,26 +148,30 @@ bool NavienLearner::begin() {
         Serial.println("NavienLearner: task create failed — learner disabled");
         _learnerDisabled = true;
         // Note: the queue and BucketStore are already initialised at this point.
-        // They are left live but unreachable — onNavienState() bails on
-        // _learnerDisabled, so no further writes occur. Not a realistic field
-        // concern since task create failure requires severe heap exhaustion.
+        // They are left live but unreachable — begin() returns before
+        // subscribing onWaterPacket(), so it is never called. Not a realistic
+        // field concern since task create failure requires severe heap
+        // exhaustion.
         return false;
     }
+
+    // Subscribe to water packets now that the learner is fully operational.
+    // The callback only fires later, from Navien::loop() on Core 1 — never
+    // synchronously from here.
+    navienSerial.onWaterPacket([this](Navien::NAVIEN_STATE_WATER *water) { onWaterPacket(water); });
 
     Serial.println("NavienLearner: ready");
     return true;
 }
 
 // ---------------------------------------------------------------------------
-// onNavienState() — demand-event detector (Core 1)
+// onWaterPacket() — demand-event detector (Core 1)
 // ---------------------------------------------------------------------------
 
-void NavienLearner::onNavienState(bool consumption_active,
-                                   bool recirculation_active,
-                                   time_t now) {
-    if (_learnerDisabled) {
-        return;
-    }
+void NavienLearner::onWaterPacket(Navien::NAVIEN_STATE_WATER *water) {
+    bool consumption_active = water->consumption_active;
+    bool recirculation_active = water->recirculation_active;
+    time_t now = time(nullptr);
 
     // --- consumption_active 0→1: potential new demand event ---
     if (consumption_active && !_inRun) {
@@ -486,7 +492,7 @@ void NavienLearner::idleStep() {
                cs.demand_weight * cs.recency_weight);
 
         // Update measured-efficiency counters here on Core 0, not in
-        // onNavienState() on Core 1, so _measured[] and _measuredHead are
+        // onWaterPacket() on Core 1, so _measured[] and _measuredHead are
         // written by exactly one core — no synchronisation needed.
         _measured[_measuredHead].total[cs.dow]++;
         if (cs.recircAtStart) {

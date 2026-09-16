@@ -22,19 +22,14 @@ SOFTWARE.
 
 
 
-#include <ESPTelnet.h>
 #include <AsyncUDP.h>
 #include <ArduinoJson.h>
 #include "Navien.h"
-#include "NavienLearner.h"
 
 const unsigned long broadcastDuplicatePacketThrottle = 5000;  // 5 seconds in milliseconds (5000 ms)
 const int udpBroadcastPort = 2025;
 
 extern Navien navienSerial;
-extern ESPTelnet telnet;
-extern String trace;
-extern NavienLearner *learner;
 
 AsyncUDP udp;
 
@@ -136,12 +131,6 @@ String waterToJSON(const Navien::NAVIEN_STATE_WATER *water, String rawhexstring 
 }
 
 void onWaterPacket(Navien::NAVIEN_STATE_WATER *water) {
-  if (learner) {
-    learner->onNavienState(water->consumption_active,
-                           water->recirculation_active,
-                           time(nullptr));
-  }
-
   resetPreviousValues();
 
   const Navien::PACKET_BUFFER *recv_buffer = navienSerial.rawPacketData();
@@ -149,9 +138,6 @@ void onWaterPacket(Navien::NAVIEN_STATE_WATER *water) {
   if (strcmp(rawhexstring.c_str(), previousWater) != 0) {
     String json = waterToJSON(water, rawhexstring);
     udp.broadcastTo(json.c_str(), 2025);
-
-    if (trace == "water" || trace == "all")
-      telnet.println(json);
   }
   strncpy(previousWater, rawhexstring.c_str(), sizeof(previousWater) - 1);
 }
@@ -190,9 +176,6 @@ void onGasPacket(Navien::NAVIEN_STATE_GAS *gas) {
   if (strcmp(rawhexstring.c_str(), previousGas) != 0) {
     String json = gasToJSON(gas, rawhexstring);
     udp.broadcastTo(json.c_str(), 2025);
-
-    if (trace == "gas" || trace == "all")
-      telnet.println(json);
   }
   strncpy(previousGas, rawhexstring.c_str(), sizeof(previousGas) - 1);
 }
@@ -226,9 +209,6 @@ void onCommandPacket(Navien::NAVIEN_STATE *state) {
   if (strcmp(rawhexstring.c_str(), previousCommand) != 0) {
     String json = commandToJSON(state, rawhexstring);
     udp.broadcastTo(json.c_str(), 2025);
-
-    if (trace == "command" || trace == "all")
-      telnet.println(json);
   }
   strncpy(previousCommand, rawhexstring.c_str(), sizeof(previousCommand) - 1);
 }
@@ -254,20 +234,8 @@ void onAnnouncePacket(Navien::NAVIEN_STATE *state) {
   if (strcmp(rawhexstring.c_str(), previousAnnounce) != 0) {
     String json = announceToJSON(state, rawhexstring);
     udp.broadcastTo(json.c_str(), 2025);
-
-    if (trace == "announce" || trace == "all")
-      telnet.println(json);
   }
   strncpy(previousAnnounce, rawhexstring.c_str(), sizeof(previousAnnounce) - 1);
-}
-
-/* Report any errors that occurred */
-
-void onError(const char *function, const char *errorMessage) {
-  telnet.print(F("Error "));
-  telnet.print(function);
-  telnet.print(F(" "));
-  telnet.println(errorMessage);
 }
 
 void setupNavienBroadcaster() {
@@ -275,7 +243,6 @@ void setupNavienBroadcaster() {
   navienSerial.onWaterPacket(onWaterPacket);
   navienSerial.onCommandPacket(onCommandPacket);
   navienSerial.onAnnouncePacket(onAnnouncePacket);
-  navienSerial.onError(onError);
 
   Serial.println(F("UDP Broadcast started"));
 }
