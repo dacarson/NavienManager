@@ -21,8 +21,8 @@ SOFTWARE.
 */
 
 #include "BucketStore.h"
-#include <LittleFS.h>
-#include <Arduino.h>
+#include "LearnerPlatform.h"
+#include <string.h>
 #include <time.h>
 
 // ---------------------------------------------------------------------------
@@ -38,32 +38,15 @@ BucketStore::BucketStore() {
 // ---------------------------------------------------------------------------
 
 bool BucketStore::begin() {
-    // LittleFS.begin() is a no-op if already mounted (FakeGatoHistoryService
-    // mounts it with format-on-fail=true during its constructor).  Calling it
-    // again is safe and ensures we have a mount before any file access.
-    if (!LittleFS.begin(true)) {
-        Serial.println("BucketStore: LittleFS mount failed");
-        return false;
-    }
-
-    // Create the /navien directory if it doesn't exist.
-    if (!LittleFS.exists("/navien")) {
-        if (!LittleFS.mkdir("/navien")) {
-            Serial.println("BucketStore: failed to create /navien directory");
-            return false;
-        }
-        Serial.println("BucketStore: created /navien directory");
-    }
-
-    // Try to load an existing file.
+    // Try to load an existing record.
     if (load()) {
-        Serial.printf("BucketStore: loaded buckets.bin (year=%u, non-zero=%d)\n",
-                      _buckets.current_year, nonZeroCount());
+        LEARNER_LOG("BucketStore: loaded buckets (year=%u, non-zero=%d)",
+                    _buckets.current_year, nonZeroCount());
         return true;
     }
 
-    // File absent or corrupt — start fresh.
-    time_t now = time(nullptr);
+    // Record absent or corrupt — start fresh.
+    time_t now = LEARNER_NOW();
     struct tm *tm_info = gmtime(&now);
     uint16_t year = (tm_info && tm_info->tm_year > 100)
                     ? (uint16_t)(tm_info->tm_year + 1900)
@@ -71,10 +54,10 @@ bool BucketStore::begin() {
 
     initEmpty(year);
     if (!writeAtomic()) {
-        Serial.println("BucketStore: failed to write initial buckets.bin");
+        LEARNER_LOG("BucketStore: failed to write initial bucket record");
         return false;
     }
-    Serial.printf("BucketStore: created empty buckets.bin (year=%u)\n", year);
+    LEARNER_LOG("BucketStore: created empty bucket record (year=%u)", year);
     return true;
 }
 
@@ -98,7 +81,7 @@ bool BucketStore::zeroBuckets(uint16_t current_year) {
     _buckets.magic          = BUCKET_MAGIC;
     _buckets.schema_version = BUCKET_SCHEMA_VERSION;
     _buckets.current_year   = current_year;
-    time_t now = time(nullptr);
+    time_t now = LEARNER_NOW();
     _buckets.accumulation_start_epoch = (now > 0) ? (uint32_t)now : 0;
     return writeAtomic();
 }
@@ -120,34 +103,18 @@ int BucketStore::nonZeroCount() const {
 // ---------------------------------------------------------------------------
 
 bool BucketStore::load() {
-    if (!LittleFS.exists(BUCKET_FILE)) {
-        return false;
-    }
-
-    File f = LittleFS.open(BUCKET_FILE, "r");
-    if (!f) {
-        Serial.println("BucketStore: failed to open buckets.bin for reading");
-        return false;
-    }
-
-    size_t expected = sizeof(BucketFile);
-    size_t got = f.read(reinterpret_cast<uint8_t *>(&_buckets), expected);
-    f.close();
-
-    if (got != expected) {
-        Serial.printf("BucketStore: size mismatch (got %u, expected %u)\n",
-                      (unsigned)got, (unsigned)expected);
+    if (!learnerStorage().load(BUCKET_STORAGE_KEY, &_buckets, sizeof(BucketFile))) {
         return false;
     }
 
     if (_buckets.magic != BUCKET_MAGIC) {
-        Serial.printf("BucketStore: bad magic 0x%08X\n", _buckets.magic);
+        LEARNER_LOG("BucketStore: bad magic 0x%08X", _buckets.magic);
         return false;
     }
 
     if (_buckets.schema_version != BUCKET_SCHEMA_VERSION) {
-        Serial.printf("BucketStore: schema version mismatch (%u != %u)\n",
-                      _buckets.schema_version, BUCKET_SCHEMA_VERSION);
+        LEARNER_LOG("BucketStore: schema version mismatch (%u != %u)",
+                    _buckets.schema_version, BUCKET_SCHEMA_VERSION);
         return false;
     }
 
@@ -155,32 +122,7 @@ bool BucketStore::load() {
 }
 
 bool BucketStore::writeAtomic() {
-    // Write to .tmp first.
-    File f = LittleFS.open(BUCKET_TMP_FILE, "w");
-    if (!f) {
-        Serial.println("BucketStore: failed to open buckets.tmp for writing");
-        return false;
-    }
-
-    size_t written = f.write(reinterpret_cast<const uint8_t *>(&_buckets),
-                             sizeof(BucketFile));
-    f.close();
-
-    if (written != sizeof(BucketFile)) {
-        Serial.printf("BucketStore: short write to buckets.tmp (%u/%u bytes)\n",
-                      (unsigned)written, (unsigned)sizeof(BucketFile));
-        LittleFS.remove(BUCKET_TMP_FILE);
-        return false;
-    }
-
-    // Atomically replace the live file.
-    if (!LittleFS.rename(BUCKET_TMP_FILE, BUCKET_FILE)) {
-        Serial.println("BucketStore: rename buckets.tmp -> buckets.bin failed");
-        LittleFS.remove(BUCKET_TMP_FILE);
-        return false;
-    }
-
-    return true;
+    return learnerStorage().save(BUCKET_STORAGE_KEY, &_buckets, sizeof(BucketFile));
 }
 
 void BucketStore::initEmpty(uint16_t current_year) {
@@ -188,6 +130,6 @@ void BucketStore::initEmpty(uint16_t current_year) {
     _buckets.magic          = BUCKET_MAGIC;
     _buckets.schema_version = BUCKET_SCHEMA_VERSION;
     _buckets.current_year   = current_year;
-    time_t now = time(nullptr);
+    time_t now = LEARNER_NOW();
     _buckets.accumulation_start_epoch = (now > 0) ? (uint32_t)now : 0;
 }

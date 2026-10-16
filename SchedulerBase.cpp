@@ -23,10 +23,13 @@
 #include "SchedulerBase.h"
 #include "TimeUtils.h"
 #include <math.h>
+#include <string.h>
+
+#if LEARNER_WITH_NVS_SCHEDULE
 #include "esp_netif_sntp.h"
 #include <WiFi.h>
-
 #define NTP_SERVER "pool.ntp.org"
+#endif
 
 SchedulerBase::SchedulerBase()
 : sntpSyncDone(false), currentState(Unknown),
@@ -49,8 +52,9 @@ void SchedulerBase::initDefault() {
   }
 }
 
+#if LEARNER_WITH_NVS_SCHEDULE
 bool SchedulerBase::saveScheduleToStorage() {
-  
+
     // Don't write unchanged data
   DaySchedule weekScheduleEEPROM[7];
   size_t len = sizeof(weekScheduleEEPROM);
@@ -106,15 +110,21 @@ bool SchedulerBase::loadScheduleFromStorage() {
       }
     }
   }
-  
+
   return true;
 }
+#else
+// Inert defaults for a custom platform: the derived class persists the
+// schedule itself (or accepts initDefault() on every boot).
+bool SchedulerBase::saveScheduleToStorage() { return true; }
+bool SchedulerBase::loadScheduleFromStorage() { return false; }
+#endif
 
 void SchedulerBase::setVacationState(bool active) {
   endVacationTime = 0;
   
   if (active) {
-    startVacationTime = time(nullptr);
+    startVacationTime = LEARNER_NOW();
   } else {
     startVacationTime = 0;
   }
@@ -126,7 +136,7 @@ void SchedulerBase::setVacationState(bool active) {
 }
 
 void SchedulerBase::activateOverride(int durationMinutes) {
-  time_t now = time(nullptr);
+  time_t now = LEARNER_NOW();
   overrideStartTime = now;
   overrideEndTime = now + (durationMinutes * 60); // Convert minutes to seconds
   overrideActive = true;
@@ -134,7 +144,7 @@ void SchedulerBase::activateOverride(int durationMinutes) {
   // Calculate next state change (which will be when override expires)
   nextStateChangeTime = overrideEndTime;
   
-  Serial.printf("Override activated! Scheduler forced ON for %d minutes.\n", durationMinutes);
+  LEARNER_LOG("Override activated! Scheduler forced ON for %d minutes.", durationMinutes);
 }
 
 
@@ -186,7 +196,7 @@ SchedulerBase::State SchedulerBase::getNextState(time_t *nextStateTime) const {
   }
   
     // Find the next event
-  time_t now = time(nullptr);
+  time_t now = LEARNER_NOW();
   struct tm *tm_struct = gmtime(&now);
 
   int currentHour = tm_struct->tm_hour;
@@ -295,7 +305,7 @@ bool SchedulerBase::isActiveOnFireSlots(int utcDow, int hour, int minute) const 
 }
 
 SchedulerBase::State SchedulerBase::getNextStateFromFireSlots(time_t *nextStateTime) const {
-  time_t now = time(nullptr);
+  time_t now = LEARNER_NOW();
   struct tm *tm_struct = gmtime(&now);
   int currentHour = tm_struct->tm_hour;
   int currentMinute = tm_struct->tm_min;
@@ -351,7 +361,7 @@ SchedulerBase::State SchedulerBase::getNextStateFromFireSlots(time_t *nextStateT
 }
 
 bool SchedulerBase::getTimeSlot(int day, int slotIndex, uint8_t &startHour, uint8_t &startMinute, uint8_t &endHour, uint8_t &endMinute) const {
-  if (day < 0 || day > 6 || slotIndex < 0 || slotIndex >= 4)
+  if (day < 0 || day > 6 || slotIndex < 0 || slotIndex >= 3)
     return false;
   const TimeSlot &slot = weekSchedule[day].slots[slotIndex];
   if (slot.startHour == 0xFF)
@@ -372,8 +382,9 @@ bool SchedulerBase::isTimeWithinSlot(int currentHour, int currentMinute, TimeSlo
   return currentTimeInMinutes >= slotStartInMinutes && currentTimeInMinutes < slotEndInMinutes;
 }
 
+#if LEARNER_WITH_NVS_SCHEDULE
 bool SchedulerBase::setTz(String timezone) {
-  // Reload the current timezone as it may have been updated elsewhere.
+// Reload the current timezone as it may have been updated elsewhere.
   size_t len = 64;
   char tzStr[64];
   esp_err_t status = nvs_get_str(nvsStorageHandle, "TZ", tzStr, &len);
@@ -420,6 +431,7 @@ void SchedulerBase::eraseTz() {
     tzset();
     tz = String();
 }
+#endif  // LEARNER_WITH_NVS_SCHEDULE
 
 bool SchedulerBase::isActive() {
   return currentState == State::Active;
@@ -430,36 +442,36 @@ bool SchedulerBase::vacationActive() {
 }
 
 int SchedulerBase::begin() {
-  
-  esp_err_t status;
-  status = nvs_open("SCHEDULER", NVS_READWRITE, &nvsStorageHandle);
+  if (!platformBegin()) {
+    return false;
+  }
+
+  // If we failed to load the schedule from storage, then
+  // init to a default schedule.
+  if (!loadScheduleFromStorage()) {
+    LEARNER_LOG("No saved Schedule, loading default.");
+    initDefault();
+  }
+
+  loadVacationFromStorage();
+
+  sntpSyncDone = false;
+
+  // Don't calculate next state change time here - it will be done in loop()
+  // once the clock is synchronised
+
+  return true;
+}
+
+#if LEARNER_WITH_NVS_SCHEDULE
+
+bool SchedulerBase::platformBegin() {
+  esp_err_t status = nvs_open("SCHEDULER", NVS_READWRITE, &nvsStorageHandle);
   if (status) {
     Serial.printf("Failed to open NVS Storage: %s\n", esp_err_to_name(status));
     return false;
   }
-  
-  // If we failed to load the schedule from EEPROM, then
-  // init to a default schedule.
-  if (!loadScheduleFromStorage()) {
-    Serial.println("No saved Schedule, loading default.");
-    initDefault();
-  }
-  
-  uint32_t storedTime = 0;
-  status = nvs_get_u32(nvsStorageHandle, "startVacation", &storedTime);
-  startVacationTime = (time_t)storedTime;
-  if (status) {
-    Serial.println("Failed to load vacation start time, defaulting to unset.");
-    startVacationTime = 0;
-  }
-  
-  status = nvs_get_u32(nvsStorageHandle, "endVacation", &storedTime);
-  endVacationTime = (time_t)storedTime;
-  if (status) {
-    Serial.println("Failed to load vacation end time, defaulting to unset.");
-    endVacationTime = 0;
-  }
-  
+
   size_t len = 64;
   char tzStr[64];
   status = nvs_get_str(nvsStorageHandle, "TZ", tzStr, &len);
@@ -473,20 +485,65 @@ int SchedulerBase::begin() {
     setenv("TZ", tz.c_str(), 1);
     tzset();
   }
-  
+
   // Enable SNTP
   esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG(NTP_SERVER);
   esp_netif_sntp_init(&config);  // DEFAULT_CONFIG is to start the server on init()
-  sntpSyncDone = false;
-  
-  // Don't calculate next state change time here - it will be done in loop()
-  // once SNTP sync is complete and TZ is set
-  
   return true;
 }
 
+void SchedulerBase::loadVacationFromStorage() {
+  uint32_t storedTime = 0;
+  esp_err_t status = nvs_get_u32(nvsStorageHandle, "startVacation", &storedTime);
+  startVacationTime = (time_t)storedTime;
+  if (status) {
+    Serial.println("Failed to load vacation start time, defaulting to unset.");
+    startVacationTime = 0;
+  }
+
+  status = nvs_get_u32(nvsStorageHandle, "endVacation", &storedTime);
+  endVacationTime = (time_t)storedTime;
+  if (status) {
+    Serial.println("Failed to load vacation end time, defaulting to unset.");
+    endVacationTime = 0;
+  }
+}
+
+bool SchedulerBase::timeSynced() {
+  if (sntpSyncDone) {
+    return true;
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    return false;
+  }
+  esp_err_t value = esp_netif_sntp_sync_wait(2000);
+  if (value == ESP_ERR_TIMEOUT) {
+    if (tz.length() > 0) {
+      Serial.print("+");
+    }
+    return false;
+  }
+  Serial.printf("Sync %s\n", esp_err_to_name(value));
+  Serial.println("SNTP Sync completed");
+  sntpSyncDone = true;
+  // loop() used to return once more after the sync completed; keep that pacing.
+  return false;
+}
+
+#else  // custom platform
+
+bool SchedulerBase::platformBegin() { return true; }
+void SchedulerBase::loadVacationFromStorage() {}
+bool SchedulerBase::timeSynced() {
+  // A plausible NTP-synced epoch (after Nov 2023), the same guard the learner
+  // uses before trusting the clock.
+  return LEARNER_NOW() > 1700000000L;
+}
+
+#endif  // LEARNER_WITH_NVS_SCHEDULE
+
 void SchedulerBase::initializeCurrentState() {
-  time_t now = time(nullptr);
+  time_t now = LEARNER_NOW();
   
   State newState = State::InActive; // Default to inactive
   
@@ -529,39 +586,25 @@ void SchedulerBase::initializeCurrentState() {
 }
 
 void SchedulerBase::loop() {
-  
-  if (!sntpSyncDone && WiFi.status() != WL_CONNECTED) {
+
+  if (!timeSynced()) {
     return;
   }
-  
-  esp_err_t value;
-  if (!sntpSyncDone && (value = esp_netif_sntp_sync_wait(2000) == ESP_ERR_TIMEOUT)) {
-    if (tz.length() > 0) {
-      Serial.print("+");
-    }
-    return;
-  }
-  if (!sntpSyncDone) {
-    Serial.printf("Sync %s\n", esp_err_to_name(value));
-    Serial.println("SNTP Sync completed");
-    sntpSyncDone = true;
-    return;
-  }
-  
-  // If we just became initialized, determine our current state
+
+// If we just became initialized, determine our current state
   if (!isInitialized) {
     isInitialized = true;
     initializeCurrentState();
     return;
   }
   
-  time_t now = time(nullptr);
+  time_t now = LEARNER_NOW();
   State newState = currentState; // Default to current state
   
   // Handle override expiration
   if (overrideActive && now >= overrideEndTime) {
     overrideActive = false;
-    Serial.println("Override expired. Reverting to normal scheduling.");
+    LEARNER_LOG("Override expired. Reverting to normal scheduling.");
     initializeCurrentState();
     return;
   }

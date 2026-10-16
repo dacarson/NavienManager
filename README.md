@@ -219,8 +219,32 @@ pip3 install influxdb requests
 | `HomeSpanWeb.*` | Live status web page |
 | `NavienBroadcaster.*` | UDP broadcast of live packet data |
 | `NavienLearner.*` | On-device schedule learner (demand-event detection, peak-finding, low-activity guard, efficiency tracking) |
+| `LearnerPlatform.h` | Platform seam for the learner core: logging, clock, UTC offset and blob storage macros/interface (see below) |
+| `LearnerStorageLittleFS.cpp` | The sketch's `LearnerStorage`: `/navien/<name>.bin` on LittleFS, tmp + rename |
+| `test/host/` | Host-side tests of the learner core behind the seam (`python test/host/run.py`) |
 | `TelnetCommands.*` | Telnet CLI commands |
 | `Logger/` | UDP listener, InfluxDB logger, Grafana templates, bootstrap and schedule learner scripts |
+
+### Learner core: platform seam and host tests
+
+The learner core (`NavienLearner`, `PeakFinder`, `BucketStore`, `SchedulerBase`,
+`TimeUtils`) touches the platform only through `LearnerPlatform.h`:
+`LEARNER_LOG` / `LEARNER_WEBLOG` for logging, `LEARNER_NOW()` for the wall clock,
+`LEARNER_UTC_OFFSET_MIN(now)` for the UTC offset (UTC = local + offset, minutes)
+and the `LearnerStorage` interface for blob persistence. In this sketch those
+resolve to `Serial`/`WEBLOG`, `time()`, the libc TZ and LittleFS
+(`LearnerStorageLittleFS.cpp`), so behaviour and the files on flash are
+unchanged. Another firmware can embed the same five files by defining
+`LEARNER_PLATFORM_CUSTOM` and supplying its own `LearnerPlatformCustom.h`; the
+Arduino-only APIs (`String` JSON handoff, bucket ingest, HTML status, UDP
+status, NVS schedule/TZ/SNTP) sit behind `LEARNER_WITH_ARDUINO_EXTRAS`,
+`LEARNER_WITH_UDP_STATUS` and `LEARNER_WITH_NVS_SCHEDULE`, all on here.
+
+The same seam lets the core run on a PC: `python test/host/run.py` builds it
+with plain `g++` (or `clang++`) against a fake clock, in-memory storage and
+single-threaded FreeRTOS stubs, runs the tests in `test/host/learner_core_test.cpp`
+and upstream's two standalone harnesses (`TimeUtils_test.cpp`,
+`test/PeakFinder_test.cpp`). No Arduino or ESP32 toolchain is involved.
 
 ---
 

@@ -28,13 +28,16 @@ SOFTWARE.
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "LearnerPlatform.h"
 #include "BucketStore.h"
 #include "PeakFinder.h"
-#include "Navien.h"  // for Navien::NAVIEN_STATE_WATER, used by onWaterPacket()
 
+#if LEARNER_WITH_ARDUINO_EXTRAS
 // Arduino String (WString.h) — forward declare so this header does not depend
-// on Arduino.h; translation units that call checkNewSchedule() must include it.
+// on Arduino.h; translation units that call checkNewSchedule(String&) must
+// include it.
 class String;
+#endif
 
 // ---------------------------------------------------------------------------
 // Demand event transported from Core 1 → Core 0
@@ -59,6 +62,19 @@ struct WeekMeasured {
 };
 
 // ---------------------------------------------------------------------------
+// One learned recirculation window, in LOCAL wall time, as handed off by
+// recomputeWrite(). The struct form of the schedule JSON: local_dow 0=Sun,
+// minutes since local midnight, score = net dollar benefit (PeakFinder).
+// ---------------------------------------------------------------------------
+
+struct LearnedSlot {
+    uint8_t  local_dow;
+    uint16_t start_min;
+    uint16_t end_min;
+    float    score;
+};
+
+// ---------------------------------------------------------------------------
 // NavienLearner
 // ---------------------------------------------------------------------------
 
@@ -66,14 +82,20 @@ class NavienLearner {
 public:
     NavienLearner();
 
-    // Initialise: create FreeRTOS queue and BucketStore, and subscribe to
-    // navienSerial's water-packet event so onWaterPacket() runs for every
-    // RS-485 water packet from then on. Safe to call pre-WiFi/NTP: this only
-    // registers a callback (a vector push_back) — the callback itself won't
-    // fire until Navien::loop() sees a real packet.
+    // Initialise: create FreeRTOS queue and BucketStore and start the Core 0
+    // task. Safe to call pre-WiFi/NTP. The caller feeds onWaterSample() from
+    // its water-packet stream afterwards (see NavienManager.ino); the learner
+    // itself has no dependency on the RS-485 layer.
     // Returns false if queue allocation fails; the learner is then silently
     // inactive but does not crash.
     bool begin();
+
+    // Demand-event detector input: called on Core 1 for every RS-485 water
+    // packet with the two flags it needs — is a tap open (flow_state bit 5),
+    // and is scheduled recirculation mode on (recirculation_enabled bit 1).
+    // Detects demand events and enqueues PendingDemandEvent events for
+    // Core 0. Returns immediately if the learner is disabled.
+    void onWaterSample(bool consumption_active, bool recirculation_active);
 
     // Access to the cross-core demand-event queue (consumed by Core 0 task).
     QueueHandle_t demandEventQueue() const { return _demandEventQueue; }
@@ -93,9 +115,10 @@ public:
     // POST /buckets seeds new bucket data).  Safe to call from any core.
     void requestRecompute() { _recomputeRequested = true; }
 
+#if LEARNER_WITH_ARDUINO_EXTRAS
     // Ingest a sparse bucket payload from POST /buckets (called from Core 1
     // during bootstrap only).  Parses JSON, merges or replaces _buckets in
-    // RAM, writes atomically to LittleFS, then sets _recomputeRequested.
+    // RAM, writes atomically to storage, then sets _recomputeRequested.
     // Returns the number of individual buckets written, or -1 on error
     // (schema mismatch, parse failure, or save failure).
     // 'replaced' is set to reflect the value of the "replace" field.
@@ -106,14 +129,26 @@ public:
     // Returns true and fills out_json with the schedule JSON if ready.
     bool checkNewSchedule(String &out_json);
 
-    // Persist _measured[] and _measuredHead to /navien/measured.bin.
+    // Append a Learner Status HTML section to page.  Called from the web status
+    // callback on Core 1; reads _measured[] as coarse stats without locking.
+    void appendStatusHTML(String &page) const;
+#endif
+
+    // Struct form of the handoff for embedders without a JSON path. Same
+    // non-blocking semantics as the String variant: false if nothing is ready
+    // or the mutex is held. On success copies up to `cap` slots into `out`,
+    // sets `count` and the UTC offset (UTC = local + offsetMin) the schedule
+    // was computed with, and clears the ready flag.
+    bool checkNewSchedule(LearnedSlot *out, int cap, int &count, int &offsetMin);
+
+    // Persist _measured[] and _measuredHead (storage key "measured").
     // Safe to call from any core (coarse stats, no lock taken).
     // Returns true on success.
     bool saveMeasured();
 
-    // Load _measured[] and _measuredHead from /navien/measured.bin.
+    // Load _measured[] and _measuredHead from storage.
     // Called during begin(); silently succeeds (leaves zeroed RAM) if the
-    // file is absent or corrupt.
+    // record is absent or corrupt.
     bool loadMeasured();
 
     // Wall time of the last completed RECOMPUTE_WRITE (0 = never).
@@ -129,11 +164,11 @@ public:
     // recompute. Index 0=Sunday .. 6=Saturday.
     const float *predictedBenefitUsd() const { return _predictedBenefitUsd; }
 
-    // Append a Learner Status HTML section to page.  Called from the web status
-    // callback on Core 1; reads _measured[] as coarse stats without locking.
-    void appendStatusHTML(String &page) const;
-
     bool isDisabled() const { return _learnerDisabled; }
+
+    // True while the low-activity guard caps the schedule to one window per
+    // day (see checkLowActivity()).
+    bool lowActivityMode() const { return _lowActivityMode; }
 
     // Demand-event detection thresholds (seconds)
     static constexpr uint32_t COLD_GAP_SEC             = 600; // 10 min
@@ -154,18 +189,18 @@ public:
     static constexpr float LOW_ACTIVITY_QUIET_RATIO  = 0.25f;
     static constexpr float LOW_ACTIVITY_RESUME_RATIO = 0.60f;
 
-    // Core 0 task entry point — launched by begin().
+    // Core 0 task entry point — launched by begin(). Loops on taskStep().
     static void learnerTask(void *pvParam);
+
+    // One iteration of the Core 0 state machine (IDLE → DECAY_CHECK →
+    // RECOMPUTE_LOAD → RECOMPUTING → RECOMPUTE_WRITE → IDLE). Public so a host
+    // test, or an embedding firmware that has no dedicated task, can drive the
+    // machine step by step. Must not be called concurrently with the task.
+    void taskStep();
 
 private:
     // Task state machine states (Core 0).
     enum TaskState { IDLE, DECAY_CHECK, RECOMPUTE_LOAD, RECOMPUTING, RECOMPUTE_WRITE };
-
-    // Subscribed to navienSerial's water-packet event in begin(); called on
-    // Core 1 for every RS-485 water packet. Detects demand events and
-    // enqueues PendingDemandEvent events for Core 0. Returns immediately if
-    // the learner is disabled.
-    void onWaterPacket(Navien::NAVIEN_STATE_WATER *water);
 
     // Compute demand_weight from run characteristics.
     // Returns 0.0 if the event should be discarded.
@@ -180,7 +215,7 @@ private:
     // Core 0 state machine helpers.
     void idleStep();        // called every IDLE tick: queue drain, midnight check
     void decayCheck();      // apply annual weighted_score decay if year has rolled over
-    void recomputeWrite();  // builds JSON, hands off to Core 1, and broadcasts UDP
+    void recomputeWrite();  // builds the schedule, hands off to Core 1, and broadcasts UDP
 
     // Evaluate the day that just ended (dow_that_ended) against its long-run
     // typical activity and update the low-activity streak/mode. Called once
@@ -226,8 +261,16 @@ private:
 
     // --- Schedule handoff (Core 0 writes, Core 1 reads — guarded by mutex) ---
     SemaphoreHandle_t _scheduleHandoffMutex;
+#if LEARNER_WITH_ARDUINO_EXTRAS
     char              _pendingScheduleJSON[SCHEDULE_JSON_CAPACITY];
-    bool              _newScheduleReady;
+#endif
+    // One ready flag per handoff form: each consumer clears only its own, so
+    // polling both the JSON and the struct form never loses a recompute.
+    bool              _newScheduleReadyJson;
+    bool              _newScheduleReadyStruct;
+    LearnedSlot       _pendingSlots[BUCKET_DAYS * MAX_SLOTS_PER_DAY];
+    int               _pendingSlotCount;
+    int               _pendingOffsetMin;
 
     // --- Recompute results (Core 0 only) ---
     // _weekSlots[local_dow] holds local-time slots from findDaySlots on the
