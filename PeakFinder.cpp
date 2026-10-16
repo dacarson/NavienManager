@@ -21,7 +21,6 @@ SOFTWARE.
 */
 
 #include "PeakFinder.h"
-#include "HomeSpan.h"
 #include <string.h>
 
 // Bucket duration in minutes — 288 buckets × 5 min = 1440 min/day.

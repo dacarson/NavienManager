@@ -84,6 +84,12 @@ void setup() {
   // Learner is independent of HomeSpan/HomeKit and starts unconditionally.
   learner = new NavienLearner();
   learner->begin();
+  // Feed its demand-event detector from the water packet stream. The
+  // subscription lives here rather than in the learner so the learner core
+  // has no dependency on Navien.h (see LearnerPlatform.h).
+  navienSerial.onWaterPacket([](Navien::NAVIEN_STATE_WATER *water) {
+    if (learner) learner->onWaterSample(water->consumption_active, water->recirculation_active);
+  });
 
   // setup HomeSpan. It needs to own WiFi setup so
   // that it can do the pairing.

@@ -21,17 +21,23 @@ SOFTWARE.
 */
 
 #include "NavienLearner.h"
-#include "Navien.h"
-#include "HomeSpan.h"
-#include <Arduino.h>
-#include <LittleFS.h>
+#include "LearnerPlatform.h"
+#include <math.h>
 #include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+#if LEARNER_WITH_ARDUINO_EXTRAS
+#include <Arduino.h>
+#include <ArduinoJson.h>
+#endif
+
+#if LEARNER_WITH_UDP_STATUS
 #include <AsyncUDP.h>
 #include <ArduinoJson.h>
-
 extern AsyncUDP udp;         // defined in NavienBroadcaster.ino
-extern Navien navienSerial;  // defined in NavienManager.ino
 static constexpr int UDP_BROADCAST_PORT = 2025;
+#endif
 
 // ---------------------------------------------------------------------------
 // safeAppend() — file-private snprintf helper with truncation protection.
@@ -43,6 +49,7 @@ static constexpr int UDP_BROADCAST_PORT = 2025;
 // bufSize-1 so the buffer always stays null-terminated and subsequent calls
 // become no-ops.  Returns false if truncation occurred.
 // ---------------------------------------------------------------------------
+#if LEARNER_WITH_ARDUINO_EXTRAS
 static bool safeAppend(char *buf, int bufSize, int *pos, const char *fmt, ...) {
     int remaining = bufSize - *pos;
     if (remaining <= 1) return false;
@@ -59,6 +66,7 @@ static bool safeAppend(char *buf, int bufSize, int *pos, const char *fmt, ...) {
     *pos += n;
     return true;
 }
+#endif
 
 // ---------------------------------------------------------------------------
 // Constructor
@@ -87,13 +95,18 @@ NavienLearner::NavienLearner()
       _lowActivityMode(false),
       _scheduleHandoffMutex(nullptr),
       _newScheduleReady(false),
+      _pendingSlotCount(0),
+      _pendingOffsetMin(0),
       _measuredHead(0),
       _learnerDisabled(false)
 {
     memset(_measured,            0, sizeof(_measured));
     memset(_weekSlots,           0, sizeof(_weekSlots));
     memset(_weekSlotCount,       0, sizeof(_weekSlotCount));
+#if LEARNER_WITH_ARDUINO_EXTRAS
     memset(_pendingScheduleJSON, 0, sizeof(_pendingScheduleJSON));
+#endif
+    memset(_pendingSlots,        0, sizeof(_pendingSlots));
     // NAN cannot be set via memset (its bit pattern is not 0); loop instead.
     // This ensures N/A is displayed before the first recompute completes.
     for (int i = 0; i < BUCKET_DAYS; i++) {
@@ -109,14 +122,14 @@ NavienLearner::NavienLearner()
 bool NavienLearner::begin() {
     _demandEventQueue = xQueueCreate(1, sizeof(PendingDemandEvent));
     if (_demandEventQueue == nullptr) {
-        Serial.println("NavienLearner: queue alloc failed — learner disabled");
+        LEARNER_LOG("NavienLearner: queue alloc failed — learner disabled");
         _learnerDisabled = true;
         return false;
     }
 
     _scheduleHandoffMutex = xSemaphoreCreateMutex();
     if (_scheduleHandoffMutex == nullptr) {
-        Serial.println("NavienLearner: mutex alloc failed — learner disabled");
+        LEARNER_LOG("NavienLearner: mutex alloc failed — learner disabled");
         _learnerDisabled = true;
         // Queue is left live but unreachable; same intentional tradeoff as the
         // BucketStore and task-create failure paths below.
@@ -124,7 +137,7 @@ bool NavienLearner::begin() {
     }
 
     if (!_store.begin()) {
-        Serial.println("NavienLearner: BucketStore init failed — learner disabled");
+        LEARNER_LOG("NavienLearner: BucketStore init failed — learner disabled");
         _learnerDisabled = true;
         // Queue and mutex were created above but are left live; same intentional
         // tradeoff as the task-create failure path below.
@@ -145,33 +158,28 @@ bool NavienLearner::begin() {
         0       // Core 0
     );
     if (taskRet != pdPASS) {
-        Serial.println("NavienLearner: task create failed — learner disabled");
+        LEARNER_LOG("NavienLearner: task create failed — learner disabled");
         _learnerDisabled = true;
         // Note: the queue and BucketStore are already initialised at this point.
-        // They are left live but unreachable — begin() returns before
-        // subscribing onWaterPacket(), so it is never called. Not a realistic
-        // field concern since task create failure requires severe heap
-        // exhaustion.
+        // They are left live but unreachable: onWaterSample() returns early
+        // while _learnerDisabled is set. Not a realistic field concern since
+        // task create failure requires severe heap exhaustion.
         return false;
     }
 
-    // Subscribe to water packets now that the learner is fully operational.
-    // The callback only fires later, from Navien::loop() on Core 1 — never
-    // synchronously from here.
-    navienSerial.onWaterPacket([this](Navien::NAVIEN_STATE_WATER *water) { onWaterPacket(water); });
-
-    Serial.println("NavienLearner: ready");
+    // The caller subscribes onWaterSample() to its water-packet stream now
+    // that the learner is fully operational (see NavienManager.ino).
+    LEARNER_LOG("NavienLearner: ready");
     return true;
 }
 
 // ---------------------------------------------------------------------------
-// onWaterPacket() — demand-event detector (Core 1)
+// onWaterSample() — demand-event detector (Core 1)
 // ---------------------------------------------------------------------------
 
-void NavienLearner::onWaterPacket(Navien::NAVIEN_STATE_WATER *water) {
-    bool consumption_active = water->consumption_active;
-    bool recirculation_active = water->recirculation_active;
-    time_t now = time(nullptr);
+void NavienLearner::onWaterSample(bool consumption_active, bool recirculation_active) {
+    if (_learnerDisabled) return;
+    time_t now = LEARNER_NOW();
 
     // --- consumption_active 0→1: potential new demand event ---
     if (consumption_active && !_inRun) {
@@ -291,8 +299,8 @@ struct MeasuredFile {
 
 static constexpr uint32_t MEASURED_MAGIC          = 0x4D454153u;
 static constexpr uint8_t  MEASURED_SCHEMA_VERSION = 2;
-static constexpr char     MEASURED_FILE[]         = "/navien/measured.bin";
-static constexpr char     MEASURED_TMP_FILE[]     = "/navien/measured.tmp";
+// Storage key: the sketch's LittleFS platform maps it to /navien/measured.bin.
+static constexpr char     MEASURED_STORAGE_KEY[]  = "measured";
 
 bool NavienLearner::saveMeasured() {
     MeasuredFile mf;
@@ -304,69 +312,38 @@ bool NavienLearner::saveMeasured() {
     memcpy(mf.measured, _measured, sizeof(_measured));
     mf.last_recompute_24h = (int64_t)_lastRecomputeTime24h;
 
-    File f = LittleFS.open(MEASURED_TMP_FILE, "w");
-    if (!f) {
-        Serial.println("NavienLearner: failed to open measured.tmp for writing");
-        return false;
-    }
-    size_t written = f.write(reinterpret_cast<const uint8_t *>(&mf), sizeof(mf));
-    f.close();
-
-    if (written != sizeof(mf)) {
-        Serial.printf("NavienLearner: short write to measured.tmp (%u/%u)\n",
-                      (unsigned)written, (unsigned)sizeof(mf));
-        LittleFS.remove(MEASURED_TMP_FILE);
+    if (!learnerStorage().save(MEASURED_STORAGE_KEY, &mf, sizeof(mf))) {
+        LEARNER_LOG("NavienLearner: measured window save failed");
         return false;
     }
 
-    if (!LittleFS.rename(MEASURED_TMP_FILE, MEASURED_FILE)) {
-        Serial.println("NavienLearner: rename measured.tmp -> measured.bin failed");
-        LittleFS.remove(MEASURED_TMP_FILE);
-        return false;
-    }
-
-    Serial.println("NavienLearner: measured window saved");
+    LEARNER_LOG("NavienLearner: measured window saved");
     return true;
 }
 
 bool NavienLearner::loadMeasured() {
-    if (!LittleFS.exists(MEASURED_FILE)) {
+    MeasuredFile mf;
+    if (!learnerStorage().load(MEASURED_STORAGE_KEY, &mf, sizeof(mf))) {
         return false;   // first boot — silently start from zero
     }
-
-    File f = LittleFS.open(MEASURED_FILE, "r");
-    if (!f) {
-        Serial.println("NavienLearner: failed to open measured.bin for reading");
-        return false;
-    }
-
-    MeasuredFile mf;
-    size_t got = f.read(reinterpret_cast<uint8_t *>(&mf), sizeof(mf));
-    f.close();
-
-    if (got != sizeof(mf)) {
-        Serial.printf("NavienLearner: measured.bin size mismatch (%u/%u)\n",
-                      (unsigned)got, (unsigned)sizeof(mf));
-        return false;
-    }
     if (mf.magic != MEASURED_MAGIC) {
-        Serial.printf("NavienLearner: measured.bin bad magic 0x%08X\n", mf.magic);
+        LEARNER_LOG("NavienLearner: measured record bad magic 0x%08X", mf.magic);
         return false;
     }
     if (mf.schema_version != MEASURED_SCHEMA_VERSION) {
-        Serial.printf("NavienLearner: measured.bin schema mismatch (%u)\n",
-                      mf.schema_version);
+        LEARNER_LOG("NavienLearner: measured record schema mismatch (%u)",
+                    mf.schema_version);
         return false;
     }
     if (mf.head >= 4) {
-        Serial.printf("NavienLearner: measured.bin bad head %u\n", mf.head);
+        LEARNER_LOG("NavienLearner: measured record bad head %u", mf.head);
         return false;
     }
 
     memcpy(_measured, mf.measured, sizeof(_measured));
     _measuredHead         = mf.head;
     _lastRecomputeTime24h = (time_t)mf.last_recompute_24h;
-    Serial.printf("NavienLearner: measured window loaded (head=%u)\n", mf.head);
+    LEARNER_LOG("NavienLearner: measured window loaded (head=%u)", mf.head);
     return true;
 }
 
@@ -378,6 +355,16 @@ void NavienLearner::learnerTask(void *pvParam) {
     NavienLearner *self = static_cast<NavienLearner *>(pvParam);
 
     for (;;) {
+        self->taskStep();
+    }
+}
+
+// One iteration of the Core 0 state machine. Split out of learnerTask() so a
+// host test (or an embedding firmware without a dedicated task) can drive the
+// machine step by step.
+void NavienLearner::taskStep() {
+    NavienLearner *self = this;
+    {
         switch (self->_taskState) {
 
             case IDLE:
@@ -397,15 +384,8 @@ void NavienLearner::learnerTask(void *pvParam) {
                 // bucket views and the UTC conversion in recomputeWrite() use the
                 // same offset (avoids drift if the system clock ticks across an
                 // hour boundary mid-recompute).
-                time_t rlt_now = time(nullptr);
-                struct tm rlt_local = {}, rlt_utc = {};
-                localtime_r(&rlt_now, &rlt_local);
-                gmtime_r(&rlt_now, &rlt_utc);
-                self->_recomputeOffsetMin =
-                    (rlt_utc.tm_hour * 60 + rlt_utc.tm_min)
-                  - (rlt_local.tm_hour * 60 + rlt_local.tm_min);
-                if (self->_recomputeOffsetMin >  720) self->_recomputeOffsetMin -= 1440;
-                if (self->_recomputeOffsetMin < -720) self->_recomputeOffsetMin += 1440;
+                time_t rlt_now = LEARNER_NOW();
+                self->_recomputeOffsetMin = LEARNER_UTC_OFFSET_MIN(rlt_now);
 
                 // Snapshot weeks-of-accumulation once for the entire pass, same
                 // reasoning as the offset above. Signed 64-bit subtraction avoids
@@ -465,7 +445,7 @@ void NavienLearner::idleStep() {
     // recompute or new demand events are accumulated.  This handles the case
     // where the device was powered off over New Year and reboots mid-January.
     if (!_startupDecayDone) {
-        time_t now = time(nullptr);
+        time_t now = LEARNER_NOW();
         // now > 1700000000 = Nov 2023; guards against the RTC returning a small
         // epoch value (year 1970) before NTP syncs — WiFi must be up first.
         if (now > 1700000000L) {
@@ -486,7 +466,7 @@ void NavienLearner::idleStep() {
         static const char *dowNames[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
         int bucket_h = (cs.bucket * 5) / 60;
         int bucket_m = (cs.bucket * 5) % 60;
-        WEBLOG("LEARNER demand-event: UTC %s %02d:%02d bucket=%d recirc=%s weight=%.1f",
+        LEARNER_WEBLOG("LEARNER demand-event: UTC %s %02d:%02d bucket=%d recirc=%s weight=%.1f",
                dowNames[cs.dow], bucket_h, bucket_m, cs.bucket,
                cs.recircAtStart ? "yes" : "no",
                cs.demand_weight * cs.recency_weight);
@@ -503,7 +483,7 @@ void NavienLearner::idleStep() {
         if (!_store.updateBucket(cs.dow, cs.bucket,
                                  /*raw_delta=*/1,
                                  cs.demand_weight * cs.recency_weight)) {
-            Serial.printf("NavienLearner: bucket write failed (dow=%d b=%d)\n",
+            LEARNER_LOG("NavienLearner: bucket write failed (dow=%d b=%d)",
                           cs.dow, cs.bucket);
         }
     }
@@ -520,7 +500,7 @@ void NavienLearner::idleStep() {
     // 24h elapsed timer: trigger nightly recompute once per day.
     // Goes via DECAY_CHECK first so year-rollover decay is applied before
     // the new schedule is computed.
-    time_t now = time(nullptr);
+    time_t now = LEARNER_NOW();
     if (now > 1700000000L) {  // require a plausible NTP-synced epoch, not just any positive value
         if (_lastRecomputeTime24h == 0) {
             // First eligible tick after boot (or missing measured.bin).
@@ -595,14 +575,14 @@ void NavienLearner::checkLowActivity(int dow_that_ended, time_t now) {
         if (_quietDayStreak < 255) _quietDayStreak++;
         if (_quietDayStreak >= LOW_ACTIVITY_ENTER_DAYS && !_lowActivityMode) {
             _lowActivityMode = true;
-            WEBLOG("LEARNER low-activity mode ON (dow=%d actual=%d typical=%.1f)",
+            LEARNER_WEBLOG("LEARNER low-activity mode ON (dow=%d actual=%d typical=%.1f)",
                    dow_that_ended, actual, typical);
         }
     } else if ((float)actual >= LOW_ACTIVITY_RESUME_RATIO * typical) {
         _quietDayStreak = 0;
         if (_lowActivityMode) {
             _lowActivityMode = false;
-            WEBLOG("LEARNER low-activity mode OFF (dow=%d actual=%d typical=%.1f)",
+            LEARNER_WEBLOG("LEARNER low-activity mode OFF (dow=%d actual=%d typical=%.1f)",
                    dow_that_ended, actual, typical);
         }
     }
@@ -627,7 +607,7 @@ void NavienLearner::checkLowActivity(int dow_that_ended, time_t now) {
 // ---------------------------------------------------------------------------
 
 void NavienLearner::decayCheck() {
-    time_t now = time(nullptr);
+    time_t now = LEARNER_NOW();
     if (now <= 0) {
         // Clock not yet set — return without changes; see block comment above.
         return;
@@ -654,7 +634,7 @@ void NavienLearner::decayCheck() {
                 bf.buckets[dow][b].weighted_score *= (2.0f / 3.0f);
             }
         }
-        Serial.printf("NavienLearner: annual decay applied (%u → %u)\n",
+        LEARNER_LOG("NavienLearner: annual decay applied (%u → %u)",
                       stored_year, this_year);
     }
 
@@ -665,7 +645,7 @@ void NavienLearner::decayCheck() {
     _store.data().current_year             = this_year;
     _store.data().accumulation_start_epoch = (uint32_t)now;
     if (!_store.save()) {
-        Serial.println("NavienLearner: decay save failed");
+        LEARNER_LOG("NavienLearner: decay save failed");
     }
 }
 
@@ -732,7 +712,7 @@ void NavienLearner::recomputeWrite() {
             float score     = sorted[s].score;
 
             if (s >= kept) {
-                WEBLOG("LEARNER local-day prune: local_dow=%d kept=%d dropped local=%02d:%02d score=%.2f%s",
+                LEARNER_WEBLOG("LEARNER local-day prune: local_dow=%d kept=%d dropped local=%02d:%02d score=%.2f%s",
                        local_dow, kept,
                        local_start / 60, local_start % 60, score,
                        _lowActivityMode ? " (low-activity)" : "");
@@ -770,17 +750,17 @@ void NavienLearner::recomputeWrite() {
     // --- Step 2b: Diagnostic — log local and UTC slot distribution ---
     {
         static const char *dn[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
-        WEBLOG("LEARNER recompute: local peaks: Sun=%d Mon=%d Tue=%d Wed=%d Thu=%d Fri=%d Sat=%d (offsetMin=%d)",
+        LEARNER_WEBLOG("LEARNER recompute: local peaks: Sun=%d Mon=%d Tue=%d Wed=%d Thu=%d Fri=%d Sat=%d (offsetMin=%d)",
                _weekSlotCount[0], _weekSlotCount[1], _weekSlotCount[2], _weekSlotCount[3],
                _weekSlotCount[4], _weekSlotCount[5], _weekSlotCount[6], offsetMin);
         int udc[7] = {};
         for (int i = 0; i < nLocal; i++) udc[allLocal[i].utc_dow]++;
-        WEBLOG("LEARNER recompute: UTC slots post-local-prune: Sun=%d Mon=%d Tue=%d Wed=%d Thu=%d Fri=%d Sat=%d",
+        LEARNER_WEBLOG("LEARNER recompute: UTC slots post-local-prune: Sun=%d Mon=%d Tue=%d Wed=%d Thu=%d Fri=%d Sat=%d",
                udc[0], udc[1], udc[2], udc[3], udc[4], udc[5], udc[6]);
         for (int d = 0; d < 7; d++) {
             for (int i = 0; i < nLocal; i++) {
                 if (allLocal[i].local_dow != d) continue;
-                WEBLOG("  local_%s %02d:%02d-%02d:%02d -> utc_%s %02d:%02d-%02d:%02d score=%.3f",
+                LEARNER_WEBLOG("  local_%s %02d:%02d-%02d:%02d -> utc_%s %02d:%02d-%02d:%02d score=%.3f",
                        dn[d],
                        allLocal[i].local_start_min / 60, allLocal[i].local_start_min % 60,
                        allLocal[i].local_end_min   / 60, allLocal[i].local_end_min   % 60,
@@ -797,6 +777,7 @@ void NavienLearner::recomputeWrite() {
     LocalSlot *pruned = allLocal;
     int        nPruned = nLocal;
 
+#if LEARNER_WITH_ARDUINO_EXTRAS
     // --- Step 3: Build JSON with LOCAL times indexed by LOCAL day (0=Sun..6=Sat).
     // Same format as navien_schedule_learner.py POST /schedule — NOT "utc":true.
     // setWeekScheduleFromJSON() loads all 3 slots per local day, then
@@ -850,9 +831,10 @@ void NavienLearner::recomputeWrite() {
     if (!ok) {
         // Truncated JSON would fail setWeekScheduleFromJSON() parse — skip handoff
         // entirely so the existing schedule stays in effect and no apply cycle fires.
-        Serial.println("NavienLearner: schedule JSON truncated — SCHEDULE_JSON_CAPACITY too small; handoff skipped");
+        LEARNER_LOG("NavienLearner: schedule JSON truncated — SCHEDULE_JSON_CAPACITY too small; handoff skipped");
         return;
     }
+#endif
 
     // --- Step 4: Predicted efficiency per LOCAL day (matches schedule semantics) ---
     // Uses the same local-day bucket view as RECOMPUTING; slots are local times.
@@ -901,17 +883,32 @@ void NavienLearner::recomputeWrite() {
         // Always record benefit after a recompute (0.0 = no positive-net slots).
         _predictedBenefitUsd[local_dow] = benefitUsd;
     }
-    _lastRecomputeTime = time(nullptr);
+    _lastRecomputeTime = LEARNER_NOW();
 
     // Hand off to Core 1 under mutex.  portMAX_DELAY is safe: Core 1 holds
     // this mutex only for a string copy (a few µs), never during NVS writes.
     // pos <= SCHEDULE_JSON_CAPACITY-1 (guaranteed by safeAppend), so
     // memcpy of pos+1 bytes fits within _pendingScheduleJSON[SCHEDULE_JSON_CAPACITY].
     xSemaphoreTake(_scheduleHandoffMutex, portMAX_DELAY);
+#if LEARNER_WITH_ARDUINO_EXTRAS
     memcpy(_pendingScheduleJSON, buf, (size_t)pos + 1);
+#endif
+    // Struct form of the same schedule, for embedders without a JSON path.
+    {
+        const int cap = (int)(sizeof(_pendingSlots) / sizeof(_pendingSlots[0]));
+        _pendingSlotCount = (nPruned < cap) ? nPruned : cap;
+        for (int i = 0; i < _pendingSlotCount; i++) {
+            _pendingSlots[i].local_dow = (uint8_t)pruned[i].local_dow;
+            _pendingSlots[i].start_min = pruned[i].local_start_min;
+            _pendingSlots[i].end_min   = pruned[i].local_end_min;
+            _pendingSlots[i].score     = pruned[i].score;
+        }
+        _pendingOffsetMin = offsetMin;
+    }
     _newScheduleReady = true;
     xSemaphoreGive(_scheduleHandoffMutex);
 
+#if LEARNER_WITH_UDP_STATUS
     // --- Step 6: Broadcast learner status over UDP ---
     // Uses the pruned schedule (same MAX_SLOTS_PER_DAY slots pushed to HomeKit)
     // rather than the full pre-prune candidate list.  Pre-prune candidates can
@@ -978,10 +975,12 @@ void NavienLearner::recomputeWrite() {
         serializeJson(udpDoc, udpJson);
         udp.broadcastTo(udpJson.c_str(), UDP_BROADCAST_PORT);
     }
+#endif
 
-    Serial.println("NavienLearner: recompute complete, new schedule ready");
+    LEARNER_LOG("NavienLearner: recompute complete, new schedule ready");
 }
 
+#if LEARNER_WITH_ARDUINO_EXTRAS
 // ---------------------------------------------------------------------------
 // ingestBucketPayload() — public; called from Core 1 during bootstrap only.
 // Parses sparse JSON, merges or replaces _buckets in RAM, writes atomically
@@ -996,20 +995,20 @@ int NavienLearner::ingestBucketPayload(const char *json, bool &replaced) {
     replaced = false;
 
     if (_learnerDisabled) {
-        Serial.println(F("[learner] POST /buckets: learner disabled — ingest skipped"));
+        LEARNER_LOG("[learner] POST /buckets: learner disabled — ingest skipped");
         return -1;
     }
 
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, json);
     if (err) {
-        Serial.printf("[learner] POST /buckets: JSON parse error: %s\n", err.c_str());
+        LEARNER_LOG("[learner] POST /buckets: JSON parse error: %s", err.c_str());
         return -1;
     }
 
     int schema = doc["schema_version"] | -1;
     if (schema != BUCKET_SCHEMA_VERSION) {
-        Serial.printf("[learner] POST /buckets: schema mismatch %d != %d\n",
+        LEARNER_LOG("[learner] POST /buckets: schema mismatch %d != %d",
                       schema, BUCKET_SCHEMA_VERSION);
         return -1;
     }
@@ -1040,7 +1039,7 @@ int NavienLearner::ingestBucketPayload(const char *json, bool &replaced) {
         // Always write an explicit year on replace — same clock fallback as
         // BucketStore::begin() so the header is never left at a stale value.
         if (current_year <= 0) {
-            time_t now = time(nullptr);
+            time_t now = LEARNER_NOW();
             struct tm *t = gmtime(&now);
             current_year = (t && t->tm_year > 100) ? (t->tm_year + 1900) : 2025;
         }
@@ -1057,7 +1056,7 @@ int NavienLearner::ingestBucketPayload(const char *json, bool &replaced) {
         // weeks_represented <= 0 (old export script, or a payload that omits
         // it) leaves the epoch as already set by initEmpty() — same as today.
         if (weeks_represented > 0.0f) {
-            time_t now = time(nullptr);
+            time_t now = LEARNER_NOW();
             if (now > 0) {
                 uint32_t backSec = (uint32_t)(weeks_represented * 604800.0f);
                 bf.accumulation_start_epoch =
@@ -1084,7 +1083,7 @@ int NavienLearner::ingestBucketPayload(const char *json, bool &replaced) {
     }
 
     if (!_store.save()) {
-        Serial.println(F("[learner] POST /buckets: save failed"));
+        LEARNER_LOG("[learner] POST /buckets: save failed");
         return -1;
     }
 
@@ -1095,7 +1094,7 @@ int NavienLearner::ingestBucketPayload(const char *json, bool &replaced) {
     if (finalize)
         _recomputeRequested = true;
 
-    Serial.printf("[learner] POST /buckets: wrote %d buckets, replaced=%s, finalize=%s\n",
+    LEARNER_LOG("[learner] POST /buckets: wrote %d buckets, replaced=%s, finalize=%s",
                   count, replaced ? "true" : "false", finalize ? "true" : "false");
     return count;
 }
@@ -1120,7 +1119,7 @@ void NavienLearner::appendStatusHTML(String &page) const {
         struct tm  tm_buf;
         struct tm *t = localtime_r(&_lastRecomputeTime, &tm_buf);  // display only
         strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M", t);
-        time_t elapsed = time(nullptr) - _lastRecomputeTime;
+        time_t elapsed = LEARNER_NOW() - _lastRecomputeTime;
         char abuf[32];
         if (elapsed >= 3600) {
             snprintf(abuf, sizeof(abuf), "%dh ago", (int)(elapsed / 3600));
@@ -1283,7 +1282,7 @@ void NavienLearner::appendStatusHTML(String &page) const {
 }
 
 // ---------------------------------------------------------------------------
-// checkNewSchedule() — called from FakeGatoScheduler::loop() on Core 1
+// checkNewSchedule(String&) — called from FakeGatoScheduler::loop() on Core 1
 // ---------------------------------------------------------------------------
 
 bool NavienLearner::checkNewSchedule(String &out_json) {
@@ -1292,6 +1291,25 @@ bool NavienLearner::checkNewSchedule(String &out_json) {
     bool has_new = _newScheduleReady;
     if (has_new) {
         out_json = String(_pendingScheduleJSON);
+        _newScheduleReady = false;
+    }
+    xSemaphoreGive(_scheduleHandoffMutex);
+    return has_new;
+}
+#endif  // LEARNER_WITH_ARDUINO_EXTRAS
+
+// ---------------------------------------------------------------------------
+// checkNewSchedule(LearnedSlot*) — struct form of the handoff (Core 1)
+// ---------------------------------------------------------------------------
+
+bool NavienLearner::checkNewSchedule(LearnedSlot *out, int cap, int &count, int &offsetMin) {
+    if (_scheduleHandoffMutex == nullptr) return false;
+    if (xSemaphoreTake(_scheduleHandoffMutex, 0) != pdTRUE) return false;
+    bool has_new = _newScheduleReady;
+    if (has_new) {
+        count = (_pendingSlotCount < cap) ? _pendingSlotCount : cap;
+        for (int i = 0; i < count; i++) out[i] = _pendingSlots[i];
+        offsetMin = _pendingOffsetMin;
         _newScheduleReady = false;
     }
     xSemaphoreGive(_scheduleHandoffMutex);

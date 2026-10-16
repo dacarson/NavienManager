@@ -19,7 +19,7 @@
 // aren't auto-swept, so this one is safe here.
 //
 // Compile and run (from repo root):
-//   g++ -I . -I test/test_stubs -o test/PeakFinder_test test/PeakFinder_test.cpp PeakFinder.cpp && ./test/PeakFinder_test
+//   g++ -I . -o test/PeakFinder_test test/PeakFinder_test.cpp PeakFinder.cpp && ./test/PeakFinder_test
 
 #include "PeakFinder.h"
 #include <stdio.h>

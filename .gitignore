@@ -1,2 +1,3 @@
 .DS_Store
 TimeUtils_test
+test/host/build/
