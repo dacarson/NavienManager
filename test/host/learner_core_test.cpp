@@ -193,8 +193,21 @@ static void test_recompute_hands_off_local_slots() {
   }
   CHECK(weekdays == 5);
   CHECK(l.lastRecomputeTime() == learner_host::now);
-  // The handoff is one-shot.
+  // The handoff is one-shot, and a false return leaves count/offset defined.
+  count = 99;
+  offset = 99;
   CHECK(!l.checkNewSchedule(slots, 21, count, offset));
+  CHECK(count == 0 && offset == 0);
+  // A caller buffer smaller than the schedule gets the first `cap` slots and
+  // a log line, not an overrun.
+  l.requestRecompute();
+  LearnedSlot two[2];
+  got = false;
+  for (int i = 0; i < 50 && !got; i++) {
+    l.taskStep();
+    got = l.checkNewSchedule(two, 2, count, offset);
+  }
+  CHECK(got && count == 2 && offset == 480);
   // Predicted efficiency is populated for the seeded days.
   CHECK(l.predictedEfficiency()[1] > 99.0f);
 }

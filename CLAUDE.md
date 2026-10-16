@@ -49,5 +49,8 @@ other firmware (`LEARNER_PLATFORM_CUSTOM` + `LearnerPlatformCustom.h`) and in th
 
 - New uses of `Serial`, `time(nullptr)`, `LittleFS`, `Navien.h` or other Arduino/HomeSpan
   APIs in those five files go through the seam or behind the matching `LEARNER_WITH_*` flag.
+- The flags scope the five core files only. The rest of the sketch (`FakeGatoScheduler`,
+  `TelnetCommands`, `HomeSpanWeb`, ...) is the sketch: it assumes the defaults, calls
+  `setTz()` / `getTz()` / `eraseTz()` unconditionally, and is never built by an embedder.
 - `python test/host/run.py` is the check: it compiles the core with plain g++ and runs
   `test/host/learner_core_test.cpp` plus the two standalone harnesses.

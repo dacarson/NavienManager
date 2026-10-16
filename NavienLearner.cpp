@@ -94,7 +94,8 @@ NavienLearner::NavienLearner()
       _quietDayStreak(0),
       _lowActivityMode(false),
       _scheduleHandoffMutex(nullptr),
-      _newScheduleReady(false),
+      _newScheduleReadyJson(false),
+      _newScheduleReadyStruct(false),
       _pendingSlotCount(0),
       _pendingOffsetMin(0),
       _measuredHead(0),
@@ -894,8 +895,14 @@ void NavienLearner::recomputeWrite() {
     memcpy(_pendingScheduleJSON, buf, (size_t)pos + 1);
 #endif
     // Struct form of the same schedule, for embedders without a JSON path.
+    // _pendingSlots is sized for everything allLocal can hold, so this never
+    // truncates; the assert keeps the two in lockstep and the log would say so.
     {
-        const int cap = (int)(sizeof(_pendingSlots) / sizeof(_pendingSlots[0]));
+        constexpr int cap = (int)(sizeof(_pendingSlots) / sizeof(_pendingSlots[0]));
+        static_assert(cap >= (int)(sizeof(allLocal) / sizeof(allLocal[0])),
+                      "_pendingSlots must hold every slot allLocal can");
+        if (nPruned > cap)
+            LEARNER_LOG("NavienLearner: struct handoff truncated (%d of %d slots)", cap, nPruned);
         _pendingSlotCount = (nPruned < cap) ? nPruned : cap;
         for (int i = 0; i < _pendingSlotCount; i++) {
             _pendingSlots[i].local_dow = (uint8_t)pruned[i].local_dow;
@@ -905,7 +912,8 @@ void NavienLearner::recomputeWrite() {
         }
         _pendingOffsetMin = offsetMin;
     }
-    _newScheduleReady = true;
+    _newScheduleReadyJson   = true;
+    _newScheduleReadyStruct = true;
     xSemaphoreGive(_scheduleHandoffMutex);
 
 #if LEARNER_WITH_UDP_STATUS
@@ -1288,10 +1296,10 @@ void NavienLearner::appendStatusHTML(String &page) const {
 bool NavienLearner::checkNewSchedule(String &out_json) {
     if (_scheduleHandoffMutex == nullptr) return false;
     if (xSemaphoreTake(_scheduleHandoffMutex, 0) != pdTRUE) return false;
-    bool has_new = _newScheduleReady;
+    bool has_new = _newScheduleReadyJson;
     if (has_new) {
         out_json = String(_pendingScheduleJSON);
-        _newScheduleReady = false;
+        _newScheduleReadyJson = false;
     }
     xSemaphoreGive(_scheduleHandoffMutex);
     return has_new;
@@ -1303,14 +1311,19 @@ bool NavienLearner::checkNewSchedule(String &out_json) {
 // ---------------------------------------------------------------------------
 
 bool NavienLearner::checkNewSchedule(LearnedSlot *out, int cap, int &count, int &offsetMin) {
+    count = 0;      // defined on every return, so a caller that skips the
+    offsetMin = 0;  // bool never reads past its buffer
     if (_scheduleHandoffMutex == nullptr) return false;
     if (xSemaphoreTake(_scheduleHandoffMutex, 0) != pdTRUE) return false;
-    bool has_new = _newScheduleReady;
+    bool has_new = _newScheduleReadyStruct;
     if (has_new) {
+        if (_pendingSlotCount > cap)
+            LEARNER_LOG("NavienLearner: caller buffer holds %d of %d learned slots; truncated", cap,
+                        _pendingSlotCount);
         count = (_pendingSlotCount < cap) ? _pendingSlotCount : cap;
         for (int i = 0; i < count; i++) out[i] = _pendingSlots[i];
         offsetMin = _pendingOffsetMin;
-        _newScheduleReady = false;
+        _newScheduleReadyStruct = false;
     }
     xSemaphoreGive(_scheduleHandoffMutex);
     return has_new;

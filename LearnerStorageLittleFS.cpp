@@ -34,11 +34,20 @@ SOFTWARE.
 #include <LittleFS.h>
 #include <stdio.h>
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+
 namespace {
 
 class LittleFsLearnerStorage : public LearnerStorage {
  public:
+  LittleFsLearnerStorage() : lock_(xSemaphoreCreateMutex()) {}
+
+  // save() and load() are reached from both cores (the learner task on Core 0,
+  // Telnet's savelearner and the bucket bootstrap on Core 1); one mutex keeps
+  // the tmp-write-rename sequences of two callers from interleaving.
   bool load(const char *name, void *buf, size_t len) override {
+    Guard g(lock_);
     if (!mount()) return false;
     char path[48];
     makePath(path, sizeof(path), name, "bin");
@@ -60,6 +69,7 @@ class LittleFsLearnerStorage : public LearnerStorage {
   }
 
   bool save(const char *name, const void *buf, size_t len) override {
+    Guard g(lock_);
     if (!mount()) return false;
     char path[48], tmp[48];
     makePath(path, sizeof(path), name, "bin");
@@ -88,6 +98,17 @@ class LittleFsLearnerStorage : public LearnerStorage {
   }
 
  private:
+  struct Guard {
+    SemaphoreHandle_t m;
+    explicit Guard(SemaphoreHandle_t mutex) : m(mutex) {
+      if (m) xSemaphoreTake(m, portMAX_DELAY);
+    }
+    ~Guard() {
+      if (m) xSemaphoreGive(m);
+    }
+  };
+
+  SemaphoreHandle_t lock_;
   bool mounted_ = false;
 
   // LittleFS.begin() is a no-op if already mounted (FakeGatoHistoryService

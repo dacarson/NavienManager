@@ -264,7 +264,10 @@ private:
 #if LEARNER_WITH_ARDUINO_EXTRAS
     char              _pendingScheduleJSON[SCHEDULE_JSON_CAPACITY];
 #endif
-    bool              _newScheduleReady;
+    // One ready flag per handoff form: each consumer clears only its own, so
+    // polling both the JSON and the struct form never loses a recompute.
+    bool              _newScheduleReadyJson;
+    bool              _newScheduleReadyStruct;
     LearnedSlot       _pendingSlots[BUCKET_DAYS * MAX_SLOTS_PER_DAY];
     int               _pendingSlotCount;
     int               _pendingOffsetMin;
