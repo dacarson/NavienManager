@@ -521,20 +521,26 @@ public:
     return !navilink_present && (test_mode || last_periodic_announce_time != 0);
   }
 
-  // Turn on or off the unit
+  // Turn on or off the unit. Sends the command POWER_CMD_REPEATS times (a real
+  // NaviLink repeats it too; a single send can be missed on the RS485 bus)
+  // followed by the required follow-up command, and arms a verification check
+  // (see checkCommandVerification()) that resends if the unit's reported
+  // system_power doesn't match within the timeout.
   // Return number of bytes sent, -1 on failure
   int power(bool on);
 
-  // Change the set point. Value specified in degC, 
-  // rounded to nearest 0.5 degree
+  // Change the set point. Value specified in degC,
+  // rounded to nearest 0.5 degree. Repeated/verified like power() above.
   // Return number of bytes sent, -1 on failure
   int setTemp(float temp_degC);
 
-  // Press the hot button
+  // Press the hot button. Repeated like power()/recirculation() above, but not
+  // verified - there's no stable readback for a momentary button press.
   // Return number of bytes sent, -1 on failure
   int hotButton();
 
-  // Turn on or off Recirculation
+  // Turn on or off Recirculation. Repeated/verified like power() above
+  // (verified against the unit's reported recirculation_active).
   // Return number of bytes sent, -1 on failure
   int recirculation(bool on);
 
@@ -553,6 +559,28 @@ protected:
 
   // Generate the cmd_data field for the command packet
   uint8_t generateCmdData();
+
+  // Which field a pending command's verification should check against.
+  enum class PendingCmdKind : uint8_t { None, Power, SetTemp, Recirculation };
+
+  // Queue `send_buffer` (header + the caller-set actuator field(s); cmd_data
+  // not yet set) `repeats` times, then queue the required generic follow-up
+  // command (same token, all actuator fields zero) once. A captured real
+  // NaviLink repeats its commands (setpoint 9-10x, power 5x, recirc 2x)
+  // rather than sending once - a single send can be missed on the RS485 bus.
+  int sendTokenedCommand(PACKET_BUFFER send_buffer, uint8_t repeats);
+
+  // Remember what we just commanded so checkCommandVerification() can confirm
+  // the unit actually applied it, and resend (bounded) if it didn't.
+  // `send_buffer` is the un-checksummed template (cmd_data not yet set) so a
+  // retry can be re-sent fresh via sendTokenedCommand().
+  void armCommandVerification(PendingCmdKind kind, const PACKET_BUFFER& send_buffer,
+                               uint8_t repeats, bool boolDesired, float floatDesired = 0.0f);
+
+  // Called every Navien::loop() tick. If a command is pending verification and
+  // the unit hasn't reported the desired state within COMMAND_VERIFY_TIMEOUT_MS,
+  // resend it (up to COMMAND_MAX_RETRIES times).
+  void checkCommandVerification();
 
   // Write the send_buffer command
   // Returns number of bytes sent, or -1 for failure
@@ -672,6 +700,27 @@ protected:
   static constexpr unsigned long PERIODIC_ANNOUNCE_INTERVAL_MS = 5000;
   /** True while a periodic announce is queued or being retried by send_cmd(). */
   bool periodic_announce_pending = false;
+
+  // Command repeat counts, captured from a real NaviLink talking to an
+  // NPE-240A (see https://github.com/htumanyan/navien/pull/96). It repeats
+  // every command rather than sending once, and still needed an automatic
+  // resend in testing - a single fire-and-forget send can silently be missed
+  // on the RS485 bus.
+  static constexpr uint8_t POWER_CMD_REPEATS = 5;
+  static constexpr uint8_t SETTEMP_CMD_REPEATS = 10;
+  static constexpr uint8_t RECIRC_CMD_REPEATS = 2;
+  static constexpr uint8_t HOTBUTTON_CMD_REPEATS = 2;
+
+  // Command verification/retry (power, setpoint, recirculation).
+  static constexpr unsigned long COMMAND_VERIFY_TIMEOUT_MS = 15000;
+  static constexpr uint8_t COMMAND_MAX_RETRIES = 3;
+  PendingCmdKind pendingCmdKind = PendingCmdKind::None;
+  PACKET_BUFFER pendingCmdTemplate{};
+  uint8_t pendingCmdRepeats = 0;
+  bool pendingBoolDesired = false;
+  float pendingFloatDesired = 0.0f;
+  unsigned long pendingCmdIssuedTime = 0;
+  uint8_t pendingCmdRetryCount = 0;
 
   // Assume running in test mode *until* we see a packet
   bool test_mode;

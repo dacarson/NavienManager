@@ -22,6 +22,7 @@ SOFTWARE.
 */
 
 #include <Arduino.h>
+#include <cmath>
 #include <cstring>
 #include "Navien.h"
 
@@ -319,6 +320,8 @@ void Navien::loop() {
     availableBytes = available();
   }
 
+  checkCommandVerification();
+
   if (!availableBytes) {
     maybe_send_periodic_announce();
     return;
@@ -578,33 +581,23 @@ int Navien::send_cmd() {
 int Navien::power(bool power_on) {
   PACKET_BUFFER send_buffer{};
   memcpy(&send_buffer, COMMAND_HEADER, sizeof(COMMAND_HEADER));
-
-  if (power_on) {
-    send_buffer.cmd.system_power = 0x0a;
-  } else {
-    send_buffer.cmd.system_power = 0x0b;
-  }
-  uint8_t crc = Navien::checksum(send_buffer.raw_data, HDR_SIZE + send_buffer.hdr.len, CHECKSUM_SEED_62);
-  send_buffer.raw_data[HDR_SIZE + send_buffer.hdr.len] = crc;
+  send_buffer.cmd.system_power = power_on ? 0x0a : 0x0b;
 
   if (test_mode) {
     state.water[0].system_power = power_on;
     return(HDR_SIZE + send_buffer.hdr.len);
   }
 
-  // Queue the command
-  return queue_send_cmd(send_buffer);
+  int sent_len = sendTokenedCommand(send_buffer, POWER_CMD_REPEATS);
+  armCommandVerification(PendingCmdKind::Power, send_buffer, POWER_CMD_REPEATS, power_on);
+  return sent_len;
 }
 
 
 int Navien::setTemp(float temp_degC) {
   PACKET_BUFFER send_buffer{};
   memcpy(&send_buffer, COMMAND_HEADER, sizeof(COMMAND_HEADER));
-
   send_buffer.cmd.set_temp = int(temp_degC * 2.0);
-
-  uint8_t crc = Navien::checksum(send_buffer.raw_data, HDR_SIZE + send_buffer.hdr.len, CHECKSUM_SEED_62);
-  send_buffer.raw_data[HDR_SIZE + send_buffer.hdr.len] = crc;
 
   if (test_mode) {
     state.gas.set_temp = temp_degC;
@@ -612,8 +605,9 @@ int Navien::setTemp(float temp_degC) {
     return(HDR_SIZE + send_buffer.hdr.len);
   }
 
-  // Queue the command
-  return queue_send_cmd(send_buffer);
+  int sent_len = sendTokenedCommand(send_buffer, SETTEMP_CMD_REPEATS);
+  armCommandVerification(PendingCmdKind::SetTemp, send_buffer, SETTEMP_CMD_REPEATS, false, temp_degC);
+  return sent_len;
 }
 
 uint8_t Navien::generateCmdData() {
@@ -624,64 +618,109 @@ uint8_t Navien::generateCmdData() {
 }
 
 int Navien::hotButton() {
-  uint8_t cmdData = generateCmdData();
   PACKET_BUFFER send_buffer{};
   memcpy(&send_buffer, COMMAND_HEADER, sizeof(COMMAND_HEADER));
-
   send_buffer.cmd.hot_button_recirculation = Navien::HOT_BUTTON_DOWN;
-  send_buffer.cmd.cmd_data = cmdData;
 
-  uint8_t crc = Navien::checksum(send_buffer.raw_data, HDR_SIZE + send_buffer.hdr.len, CHECKSUM_SEED_62);
-  send_buffer.raw_data[HDR_SIZE + send_buffer.hdr.len] = crc;
-
-  // Queue the command
-  int sent_len = queue_send_cmd(send_buffer);
-
-  // queue up the button release command
-  memcpy(&send_buffer, COMMAND_HEADER, sizeof(COMMAND_HEADER));
-  send_buffer.cmd.hot_button_recirculation = 0x00;
-  send_buffer.cmd.cmd_data = cmdData;
-  crc = Navien::checksum(send_buffer.raw_data, HDR_SIZE + send_buffer.hdr.len, CHECKSUM_SEED_62);
-  send_buffer.raw_data[HDR_SIZE + send_buffer.hdr.len] = crc;
-
-  return queue_send_cmd(send_buffer);
+  // Not verified - a momentary button press has no stable readback to confirm
+  // against (unlike power/setpoint/recirculation, which persist as state).
+  return sendTokenedCommand(send_buffer, HOTBUTTON_CMD_REPEATS);
 }
 
 int Navien::recirculation(bool recirc_on) {
-  uint8_t cmdData = generateCmdData();
   PACKET_BUFFER send_buffer{};
   memcpy(&send_buffer, COMMAND_HEADER, sizeof(COMMAND_HEADER));
-
   send_buffer.cmd.hot_button_recirculation = recirc_on ? Navien::RECIRCULATION_ON : Navien::RECIRCULATION_OFF;
-  send_buffer.cmd.cmd_data = cmdData;
-
-  uint8_t crc = Navien::checksum(send_buffer.raw_data, HDR_SIZE + send_buffer.hdr.len, CHECKSUM_SEED_62);
-  send_buffer.raw_data[HDR_SIZE + send_buffer.hdr.len] = crc;
-
-  // Queue the first command
-  int sent_len = queue_send_cmd(send_buffer);
-
-  // queue up the follow-up command (needed for recirculation to work)
-  // This command clears the recirculation command flag
-  PACKET_BUFFER follow_up_buffer{};
-  memcpy(&follow_up_buffer, COMMAND_HEADER, sizeof(COMMAND_HEADER));
-  follow_up_buffer.cmd.hot_button_recirculation = 0x00;
-  follow_up_buffer.cmd.cmd_data = cmdData;
-
-  crc = Navien::checksum(follow_up_buffer.raw_data, HDR_SIZE + follow_up_buffer.hdr.len, CHECKSUM_SEED_62);
-  follow_up_buffer.raw_data[HDR_SIZE + follow_up_buffer.hdr.len] = crc;
 
   if (test_mode) {
     state.water[0].recirculation_active = recirc_on;
     state.water[0].recirculation_running = recirc_on;
     state.gas.current_gas_usage = recirc_on ? 200 : 0;
     state.water[0].operating_capacity = recirc_on ? 15 : 0;
-    sent_len = HDR_SIZE + follow_up_buffer.hdr.len;
-    // In test mode, send immediately without delay
-    return queue_send_cmd(follow_up_buffer);
+    return(HDR_SIZE + send_buffer.hdr.len);
   }
 
+  int sent_len = sendTokenedCommand(send_buffer, RECIRC_CMD_REPEATS);
+  armCommandVerification(PendingCmdKind::Recirculation, send_buffer, RECIRC_CMD_REPEATS, recirc_on);
+  return sent_len;
+}
+
+// Queue `send_buffer` (header + the caller-set actuator field(s); cmd_data not
+// yet set) `repeats` times, then queue the required generic follow-up command
+// (same token, all actuator fields zero) once.
+int Navien::sendTokenedCommand(PACKET_BUFFER send_buffer, uint8_t repeats) {
+  uint8_t cmdData = generateCmdData();
+  send_buffer.cmd.cmd_data = cmdData;
+
+  uint8_t crc = Navien::checksum(send_buffer.raw_data, HDR_SIZE + send_buffer.hdr.len, CHECKSUM_SEED_62);
+  send_buffer.raw_data[HDR_SIZE + send_buffer.hdr.len] = crc;
+
+  int sent_len = -1;
+  for (uint8_t i = 0; i < repeats; i++) {
+    sent_len = queue_send_cmd(send_buffer);
+  }
+
+  // Generic follow-up/clear command: same token, all actuator fields zero.
+  // Required for the unit to act on the command above.
+  PACKET_BUFFER follow_up_buffer{};
+  memcpy(&follow_up_buffer, COMMAND_HEADER, sizeof(COMMAND_HEADER));
+  follow_up_buffer.cmd.cmd_data = cmdData;
+
+  crc = Navien::checksum(follow_up_buffer.raw_data, HDR_SIZE + follow_up_buffer.hdr.len, CHECKSUM_SEED_62);
+  follow_up_buffer.raw_data[HDR_SIZE + follow_up_buffer.hdr.len] = crc;
+
   return queue_send_cmd(follow_up_buffer);
+}
+
+void Navien::armCommandVerification(PendingCmdKind kind, const PACKET_BUFFER& send_buffer,
+                                     uint8_t repeats, bool boolDesired, float floatDesired) {
+  pendingCmdKind = kind;
+  pendingCmdTemplate = send_buffer;
+  pendingCmdRepeats = repeats;
+  pendingBoolDesired = boolDesired;
+  pendingFloatDesired = floatDesired;
+  pendingCmdIssuedTime = millis();
+  pendingCmdRetryCount = 0;
+}
+
+void Navien::checkCommandVerification() {
+  if (pendingCmdKind == PendingCmdKind::None)
+    return;
+
+  bool confirmed = false;
+  switch (pendingCmdKind) {
+    case PendingCmdKind::Power:
+      confirmed = (state.water[0].system_power == pendingBoolDesired);
+      break;
+    case PendingCmdKind::Recirculation:
+      confirmed = (state.water[0].recirculation_active == pendingBoolDesired);
+      break;
+    case PendingCmdKind::SetTemp:
+      // Unit reports set_temp in 0.5 degree steps; allow a bit of slop.
+      confirmed = (fabsf(state.water[0].set_temp - pendingFloatDesired) < 0.3f);
+      break;
+    default:
+      break;
+  }
+
+  if (confirmed) {
+    pendingCmdKind = PendingCmdKind::None;
+    return;
+  }
+
+  if ((unsigned long)(millis() - pendingCmdIssuedTime) < COMMAND_VERIFY_TIMEOUT_MS)
+    return;
+
+  if (pendingCmdRetryCount >= COMMAND_MAX_RETRIES) {
+    notifyError(__func__, "Command state not confirmed by unit after max retries, giving up");
+    pendingCmdKind = PendingCmdKind::None;
+    return;
+  }
+
+  ++pendingCmdRetryCount;
+  notifyError(__func__, "Command state not confirmed by unit, resending command");
+  sendTokenedCommand(pendingCmdTemplate, pendingCmdRepeats);
+  pendingCmdIssuedTime = millis();
 }
 
 uint8_t Navien::checksum(const uint8_t *buffer, uint8_t len, uint16_t seed) {
