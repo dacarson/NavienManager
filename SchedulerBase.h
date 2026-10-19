@@ -22,9 +22,15 @@ SOFTWARE.
 
 #pragma once
 
-#include <Arduino.h>
+#include <math.h>
+#include <stdint.h>
 #include <time.h>
+#include "LearnerPlatform.h"
+
+#if LEARNER_WITH_NVS_SCHEDULE
+#include <Arduino.h>
 #include "nvs.h"
+#endif
 
 class SchedulerBase {
   public:
@@ -35,10 +41,12 @@ class SchedulerBase {
     virtual void loop();
     bool isReady() { return isInitialized; }
 
-    // Timezone management
+#if LEARNER_WITH_NVS_SCHEDULE
+    // Timezone management (display only; firing is UTC)
     bool setTz(String timezone);
     String getTz() { return tz; }
     void eraseTz();
+#endif
 
     bool isActive();
     bool vacationActive();
@@ -100,8 +108,17 @@ protected:
   // state changes.
   virtual void stateChange(State newState) {}
 
+  // Persistence and platform hooks. The defaults (LEARNER_WITH_NVS_SCHEDULE)
+  // are the sketch's: the week schedule and vacation times in the SCHEDULER
+  // NVS namespace, TZ restore, SNTP start, and a WiFi + SNTP wait before the
+  // scheduler runs. Under a custom platform the defaults are inert (nothing
+  // saved, nothing loaded, time synced once LEARNER_NOW() is plausible) and
+  // the derived class supplies its own.
   virtual bool saveScheduleToStorage();
   virtual bool loadScheduleFromStorage();
+  virtual void loadVacationFromStorage();
+  virtual bool platformBegin();
+  virtual bool timeSynced();
 
   virtual void initDefault();
 
@@ -119,7 +136,9 @@ protected:
   time_t startVacationTime;
   time_t endVacationTime;
 
+#if LEARNER_WITH_NVS_SCHEDULE
   String tz;
+#endif
   bool sntpSyncDone;
   State currentState;
   bool isInitialized;
@@ -130,7 +149,9 @@ private:
   bool overrideActive = false;   // Is override running?
   time_t nextStateChangeTime = 0; // When the next state change should occur
 
+#if LEARNER_WITH_NVS_SCHEDULE
   nvs_handle_t nvsStorageHandle;
+#endif
 
 protected:
   // Initialize the current state based on current time and schedule

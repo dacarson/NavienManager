@@ -23,6 +23,7 @@
 
 #define CUSTOM_CHAR_HEADER
 #include "FakeGatoScheduler.h"
+#include "LearnerPlatform.h"
 #include "NavienLearner.h"
 #include "Navien.h"
 #include "TimeUtils.h"
@@ -759,14 +760,7 @@ void FakeGatoScheduler::loop() {
       if (_utcOffsetKnown) {
         effectiveOffsetMin = _lastKnownUtcOffsetMin;
       } else if (getenv("TZ") && time(nullptr) > 1700000000L) {
-        time_t now2 = time(nullptr);
-        struct tm local_tm, utc_tm;
-        localtime_r(&now2, &local_tm);
-        gmtime_r(&now2, &utc_tm);
-        effectiveOffsetMin = (utc_tm.tm_hour * 60 + utc_tm.tm_min)
-                           - (local_tm.tm_hour * 60 + local_tm.tm_min);
-        if (effectiveOffsetMin >  720) effectiveOffsetMin -= 1440;
-        if (effectiveOffsetMin < -720) effectiveOffsetMin += 1440;
+        effectiveOffsetMin = learnerUtcOffsetMinFromLibc(time(nullptr));
       }
 
       // Convert stored UTC schedule → local time for Eve display.
@@ -902,17 +896,7 @@ void FakeGatoScheduler::convertSlotsOffset(const PROG_CMD_WEEK_SCHEDULE &in,
 
 int FakeGatoScheduler::getEffectiveOffsetMin() const {
   if (_utcOffsetKnown) return _lastKnownUtcOffsetMin;
-  if (getenv("TZ") && time(nullptr) > 1700000000L) {
-    time_t now = time(nullptr);
-    struct tm local_tm, utc_tm;
-    localtime_r(&now, &local_tm);
-    gmtime_r(&now, &utc_tm);
-    int off = (utc_tm.tm_hour * 60 + utc_tm.tm_min)
-            - (local_tm.tm_hour * 60 + local_tm.tm_min);
-    if (off >  720) off -= 1440;
-    if (off < -720) off += 1440;
-    return off;
-  }
+  if (getenv("TZ") && time(nullptr) > 1700000000L) return learnerUtcOffsetMinFromLibc(time(nullptr));
   return INT_MIN;
 }
 

@@ -24,9 +24,10 @@ SOFTWARE.
 
 #include <stdint.h>
 
-// File paths on LittleFS
-#define BUCKET_FILE     "/navien/buckets.bin"
-#define BUCKET_TMP_FILE "/navien/buckets.tmp"
+// Storage key (LearnerStorage). The sketch's LittleFS platform maps it to
+// /navien/buckets.bin, the file name in use before the storage seam existed,
+// so existing devices keep their data.
+#define BUCKET_STORAGE_KEY "buckets"
 
 // Magic number: "NAVI" in little-endian ASCII bytes
 #define BUCKET_MAGIC          0x4E415649u
@@ -57,8 +58,8 @@ struct BucketFile {
 };
 
 // BucketStore manages the lifecycle of the BucketFile:
-//   - loads from LittleFS on begin() (creates empty file if absent)
-//   - writes back atomically via a .tmp + rename strategy
+//   - loads from LearnerStorage on begin() (creates an empty record if absent)
+//   - writes back atomically through LearnerStorage::save()
 //   - provides helpers to update individual buckets and zero all data
 //
 // All public methods are safe to call from a single task (Core 0).
@@ -67,22 +68,21 @@ class BucketStore {
 public:
     BucketStore();
 
-    // Initialise: mount check, create /navien directory, load or create
-    // buckets.bin.  Returns true on success.
+    // Initialise: load or create the bucket record.  Returns true on success.
     bool begin();
 
-    // Atomically write the in-RAM _buckets to LittleFS.
+    // Atomically write the in-RAM _buckets to storage.
     // Returns true on success.
     bool save();
 
-    // Increment a single bucket in RAM and persist to LittleFS.
+    // Increment a single bucket in RAM and persist to storage.
     // dow: 0=Sunday .. 6=Saturday
     // bucket_index: 0-287
     // Returns true on success.
     bool updateBucket(int dow, int bucket_index,
                       uint16_t raw_delta, float score_delta);
 
-    // Zero every bucket in the in-RAM struct and persist to LittleFS.
+    // Zero every bucket in the in-RAM struct and persist to storage.
     // current_year is written into the header after zeroing.
     // Returns true on success.
     bool zeroBuckets(uint16_t current_year);
@@ -96,12 +96,12 @@ public:
     int nonZeroCount() const;
 
 private:
-    // Load buckets.bin from LittleFS into _buckets.
-    // Returns true on success; false if the file is absent, wrong size,
-    // or has a bad magic/version (caller should create a fresh file).
+    // Load the bucket record from storage into _buckets.
+    // Returns true on success; false if the record is absent, wrong size,
+    // or has a bad magic/version (caller should create a fresh record).
     bool load();
 
-    // Write _buckets to BUCKET_TMP_FILE then atomically rename to BUCKET_FILE.
+    // Write _buckets to storage (atomic replace).
     bool writeAtomic();
 
     // Initialise _buckets to a valid empty state for the given year.

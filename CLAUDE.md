@@ -39,3 +39,18 @@ will assert-fault the FreeRTOS queue and put the device into a reboot loop.**
   be called while the Core 0 task is idle (bootstrap / quiet period).
 - `_recomputeRequested` is the only cross-core signal; it is set on Core 1 and consumed on
   Core 0 in `idleStep()`.
+
+## Platform seam (learner core)
+
+`NavienLearner`, `PeakFinder`, `BucketStore`, `SchedulerBase` and `TimeUtils` reach the
+platform only through `LearnerPlatform.h` (`LEARNER_LOG`, `LEARNER_WEBLOG`, `LEARNER_NOW()`,
+`LEARNER_UTC_OFFSET_MIN()`, `LearnerStorage`), so the same files build in this sketch, in
+other firmware (`LEARNER_PLATFORM_CUSTOM` + `LearnerPlatformCustom.h`) and in the host tests.
+
+- New uses of `Serial`, `time(nullptr)`, `LittleFS`, `Navien.h` or other Arduino/HomeSpan
+  APIs in those five files go through the seam or behind the matching `LEARNER_WITH_*` flag.
+- The flags scope the five core files only. The rest of the sketch (`FakeGatoScheduler`,
+  `TelnetCommands`, `HomeSpanWeb`, ...) is the sketch: it assumes the defaults, calls
+  `setTz()` / `getTz()` / `eraseTz()` unconditionally, and is never built by an embedder.
+- `python test/host/run.py` is the check: it compiles the core with plain g++ and runs
+  `test/host/learner_core_test.cpp` plus the two standalone harnesses.
