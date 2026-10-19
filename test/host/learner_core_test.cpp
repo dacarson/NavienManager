@@ -249,6 +249,9 @@ class TestScheduler : public SchedulerBase {
   void install(uint8_t dow, int start_min, int end_min) {
     appendUtcFireSlot(dow, start_min / 60, start_min % 60, end_min / 60, end_min % 60, 1.0f);
   }
+  bool try_install(uint8_t dow, int start_min, int end_min) {
+    return appendUtcFireSlot(dow, start_min / 60, start_min % 60, end_min / 60, end_min % 60, 1.0f);
+  }
   void reevaluate() { initializeCurrentState(); }
 
  protected:
@@ -340,6 +343,44 @@ static void test_get_time_slot_bounds() {
   CHECK(!s.getTimeSlot(7, 0, a, b, c, d));
 }
 
+// A window split at UTC midnight fires continuously across the day boundary,
+// and the table holds a full three-per-day local schedule with every window
+// split (dacarson/NavienManager#11).
+static void test_fire_slots_cross_utc_midnight() {
+  reset();
+  learner_host::now = utc(2026, 10, 12, 23, 0);  // Monday 23:00 UTC
+  TestScheduler s;
+  s.begin();
+  // Monday 23:30 -> Tuesday 01:30 UTC, as two slots.
+  s.install(1, 23 * 60 + 30, 24 * 60);
+  s.install(2, 0, 90);
+  s.loop();
+  CHECK(s.getCurrentState() == SchedulerBase::InActive);
+  learner_host::now = utc(2026, 10, 12, 23, 30);
+  s.loop();
+  CHECK(s.getCurrentState() == SchedulerBase::Active);
+  learner_host::now = utc(2026, 10, 12, 23, 59);
+  s.loop();
+  CHECK(s.getCurrentState() == SchedulerBase::Active);
+  learner_host::now = utc(2026, 10, 13, 0, 0);  // midnight: still on
+  s.loop();
+  CHECK(s.getCurrentState() == SchedulerBase::Active);
+  learner_host::now = utc(2026, 10, 13, 1, 29);
+  s.loop();
+  CHECK(s.getCurrentState() == SchedulerBase::Active);
+  learner_host::now = utc(2026, 10, 13, 1, 30);
+  s.loop();
+  CHECK(s.getCurrentState() == SchedulerBase::InActive);
+
+  // Capacity: 21 local windows, all split, need 42 slots.
+  CHECK(SchedulerBase::MAX_UTC_FIRE_SLOTS == 42);
+  TestScheduler t;
+  t.begin();
+  for (int i = 0; i < 42; i++) CHECK(t.try_install(i % 7, (i / 7) * 60, (i / 7) * 60 + 30));
+  CHECK(!t.try_install(0, 23 * 60, 23 * 60 + 30));
+  CHECK(t.getUtcFireSlotCount() == 42);
+}
+
 int main(int argc, char **argv) {
   for (int i = 1; i < argc; i++)
     if (strcmp(argv[i], "-v") == 0) learner_host::verbose = true;
@@ -357,6 +398,7 @@ int main(int argc, char **argv) {
       {"scheduler_runs_without_nvs_or_sntp", test_scheduler_runs_without_nvs_or_sntp},
       {"scheduler_waits_for_clock", test_scheduler_waits_for_clock},
       {"get_time_slot_bounds", test_get_time_slot_bounds},
+      {"fire_slots_cross_utc_midnight", test_fire_slots_cross_utc_midnight},
   };
   for (auto &t : tests) {
     int before = g_failures;

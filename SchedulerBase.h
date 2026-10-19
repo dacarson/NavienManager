@@ -73,7 +73,10 @@ class SchedulerBase {
 
     // Up to 21 UTC fire windows (3 per local day). Used for firing when the learner
     // (or POST /schedule) supplies more windows than fit in weekSchedule[7][3].
-    static constexpr int MAX_UTC_FIRE_SLOTS = 21;
+    // Two per local window (3 per local day x 7 days x 2): a local window that
+    // crosses UTC midnight needs two UTC slots, and a full local schedule must
+    // always fit without silently dropping the tail.
+    static constexpr int MAX_UTC_FIRE_SLOTS = 42;
     int  getUtcFireSlotCount() const { return _utcFireSlotCount; }
     bool getUtcFireSlot(int index, uint8_t &utcDow,
                         uint8_t &startHour, uint8_t &startMinute,

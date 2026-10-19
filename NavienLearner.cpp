@@ -725,20 +725,16 @@ void NavienLearner::recomputeWrite() {
             int utc_end   = local_end   + offsetMin;
             int utc_dow   = local_dow;
 
+            // utc_end past 1440 means the slot runs into the next UTC day;
+            // this diagnostic view keeps it (the firing table splits it).
             if (utc_start < 0) {
                 utc_start += 1440;
                 utc_end   += 1440;
                 utc_dow    = (local_dow + 6) % 7;
-                if (utc_end > 1430) utc_end = 1430;
             } else if (utc_start >= 1440) {
                 utc_start -= 1440;
                 utc_end   -= 1440;
                 utc_dow    = (local_dow + 1) % 7;
-                if (utc_end < 0)    utc_end = 0;
-                if (utc_end > 1430) utc_end = 1430;
-            } else if (utc_end > 1430) {
-                // Slot straddles UTC midnight — cap end at 23:50.
-                utc_end = 1430;
             }
 
             allLocal[nLocal++] = {
@@ -761,13 +757,14 @@ void NavienLearner::recomputeWrite() {
         for (int d = 0; d < 7; d++) {
             for (int i = 0; i < nLocal; i++) {
                 if (allLocal[i].local_dow != d) continue;
-                LEARNER_WEBLOG("  local_%s %02d:%02d-%02d:%02d -> utc_%s %02d:%02d-%02d:%02d score=%.3f",
+                LEARNER_WEBLOG("  local_%s %02d:%02d-%02d:%02d -> utc_%s %02d:%02d-%02d:%02d%s score=%.3f",
                        dn[d],
                        allLocal[i].local_start_min / 60, allLocal[i].local_start_min % 60,
                        allLocal[i].local_end_min   / 60, allLocal[i].local_end_min   % 60,
                        dn[allLocal[i].utc_dow],
                        allLocal[i].utc_start_min / 60, allLocal[i].utc_start_min % 60,
-                       allLocal[i].utc_end_min   / 60, allLocal[i].utc_end_min   % 60,
+                       (allLocal[i].utc_end_min % 1440) / 60, allLocal[i].utc_end_min % 60,
+                       allLocal[i].utc_end_min > 1440 ? " (+1 day)" : "",
                        allLocal[i].score);
             }
         }

@@ -555,7 +555,9 @@ void FakeGatoScheduler::updateCurrentScheduleIfNeeded(bool force) {
   }
 }
 
-// Map local wall time to UTC storage indices (UTC = local + offsetMin).
+// Map local wall time to UTC (UTC = local + offsetMin). utcStart is 0..1439
+// on utcDow; utcEnd may exceed 1440, which means the window runs past UTC
+// midnight into the next UTC day (the caller splits it into two slots).
 static void localMinutesToUtc(int localDow, int localStart, int localEnd, int offsetMin,
                               int &utcDow, int &utcStart, int &utcEnd) {
   utcStart = localStart + offsetMin;
@@ -565,16 +567,30 @@ static void localMinutesToUtc(int localDow, int localStart, int localEnd, int of
     utcStart += 1440;
     utcEnd   += 1440;
     utcDow    = (localDow + 6) % 7;
-    if (utcEnd > 1430) utcEnd = 1430;
   } else if (utcStart >= 1440) {
     utcStart -= 1440;
     utcEnd   -= 1440;
     utcDow    = (localDow + 1) % 7;
-    if (utcEnd < 0)    utcEnd = 0;
-    if (utcEnd > 1430) utcEnd = 1430;
-  } else if (utcEnd > 1430) {
-    utcEnd = 1430;
   }
+}
+
+// One local window -> one or two UTC fire slots. A window that crosses UTC
+// midnight (for a Pacific user, any window spanning 16:00 PST / 17:00 PDT)
+// used to be clamped at 23:50 UTC and lose its tail; it now continues on the
+// next UTC day from 00:00. The table holds two slots per local window.
+bool FakeGatoScheduler::appendLocalWindowAsFireSlots(int utcDow, int utcStart, int utcEnd, float score) {
+  if (utcEnd <= 1440) {
+    return appendUtcFireSlot((uint8_t)utcDow,
+                             (uint8_t)(utcStart / 60), (uint8_t)(utcStart % 60),
+                             (uint8_t)(utcEnd   / 60), (uint8_t)(utcEnd   % 60),
+                             score);
+  }
+  int rest = utcEnd - 1440;
+  return appendUtcFireSlot((uint8_t)utcDow,
+                           (uint8_t)(utcStart / 60), (uint8_t)(utcStart % 60),
+                           24, 0, score) &&
+         appendUtcFireSlot((uint8_t)((utcDow + 1) % 7), 0, 0,
+                           (uint8_t)(rest / 60), (uint8_t)(rest % 60), score);
 }
 
 bool FakeGatoScheduler::setWeekScheduleFromJSON(const String &json) {
@@ -652,7 +668,8 @@ bool FakeGatoScheduler::setWeekScheduleFromJSON(const String &json) {
         _slotScoreUtc[eveDay][slotIdx] = score;
         slotIdx++;
 
-        // Full firing table: all local-day slots (up to 21), no UTC-day cap.
+        // Full firing table: all local-day slots, no UTC-day cap; a slot that
+        // crosses UTC midnight becomes two (see appendLocalWindowAsFireSlots).
         int localStart = sh * 60 + sm;
         int localEnd   = eh * 60 + em;
         int utcDow, utcStart, utcEnd;
@@ -664,10 +681,7 @@ bool FakeGatoScheduler::setWeekScheduleFromJSON(const String &json) {
           localMinutesToUtc(dow, localStart, localEnd, learnedOffset,
                             utcDow, utcStart, utcEnd);
         }
-        if (!appendUtcFireSlot((uint8_t)utcDow,
-                               (uint8_t)(utcStart / 60), (uint8_t)(utcStart % 60),
-                               (uint8_t)(utcEnd   / 60), (uint8_t)(utcEnd   % 60),
-                               score)) {
+        if (!appendLocalWindowAsFireSlots(utcDow, utcStart, utcEnd, score)) {
           WEBLOG("SCHEDULER setWeekScheduleFromJSON: UTC fire slot table full — extra slot dropped");
         }
       }
