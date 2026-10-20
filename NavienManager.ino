@@ -34,8 +34,24 @@ bool timeInit = false;
 
 Navien navienSerial(2);
 NavienLearner *learner = nullptr;
-#define RXD2 16
-#define TXD2 17
+#if defined(ARDUINO_LOLIN_S3_MINI)
+  #define RXD2 16
+  #define TXD2 18
+#elif defined(ARDUINO_D1_MINI32)
+  #define RXD2 16
+  #define TXD2 17
+#else
+  #error "Need to configure the RX/TX for Serial"
+#endif
+
+#if defined(ARDUINO_LOLIN_S3_MINI)
+// This board has no discrete status LED/button: GPIO47 is its only onboard
+// indicator (a single addressable WS2812 pixel, RGB byte order) and GPIO0 is
+// the BOOT button, reused here as HomeSpan's pairing/reset control pin.
+#define STATUS_PIXEL_PIN 47
+#define CONTROL_BUTTON_PIN 0
+Pixel *statusPixel = nullptr;
+#endif
 
 extern ESPTelnet telnet;
 extern void setupTelnetCommands();   // TelnetCommands.ino
@@ -94,12 +110,32 @@ void setup() {
   // setup HomeSpan. It needs to own WiFi setup so
   // that it can do the pairing.
   //homeSpan.setWifiCredentials(ssid, password);
+#if defined(ARDUINO_LOLIN_S3_MINI)
+  // Pixel/control pins must be set before homeSpan.begin(), which is where
+  // HomeSpan wires them into its internal Blinker/PushButton objects.
+  statusPixel = new Pixel(STATUS_PIXEL_PIN, "RGB");
+  statusPixel->setOnColor(Pixel::HSV(0, 100, 100));  // red until paired + connected
+  homeSpan.setStatusDevice(statusPixel);
+  homeSpan.setControlPin(CONTROL_BUTTON_PIN);
+#endif
   homeSpan.setWifiBegin(myWiFiBegin);
   homeSpan.setConnectionCallback(onWifiConnected);
   homeSpan.setHostNameSuffix("Controller");
   homeSpan.begin(Category::Thermostats,"Navien Manager");
   homeSpan.enableOTA(false, false);
   homeSpan.setStatusCallback([](HS_STATUS status) {
+#if defined(ARDUINO_LOLIN_S3_MINI)
+    // HomeSpan's Blinker only ever shows one color per status device, so
+    // recolor the single onboard pixel ourselves: green once paired and
+    // connected to HomeKit, red for every other (attention-needed) status.
+    if (statusPixel) {
+      bool isGood = (status == HS_PAIRED || status == HS_CONNECTED);
+      statusPixel->setOnColor(Pixel::HSV(isGood ? 120 : 0, 100, 100));
+      if (status == HS_CONNECTED) {
+        statusPixel->on();  // HS_CONNECTED is a one-shot solid-on; re-apply so the new color shows immediately
+      }
+    }
+#endif
     if (status == HS_OTA_STARTED && learner && !learner->isDisabled()) {
       learner->saveMeasured();
     }
