@@ -249,6 +249,16 @@ class TestScheduler : public SchedulerBase {
   void install(uint8_t dow, int start_min, int end_min) {
     appendUtcFireSlot(dow, start_min / 60, start_min % 60, end_min / 60, end_min % 60, 1.0f);
   }
+  bool try_install(uint8_t dow, int start_min, int end_min) {
+    return appendUtcFireSlot(dow, start_min / 60, start_min % 60, end_min / 60, end_min % 60, 1.0f);
+  }
+  // A local window through the scheduler's own conversion and split.
+  bool install_local(int local_dow, int start_min, int end_min, int offset_min) {
+    int dow, start, end;
+    localWindowToUtc(local_dow, start_min, end_min, offset_min, dow, start, end);
+    return appendUtcFireWindow(dow, start, end, 1.0f);
+  }
+  bool active_at(int dow, int hour, int minute) const { return isActiveOnFireSlots(dow, hour, minute); }
   void reevaluate() { initializeCurrentState(); }
 
  protected:
@@ -340,6 +350,127 @@ static void test_get_time_slot_bounds() {
   CHECK(!s.getTimeSlot(7, 0, a, b, c, d));
 }
 
+// The shared local -> UTC conversion (dacarson/NavienManager#11).
+static void test_local_window_to_utc() {
+  int dow, start, end;
+  // Pacific (UTC = local + 480): Saturday 15:30-17:30 local crosses UTC midnight
+  // into Sunday; the end is past 1440 and the caller splits it.
+  SchedulerBase::localWindowToUtc(6, 15 * 60 + 30, 17 * 60 + 30, 480, dow, start, end);
+  CHECK(dow == 6 && start == 23 * 60 + 30 && end == 1440 + 90);
+  // Saturday 20:00-21:00 local is Sunday 04:00-05:00 UTC.
+  SchedulerBase::localWindowToUtc(6, 20 * 60, 21 * 60, 480, dow, start, end);
+  CHECK(dow == 0 && start == 4 * 60 && end == 5 * 60);
+  // East of UTC (Tokyo, -540): Monday 06:00-08:00 local is Sunday 21:00-23:00 UTC.
+  SchedulerBase::localWindowToUtc(1, 6 * 60, 8 * 60, -540, dow, start, end);
+  CHECK(dow == 0 && start == 21 * 60 && end == 23 * 60);
+  // A local window written as ending at 00:00 means "until midnight".
+  SchedulerBase::localWindowToUtc(1, 22 * 60, 0, 420, dow, start, end);
+  CHECK(dow == 2 && start == 5 * 60 && end == 7 * 60);
+  SchedulerBase::localWindowToUtc(1, 22 * 60, 0, 0, dow, start, end);
+  CHECK(dow == 1 && start == 22 * 60 && end == 1440);
+}
+
+// A window split at UTC midnight fires continuously across the day boundary
+// even when its tail is stored after the next day's own slots: the scan takes
+// the earliest edge of each UTC day, not the first slot in table order. The
+// Saturday -> Sunday wrap is the case from the review of #13.
+static void test_fire_slots_cross_utc_midnight_out_of_order() {
+  reset();
+  learner_host::now = utc(2026, 10, 17, 22, 0);  // Saturday 22:00 UTC
+  TestScheduler s;
+  s.begin();
+  CHECK(s.install_local(0, 6 * 60, 8 * 60, 480));           // Sunday 06:00-08:00 local = Sun 14:00-16:00 UTC, appended first
+  CHECK(s.install_local(6, 15 * 60 + 30, 17 * 60 + 30, 480));  // Saturday 15:30-17:30 local = Sat 23:30 -> Sun 01:30 UTC
+  CHECK(s.getUtcFireSlotCount() == 3);
+  s.loop();
+  CHECK(s.getCurrentState() == SchedulerBase::InActive);
+  time_t next = 0;
+  CHECK(s.getNextState(&next) == SchedulerBase::Active);
+  CHECK(next == utc(2026, 10, 17, 23, 30));
+  learner_host::now = utc(2026, 10, 17, 23, 30);
+  s.loop();
+  CHECK(s.getCurrentState() == SchedulerBase::Active);
+  learner_host::now = utc(2026, 10, 18, 0, 0);  // Sunday 00:00 UTC: the tail, stored last
+  s.loop();
+  CHECK(s.getCurrentState() == SchedulerBase::Active);
+  CHECK(s.getNextState(&next) == SchedulerBase::InActive);
+  CHECK(next == utc(2026, 10, 18, 1, 30));  // not Sunday's own 14:00 slot
+  learner_host::now = utc(2026, 10, 18, 1, 29);
+  s.loop();
+  CHECK(s.getCurrentState() == SchedulerBase::Active);
+  learner_host::now = utc(2026, 10, 18, 1, 30);
+  s.loop();
+  CHECK(s.getCurrentState() == SchedulerBase::InActive);
+  // The earlier-UTC window of a later local day (Saturday 20:00 local = Sunday
+  // 04:00 UTC, appended after Sunday's 14:00 slot) is found too.
+  CHECK(s.install_local(6, 20 * 60, 21 * 60, 480));
+  s.reevaluate();
+  CHECK(s.getNextState(&next) == SchedulerBase::Active);
+  CHECK(next == utc(2026, 10, 18, 4, 0));
+  learner_host::now = utc(2026, 10, 18, 4, 0);
+  s.loop();
+  CHECK(s.getCurrentState() == SchedulerBase::Active);
+}
+
+// Capacity: 21 local windows, all split, need 42 slots; a window that needs
+// two slots is appended whole or not at all.
+static void test_fire_slot_capacity_and_atomic_append() {
+  reset();
+  learner_host::now = utc(2026, 10, 12, 10, 0);
+  CHECK(SchedulerBase::MAX_UTC_FIRE_SLOTS == 42);
+  TestScheduler t;
+  t.begin();
+  for (int i = 0; i < 41; i++) CHECK(t.try_install(i % 7, (i / 7) * 60, (i / 7) * 60 + 30));
+  CHECK(t.getUtcFireSlotCount() == 41);
+  CHECK(!t.install_local(6, 15 * 60 + 30, 17 * 60 + 30, 480));  // needs 2, 1 free: nothing appended
+  CHECK(t.getUtcFireSlotCount() == 41);
+  CHECK(t.install_local(6, 20 * 60, 21 * 60, 480));  // needs 1
+  CHECK(t.getUtcFireSlotCount() == 42);
+  CHECK(!t.try_install(0, 23 * 60, 23 * 60 + 30));
+}
+
+// Simulation: random tables, a week stepped minute by minute, the scheduler's
+// state after every loop() compared with a brute-force "is any slot active
+// now". A wrong next-change time shows up as a state that lags the oracle,
+// whatever the table's shape (the class of bug behind #13's review).
+static void test_week_simulation_matches_oracle() {
+  uint32_t seed = 20261021u;
+  auto rnd = [&](uint32_t n) {
+    seed = seed * 1664525u + 1013904223u;
+    return (seed >> 8) % n;
+  };
+  for (int trial = 0; trial < 8; trial++) {
+    reset();
+    learner_host::now = utc(2026, 10, 11, 0, 0);  // Sunday 00:00 UTC
+    TestScheduler s;
+    s.begin();
+    int windows = 1 + rnd(21);
+    for (int i = 0; i < windows; i++) {
+      int local_dow = rnd(7), start = rnd(23 * 60), len = 10 + rnd(5 * 60);
+      int end = start + len > 1440 ? 1440 : start + len;
+      int offset = (trial % 3 == 0) ? 480 : (trial % 3 == 1) ? -540 : 0;
+      s.install_local(local_dow, start, end, offset);  // may overlap; may refuse when full
+    }
+    s.loop();
+    int mismatches = 0;
+    for (int minute = 0; minute < 8 * 1440 && mismatches < 5; minute++) {
+      learner_host::now += 60;
+      s.loop();
+      struct tm t = {};
+      gmtime_r(&learner_host::now, &t);
+      bool oracle = s.active_at(t.tm_wday, t.tm_hour, t.tm_min);
+      bool got = s.getCurrentState() == SchedulerBase::Active;
+      if (got != oracle) {
+        mismatches++;
+        fprintf(stderr, "  trial %d: minute %d (%s %02d:%02d UTC) scheduler %s, oracle %s\n", trial, minute,
+                (const char *[]){"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"}[t.tm_wday], t.tm_hour, t.tm_min,
+                got ? "Active" : "Inactive", oracle ? "Active" : "Inactive");
+      }
+    }
+    CHECK(mismatches == 0);
+  }
+}
+
 int main(int argc, char **argv) {
   for (int i = 1; i < argc; i++)
     if (strcmp(argv[i], "-v") == 0) learner_host::verbose = true;
@@ -357,6 +488,10 @@ int main(int argc, char **argv) {
       {"scheduler_runs_without_nvs_or_sntp", test_scheduler_runs_without_nvs_or_sntp},
       {"scheduler_waits_for_clock", test_scheduler_waits_for_clock},
       {"get_time_slot_bounds", test_get_time_slot_bounds},
+      {"local_window_to_utc", test_local_window_to_utc},
+      {"fire_slots_cross_utc_midnight_out_of_order", test_fire_slots_cross_utc_midnight_out_of_order},
+      {"fire_slot_capacity_and_atomic_append", test_fire_slot_capacity_and_atomic_append},
+      {"week_simulation_matches_oracle", test_week_simulation_matches_oracle},
   };
   for (auto &t : tests) {
     int before = g_failures;

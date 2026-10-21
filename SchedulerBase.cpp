@@ -279,6 +279,39 @@ bool SchedulerBase::appendUtcFireSlot(uint8_t utcDow,
   return true;
 }
 
+void SchedulerBase::localWindowToUtc(int localDow, int localStart, int localEnd, int offsetMin,
+                                     int &utcDow, int &utcStart, int &utcEnd) {
+  if (localEnd <= localStart) localEnd = 1440;  // "until midnight", written as 00:00
+  utcStart = localStart + offsetMin;
+  utcEnd   = localEnd   + offsetMin;
+  utcDow   = localDow;
+  if (utcStart < 0) {
+    utcStart += 1440;
+    utcEnd   += 1440;
+    utcDow    = (localDow + 6) % 7;
+  } else if (utcStart >= 1440) {
+    utcStart -= 1440;
+    utcEnd   -= 1440;
+    utcDow    = (localDow + 1) % 7;
+  }
+}
+
+bool SchedulerBase::appendUtcFireWindow(int utcDow, int utcStart, int utcEnd, float score) {
+  if (utcDow < 0 || utcDow > 6 || utcStart < 0 || utcStart >= 1440 || utcEnd <= utcStart) return false;
+  int needed = utcEnd > 1440 ? 2 : 1;
+  if (_utcFireSlotCount + needed > MAX_UTC_FIRE_SLOTS) return false;
+  if (needed == 1) {
+    return appendUtcFireSlot((uint8_t)utcDow,
+                             (uint8_t)(utcStart / 60), (uint8_t)(utcStart % 60),
+                             (uint8_t)(utcEnd   / 60), (uint8_t)(utcEnd   % 60), score);
+  }
+  int rest = utcEnd - 1440;
+  return appendUtcFireSlot((uint8_t)utcDow,
+                           (uint8_t)(utcStart / 60), (uint8_t)(utcStart % 60), 24, 0, score) &&
+         appendUtcFireSlot((uint8_t)((utcDow + 1) % 7), 0, 0,
+                           (uint8_t)(rest / 60), (uint8_t)(rest % 60), score);
+}
+
 bool SchedulerBase::getUtcFireSlot(int index, uint8_t &utcDow,
                                    uint8_t &startHour, uint8_t &startMinute,
                                    uint8_t &endHour, uint8_t &endMinute,
@@ -312,49 +345,46 @@ SchedulerBase::State SchedulerBase::getNextStateFromFireSlots(time_t *nextStateT
   int currentDay = tm_struct->tm_wday;
   int currentTimeInMinutes = currentHour * 60 + currentMinute;
 
-  for (int dayoffset = 0; dayoffset < 7; dayoffset++) {
+  // Day by day, the earliest slot edge (start or end) still ahead of now wins,
+  // whatever the table order: slots are appended in local-day order and a
+  // local window can land on an earlier UTC day than the one before it, or
+  // be split across UTC midnight. The scan covers eight days so a once-a-week
+  // slot that has passed reports next week's start instead of 0.
+  for (int dayoffset = 0; dayoffset <= 7; dayoffset++) {
     int day = (currentDay + dayoffset) % 7;
+    int bestMin = -1;
+    State bestState = State::InActive;
     for (int i = 0; i < _utcFireSlotCount; i++) {
       const UtcFireSlot &fs = _utcFireSlots[i];
       if (fs.utcDow != (uint8_t)day) continue;
-      TimeSlot slot = { fs.startHour, fs.startMinute, fs.endHour, fs.endMinute };
       int startMin = dayoffset * 24 * 60 + fs.startHour * 60 + fs.startMinute;
-      if (startMin > currentTimeInMinutes) {
-        tm nextState_tm;
-        nextState_tm.tm_year = tm_struct->tm_year;
-        nextState_tm.tm_mon  = tm_struct->tm_mon;
-        nextState_tm.tm_mday = tm_struct->tm_mday + dayoffset;
-        nextState_tm.tm_hour = fs.startHour;
-        nextState_tm.tm_min  = fs.startMinute;
-        nextState_tm.tm_sec  = 0;
-        nextState_tm.tm_isdst = 0;
-        time_t nextTime = proper_timegm(&nextState_tm);
-        if (startVacationTime && startVacationTime < nextTime) {
-          if (nextStateTime) *nextStateTime = startVacationTime;
-          return State::Vacation;
-        }
-        if (nextStateTime) *nextStateTime = nextTime;
-        return State::Active;
+      int endMin   = dayoffset * 24 * 60 + fs.endHour * 60 + fs.endMinute;
+      if (startMin > currentTimeInMinutes && (bestMin < 0 || startMin < bestMin)) {
+        bestMin = startMin;
+        bestState = State::Active;
       }
-      int endMin = dayoffset * 24 * 60 + fs.endHour * 60 + fs.endMinute;
-      if (endMin > currentTimeInMinutes) {
-        tm nextState_tm;
-        nextState_tm.tm_year = tm_struct->tm_year;
-        nextState_tm.tm_mon  = tm_struct->tm_mon;
-        nextState_tm.tm_mday = tm_struct->tm_mday + dayoffset;
-        nextState_tm.tm_hour = fs.endHour;
-        nextState_tm.tm_min  = fs.endMinute;
-        nextState_tm.tm_sec  = 0;
-        nextState_tm.tm_isdst = 0;
-        time_t nextTime = proper_timegm(&nextState_tm);
-        if (startVacationTime && startVacationTime < nextTime) {
-          if (nextStateTime) *nextStateTime = startVacationTime;
-          return State::Vacation;
-        }
-        if (nextStateTime) *nextStateTime = nextTime;
-        return State::InActive;
+      if (endMin > currentTimeInMinutes && (bestMin < 0 || endMin < bestMin)) {
+        bestMin = endMin;
+        bestState = State::InActive;
       }
     }
+    if (bestMin < 0) continue;
+    int minuteOfDay = bestMin - dayoffset * 24 * 60;
+    tm nextState_tm;
+    nextState_tm.tm_year = tm_struct->tm_year;
+    nextState_tm.tm_mon  = tm_struct->tm_mon;
+    nextState_tm.tm_mday = tm_struct->tm_mday + dayoffset;
+    nextState_tm.tm_hour = minuteOfDay / 60;  // 24 for a slot ending at midnight
+    nextState_tm.tm_min  = minuteOfDay % 60;
+    nextState_tm.tm_sec  = 0;
+    nextState_tm.tm_isdst = 0;
+    time_t nextTime = proper_timegm(&nextState_tm);
+    if (startVacationTime && startVacationTime < nextTime) {
+      if (nextStateTime) *nextStateTime = startVacationTime;
+      return State::Vacation;
+    }
+    if (nextStateTime) *nextStateTime = nextTime;
+    return bestState;
   }
   if (nextStateTime) *nextStateTime = 0;
   return State::InActive;
