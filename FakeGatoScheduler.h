@@ -181,9 +181,6 @@ protected:
                                   const float inScores[7][SLOT_SCORE_STORAGE_SLOTS] = nullptr,
                                   float outScores[7][SLOT_SCORE_STORAGE_SLOTS] = nullptr);
   void convertEveSlotsToUTC(int utcOffsetMin, bool sanitize = true);
-  // One local window (already converted to UTC minutes, end may exceed 1440)
-  // -> one fire slot, or two when it crosses UTC midnight.
-  bool appendLocalWindowAsFireSlots(int utcDow, int utcStart, int utcEnd, float score);
 
   // Returns the best available UTC offset in minutes (UTC = local + offset).
   // Returns INT_MIN if the offset cannot be determined.

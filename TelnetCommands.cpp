@@ -425,7 +425,9 @@ void commandScheduler(const String& params) {
     int  sh,  sm,  eh,  em;  // UTC  start / end
     int  utc_day;             // SchedulerBase UTC day the slot is stored under
   };
-  SlotDisplay allSlots[SchedulerBase::MAX_UTC_FIRE_SLOTS];
+  // Static: ~1.7 KB, too much for the loop task's stack. Telnet handlers run
+  // one at a time on Core 1, so a single copy is safe.
+  static SlotDisplay allSlots[SchedulerBase::MAX_UTC_FIRE_SLOTS];
   int totalSlots = 0;
 
   int fireCount = scheduler->getUtcFireSlotCount();
@@ -718,7 +720,7 @@ void commandLearnerStatus(const String& params) {
   // when adjacent local days share a UTC day), not the learner's fresh,
   // uncapped-per-local-day schedule.
   int fireCount = scheduler ? scheduler->getUtcFireSlotCount() : 0;
-  telnet.printf("\n  Slots and Scores (3 per local day, %d fire-slots loaded)\n", fireCount);
+  telnet.printf("\n  Slots and Scores (UTC fire slots; a local window crossing UTC midnight is two rows; %d loaded)\n", fireCount);
   telnet.println(F("  Day         Slot  Local Range     (UTC)           Score"));
   telnet.println(F("  --------------------------------------------------------------"));
   bool printedAny = false;
@@ -727,7 +729,8 @@ void commandLearnerStatus(const String& params) {
     struct SlotDisp {
       int local_day, lsh, lsm, leh, lem, sh, sm, eh, em, utc_day;
       float score;
-    } slots[SchedulerBase::MAX_UTC_FIRE_SLOTS];
+    };
+    static SlotDisp slots[SchedulerBase::MAX_UTC_FIRE_SLOTS];  // ~1.85 KB; off the loop-task stack
     int n = 0;
     if (fireCount > 0) {
       for (int i = 0; i < fireCount && n < SchedulerBase::MAX_UTC_FIRE_SLOTS; i++) {
