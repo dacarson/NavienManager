@@ -368,6 +368,17 @@ static void test_local_window_to_utc() {
   CHECK(dow == 2 && start == 5 * 60 && end == 7 * 60);
   SchedulerBase::localWindowToUtc(1, 22 * 60, 0, 0, dow, start, end);
   CHECK(dow == 1 && start == 22 * 60 && end == 1440);
+  // Only that: an equal pair or an inverted window is left as is, and the
+  // window append refuses it rather than turning it into hours of recirculation.
+  SchedulerBase::localWindowToUtc(1, 7 * 60, 7 * 60, 0, dow, start, end);
+  CHECK(end == 7 * 60);
+  SchedulerBase::localWindowToUtc(1, 22 * 60, 2 * 60, 0, dow, start, end);
+  CHECK(end == 2 * 60);
+  TestScheduler s;
+  s.begin();
+  CHECK(!s.install_local(1, 7 * 60, 7 * 60, 0));
+  CHECK(!s.install_local(1, 22 * 60, 2 * 60, 0));
+  CHECK(s.getUtcFireSlotCount() == 0);
 }
 
 // A window split at UTC midnight fires continuously across the day boundary

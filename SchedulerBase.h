@@ -81,9 +81,10 @@ class SchedulerBase {
     // Local wall-clock window -> UTC (UTC = local + offsetMin). utcStart is
     // 0..1439 on utcDow; utcEnd may exceed 1440, meaning the window runs past
     // UTC midnight into the next UTC day (appendUtcFireWindow() splits it). A
-    // local end at or before the start means "until midnight" (the JSON forms
-    // cannot write 24:00) and is taken as 1440. The one conversion shared by
-    // the firing table and the learner's diagnostics.
+    // local end written as 00:00 (with a later start) means "until midnight",
+    // since the JSON forms cannot write 24:00, and is taken as 1440; any other
+    // end at or before the start is left as is for the caller to reject. The
+    // one conversion shared by the firing table and the learner's diagnostics.
     static void localWindowToUtc(int localDow, int localStart, int localEnd, int offsetMin,
                                  int &utcDow, int &utcStart, int &utcEnd);
     int  getUtcFireSlotCount() const { return _utcFireSlotCount; }

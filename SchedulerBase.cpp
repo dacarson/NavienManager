@@ -281,7 +281,7 @@ bool SchedulerBase::appendUtcFireSlot(uint8_t utcDow,
 
 void SchedulerBase::localWindowToUtc(int localDow, int localStart, int localEnd, int offsetMin,
                                      int &utcDow, int &utcStart, int &utcEnd) {
-  if (localEnd <= localStart) localEnd = 1440;  // "until midnight", written as 00:00
+  if (localEnd == 0 && localStart > 0) localEnd = 1440;  // "until midnight", written as 00:00
   utcStart = localStart + offsetMin;
   utcEnd   = localEnd   + offsetMin;
   utcDow   = localDow;
