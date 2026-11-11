@@ -22,6 +22,7 @@ SOFTWARE.
 
 #include "NavienLearner.h"
 #include "LearnerPlatform.h"
+#include "SchedulerBase.h"
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -720,26 +721,12 @@ void NavienLearner::recomputeWrite() {
                 continue;
             }
 
-            // Convert local time → UTC.
-            int utc_start = local_start + offsetMin;
-            int utc_end   = local_end   + offsetMin;
-            int utc_dow   = local_dow;
-
-            if (utc_start < 0) {
-                utc_start += 1440;
-                utc_end   += 1440;
-                utc_dow    = (local_dow + 6) % 7;
-                if (utc_end > 1430) utc_end = 1430;
-            } else if (utc_start >= 1440) {
-                utc_start -= 1440;
-                utc_end   -= 1440;
-                utc_dow    = (local_dow + 1) % 7;
-                if (utc_end < 0)    utc_end = 0;
-                if (utc_end > 1430) utc_end = 1430;
-            } else if (utc_end > 1430) {
-                // Slot straddles UTC midnight — cap end at 23:50.
-                utc_end = 1430;
-            }
+            // Convert local time → UTC with the scheduler's own conversion, so
+            // this diagnostic view cannot drift from what fires. utc_end past
+            // 1440 means the slot runs into the next UTC day (two fire slots).
+            int utc_dow, utc_start, utc_end;
+            SchedulerBase::localWindowToUtc(local_dow, local_start, local_end, offsetMin,
+                                            utc_dow, utc_start, utc_end);
 
             allLocal[nLocal++] = {
                 utc_dow, (uint16_t)utc_start, (uint16_t)utc_end,
@@ -754,20 +741,25 @@ void NavienLearner::recomputeWrite() {
         LEARNER_WEBLOG("LEARNER recompute: local peaks: Sun=%d Mon=%d Tue=%d Wed=%d Thu=%d Fri=%d Sat=%d (offsetMin=%d)",
                _weekSlotCount[0], _weekSlotCount[1], _weekSlotCount[2], _weekSlotCount[3],
                _weekSlotCount[4], _weekSlotCount[5], _weekSlotCount[6], offsetMin);
-        int udc[7] = {};
-        for (int i = 0; i < nLocal; i++) udc[allLocal[i].utc_dow]++;
-        LEARNER_WEBLOG("LEARNER recompute: UTC slots post-local-prune: Sun=%d Mon=%d Tue=%d Wed=%d Thu=%d Fri=%d Sat=%d",
+        int udc[7] = {};  // fire slots per UTC day; a split window counts on both
+        for (int i = 0; i < nLocal; i++) {
+            udc[allLocal[i].utc_dow]++;
+            if (allLocal[i].utc_end_min > 1440) udc[(allLocal[i].utc_dow + 1) % 7]++;
+        }
+        LEARNER_WEBLOG("LEARNER recompute: UTC fire slots post-local-prune: Sun=%d Mon=%d Tue=%d Wed=%d Thu=%d Fri=%d Sat=%d",
                udc[0], udc[1], udc[2], udc[3], udc[4], udc[5], udc[6]);
         for (int d = 0; d < 7; d++) {
             for (int i = 0; i < nLocal; i++) {
                 if (allLocal[i].local_dow != d) continue;
-                LEARNER_WEBLOG("  local_%s %02d:%02d-%02d:%02d -> utc_%s %02d:%02d-%02d:%02d score=%.3f",
+                LEARNER_WEBLOG("  local_%s %02d:%02d-%02d:%02d -> utc_%s %02d:%02d-%02d:%02d%s score=%.3f",
                        dn[d],
                        allLocal[i].local_start_min / 60, allLocal[i].local_start_min % 60,
                        allLocal[i].local_end_min   / 60, allLocal[i].local_end_min   % 60,
                        dn[allLocal[i].utc_dow],
                        allLocal[i].utc_start_min / 60, allLocal[i].utc_start_min % 60,
-                       allLocal[i].utc_end_min   / 60, allLocal[i].utc_end_min   % 60,
+                       (allLocal[i].utc_end_min > 1440 ? allLocal[i].utc_end_min - 1440 : allLocal[i].utc_end_min) / 60,
+                       allLocal[i].utc_end_min % 60,
+                       allLocal[i].utc_end_min > 1440 ? " (+1 day)" : "",
                        allLocal[i].score);
             }
         }

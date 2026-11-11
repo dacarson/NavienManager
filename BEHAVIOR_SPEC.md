@@ -218,7 +218,7 @@ The Eve app's thermostat schedule is parsed and stored in NVS (`SAVED_DATA` / `P
 
 | Store | Role | Limit |
 |---|---|---|
-| `_utcFireSlots[]` | Authoritative for `getNextState()` / `initializeCurrentState()` when `_utcFireSlotCount > 0` | Up to 21 (3 × 7 local days), each with `utcDow` + UTC start/end + score |
+| `_utcFireSlots[]` | Authoritative for `getNextState()` / `initializeCurrentState()` when `_utcFireSlotCount > 0` | Up to 42 (two per local window: 3 × 7 local days, and a window that crosses UTC midnight is stored as two slots), each with `utcDow` + UTC start/end + score |
 | `weekSchedule[7][3]` | Derived from `prog_send_data` for legacy paths and Eve sync | ≤3 slots per UTC `tm_wday` index |
 | `prog_send_data.weekSchedule` | Eve wire / NVS blob; local slots converted via `convertEveSlotsToUTC()` | 3 per local day in Eve UI |
 
@@ -555,7 +555,7 @@ The endpoint is started in `setupScheduleEndpoint()` (called from `onWifiConnect
 
 Processing order:
 
-1. **Clear and fill `_utcFireSlots[]`** — For each local slot (or UTC slot if `utc:true`), convert to `(utcDow, utc start/end)` and append (max 21). This is the full learned schedule; no cap per UTC calendar day.
+1. **Clear and fill `_utcFireSlots[]`** — For each local slot (or UTC slot if `utc:true`), convert to `(utcDow, utc start/end)` with `SchedulerBase::localWindowToUtc()` and append with `appendUtcFireWindow()`: one slot, or two when the window crosses UTC midnight (`utcDow` start–24:00 and the next UTC day 00:00–end), appended together or not at all (max 42). This is the full learned schedule; no cap per UTC calendar day. `getNextStateFromFireSlots()` takes the earliest slot edge of each UTC day, so table order does not matter.
 2. **Load `prog_send_data.weekSchedule`** — Write local (or UTC) times into the Eve Monday-first wire layout (≤3 slots per local day in JSON).
 3. **`convertEveSlotsToUTC(offsetMin, sanitize=false)`** when times are local — Produces UTC `prog_send_data` for Eve/NVS. `convertSlotsOffset()` may keep only three windows per UTC storage index (display/wire constraint); firing does **not** rely on this step retaining every window.
 4. **`updateSchedulerWeekSchedule()`** — Copies into `weekSchedule[7][3]` (≤3 per UTC index).
@@ -734,7 +734,7 @@ If the device is powered off over New Year and boots in January, the mismatch is
 
 **Local-day bucket view:** The `RECOMPUTING` state iterates local days 0..6. For each local day `L`, it builds a `Bucket[288]` scratch array by mapping local minute `lb × 5` to UTC via `utc_min = local_min + offsetMin` (wrapping day on midnight crossing) and copying from `buckets[utc_dow][utc_b]`. `PeakFinder::findDaySlots` is called on this local view; returned slots are in local minutes-since-midnight. `offsetMin` is snapshotted once in `RECOMPUTE_LOAD` so all seven days use the same offset.
 
-**Pruning — local-day only:** `PeakFinder` returns all NMS-surviving candidates without a per-day cap. `recomputeWrite()` sorts each local day's slots by score descending, keeps the top `MAX_SLOTS_PER_DAY` (3) — or fewer under the Low-Activity Guard below — and emits JSON with **local** times indexed by **local** day (same as `navien_schedule_learner.py`). There is **no** learner prune keyed on UTC day. `setWeekScheduleFromJSON()` loads all three slots per **local** day into Eve `prog_send_data`, builds `_utcFireSlots[]` (up to 21 UTC windows — one per local slot), then `convertEveSlotsToUTC(offsetMin)` for Eve/`weekSchedule[]` display (≤3 per UTC index). **`getNextState()` / `initializeCurrentState()` use `_utcFireSlots` when populated**, so all three local Tuesday windows can fire even if four UTC projections share a calendar index. Eve's UI limit remains three comfort periods per **local** day. When local-day pruning drops a candidate, firmware emits a `WEBLOG` entry.
+**Pruning — local-day only:** `PeakFinder` returns all NMS-surviving candidates without a per-day cap. `recomputeWrite()` sorts each local day's slots by score descending, keeps the top `MAX_SLOTS_PER_DAY` (3) — or fewer under the Low-Activity Guard below — and emits JSON with **local** times indexed by **local** day (same as `navien_schedule_learner.py`). There is **no** learner prune keyed on UTC day. `setWeekScheduleFromJSON()` loads all three slots per **local** day into Eve `prog_send_data`, builds `_utcFireSlots[]` (up to 42 UTC windows — one per local slot, two when it crosses UTC midnight), then `convertEveSlotsToUTC(offsetMin)` for Eve/`weekSchedule[]` display (≤3 per UTC index). **`getNextState()` / `initializeCurrentState()` use `_utcFireSlots` when populated**, so all three local Tuesday windows can fire even if four UTC projections share a calendar index. Eve's UI limit remains three comfort periods per **local** day. When local-day pruning drops a candidate, firmware emits a `WEBLOG` entry.
 
 ### Low-Activity Guard
 

@@ -555,28 +555,6 @@ void FakeGatoScheduler::updateCurrentScheduleIfNeeded(bool force) {
   }
 }
 
-// Map local wall time to UTC storage indices (UTC = local + offsetMin).
-static void localMinutesToUtc(int localDow, int localStart, int localEnd, int offsetMin,
-                              int &utcDow, int &utcStart, int &utcEnd) {
-  utcStart = localStart + offsetMin;
-  utcEnd   = localEnd   + offsetMin;
-  utcDow   = localDow;
-  if (utcStart < 0) {
-    utcStart += 1440;
-    utcEnd   += 1440;
-    utcDow    = (localDow + 6) % 7;
-    if (utcEnd > 1430) utcEnd = 1430;
-  } else if (utcStart >= 1440) {
-    utcStart -= 1440;
-    utcEnd   -= 1440;
-    utcDow    = (localDow + 1) % 7;
-    if (utcEnd < 0)    utcEnd = 0;
-    if (utcEnd > 1430) utcEnd = 1430;
-  } else if (utcEnd > 1430) {
-    utcEnd = 1430;
-  }
-}
-
 bool FakeGatoScheduler::setWeekScheduleFromJSON(const String &json) {
   JsonDocument doc;
   DeserializationError err = deserializeJson(doc, json);
@@ -643,6 +621,15 @@ bool FakeGatoScheduler::setWeekScheduleFromJSON(const String &json) {
           Serial.printf("setWeekScheduleFromJSON: invalid time in day %d slot %d\n", dow, slotIdx);
           return false;
         }
+        // The only end at or before the start that means anything is 00:00
+        // with a later start ("until midnight"); an equal pair or an inverted
+        // window is a bad slot, like an hour over 23.
+        int localStart = sh * 60 + sm;
+        int localEnd   = eh * 60 + em;
+        if (localEnd <= localStart && !(localEnd == 0 && localStart > 0)) {
+          Serial.printf("setWeekScheduleFromJSON: slot ends at or before it starts in day %d slot %d\n", dow, slotIdx);
+          return false;
+        }
         float score = slot["score"].is<float>()
                           ? slot["score"].as<float>()
                           : SLOT_SCORE_UNKNOWN;
@@ -652,23 +639,18 @@ bool FakeGatoScheduler::setWeekScheduleFromJSON(const String &json) {
         _slotScoreUtc[eveDay][slotIdx] = score;
         slotIdx++;
 
-        // Full firing table: all local-day slots (up to 21), no UTC-day cap.
-        int localStart = sh * 60 + sm;
-        int localEnd   = eh * 60 + em;
+        // Full firing table: all local-day slots, no UTC-day cap. A window
+        // that crosses UTC midnight (for a Pacific user, any window spanning
+        // 16:00 PST / 17:00 PDT) used to be clamped at 23:50 UTC and lose its
+        // tail; appendUtcFireWindow() stores it as two slots instead. Legacy
+        // "utc":true input goes through the same conversion with offset 0.
         int utcDow, utcStart, utcEnd;
-        if (isUtc) {
-          utcDow   = dow;
-          utcStart = localStart;
-          utcEnd   = localEnd;
-        } else {
-          localMinutesToUtc(dow, localStart, localEnd, learnedOffset,
-                            utcDow, utcStart, utcEnd);
-        }
-        if (!appendUtcFireSlot((uint8_t)utcDow,
-                               (uint8_t)(utcStart / 60), (uint8_t)(utcStart % 60),
-                               (uint8_t)(utcEnd   / 60), (uint8_t)(utcEnd   % 60),
-                               score)) {
-          WEBLOG("SCHEDULER setWeekScheduleFromJSON: UTC fire slot table full — extra slot dropped");
+        SchedulerBase::localWindowToUtc(dow, localStart, localEnd, isUtc ? 0 : learnedOffset,
+                                        utcDow, utcStart, utcEnd);
+        // The slot was validated above, so the only way this fails is a full table.
+        if (!appendUtcFireWindow(utcDow, utcStart, utcEnd, score)) {
+          WEBLOG("SCHEDULER setWeekScheduleFromJSON: UTC fire slot table full (%d of %d) — day %d slot %d %02d:%02d-%02d:%02d dropped",
+                 getUtcFireSlotCount(), MAX_UTC_FIRE_SLOTS, dow, slotIdx - 1, sh, sm, eh, em);
         }
       }
     }
